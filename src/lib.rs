@@ -21,9 +21,9 @@ pub use tools::respond;
 
 pub use clients::{
     apply_sampling_defaults, format_tool, get_sampling_defaults, AnthropicClient,
-    AnyLlmProxyClient, ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, LlamafileClient,
-    OllamaClient, SamplingParams, StreamChunk, TextResponse, TokenUsage, ToolCall,
-    MODEL_SAMPLING_DEFAULTS,
+    AnyLlmProxyClient, AnyLlmRuntimeClient, ApiFormat, ChunkStream, ChunkType, LLMClient,
+    LLMResponse, LlamafileClient, OllamaClient, SamplingParams, StreamChunk, TextResponse,
+    TokenUsage, ToolCall, MODEL_SAMPLING_DEFAULTS,
 };
 pub use context::{
     default_context_warning, detect_hardware, CompactEvent, CompactStrategy, ContextManager,

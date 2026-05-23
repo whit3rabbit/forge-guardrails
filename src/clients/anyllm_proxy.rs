@@ -1,11 +1,12 @@
-//! Client adapter for a running anyllm_proxy sidecar.
+//! Client adapters for anyllm provider routing.
 //!
 //! This keeps forge-guardrails responsible for interception, validation, and
 //! nudging while delegating provider routing and upstream compatibility to
-//! anyllm_proxy over its OpenAI-compatible chat completions endpoint.
+//! anyllm through either its in-process runtime or a running sidecar.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use anyllm_proxy::runtime::{ChatCompletionRuntime, ChatCompletionService};
 use futures_util::StreamExt;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
@@ -27,7 +28,7 @@ pub struct AnyLlmProxyClient {
     api_key: Option<String>,
     timeout_secs: f64,
     context_length: Option<i64>,
-    last_usage: Mutex<Option<TokenUsage>>,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
 }
 
 impl AnyLlmProxyClient {
@@ -38,7 +39,7 @@ impl AnyLlmProxyClient {
             api_key: None,
             timeout_secs: 300.0,
             context_length: None,
-            last_usage: Mutex::new(None),
+            last_usage: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -69,30 +70,7 @@ impl AnyLlmProxyClient {
         sampling: Option<SamplingParams>,
         stream: bool,
     ) -> Value {
-        let mut body = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": stream,
-        });
-
-        if let Some(tool_specs) = tools {
-            if !tool_specs.is_empty() {
-                let formatted: Vec<Value> = tool_specs.iter().map(format_tool).collect();
-                if let Some(obj) = body.as_object_mut() {
-                    obj.insert("tools".to_string(), Value::Array(formatted));
-                }
-            }
-        }
-
-        if let Some(params) = sampling {
-            if let Some(obj) = body.as_object_mut() {
-                for (key, value) in params {
-                    obj.insert(key, value);
-                }
-            }
-        }
-
-        body
+        build_openai_request_body(&self.model, messages, tools, sampling, stream)
     }
 
     async fn send_request(&self, body: Value) -> Result<reqwest::Response, BackendError> {
@@ -120,18 +98,7 @@ impl AnyLlmProxyClient {
     }
 
     fn record_usage(&self, usage: Option<&anyllm_translate::openai::ChatUsage>) {
-        let token_usage = usage
-            .map(|u| {
-                TokenUsage::new(
-                    u.prompt_tokens as i64,
-                    u.completion_tokens as i64,
-                    u.total_tokens as i64,
-                )
-            })
-            .unwrap_or_else(TokenUsage::empty);
-        if let Ok(mut guard) = self.last_usage.lock() {
-            *guard = Some(token_usage);
-        }
+        record_usage_cell(&self.last_usage, usage);
     }
 
     fn parse_response(
@@ -179,11 +146,164 @@ impl LLMClient for AnyLlmProxyClient {
             .send_request(body)
             .await
             .map_err(|e| StreamError::new(e.to_string()))?;
-        Ok(Box::pin(parse_openai_sse(resp)))
+        Ok(Box::pin(parse_openai_sse(resp, self.last_usage.clone())))
     }
 
     async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
         Ok(self.context_length)
+    }
+}
+
+/// LLM client that dispatches guarded OpenAI-format calls through
+/// `anyllm_proxy::runtime` without embedding anyllm's HTTP router.
+pub struct AnyLlmRuntimeClient {
+    model: String,
+    service: Arc<dyn ChatCompletionService>,
+    context_length: Option<i64>,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
+}
+
+impl AnyLlmRuntimeClient {
+    pub fn new(model: impl Into<String>, service: Arc<dyn ChatCompletionService>) -> Self {
+        Self {
+            model: model.into(),
+            service,
+            context_length: None,
+            last_usage: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn from_runtime(model: impl Into<String>, runtime: ChatCompletionRuntime) -> Self {
+        Self::new(model, Arc::new(runtime))
+    }
+
+    pub fn from_config(model: impl Into<String>, config: anyllm_proxy::config::Config) -> Self {
+        Self::from_runtime(model, ChatCompletionRuntime::from_config(config))
+    }
+
+    pub fn from_multi_config(
+        model: impl Into<String>,
+        config: anyllm_proxy::config::MultiConfig,
+    ) -> Self {
+        Self::from_runtime(model, ChatCompletionRuntime::from_multi_config(config))
+    }
+
+    pub fn with_context_length(mut self, tokens: i64) -> Self {
+        self.context_length = Some(tokens);
+        self
+    }
+
+    fn build_request(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        sampling: Option<SamplingParams>,
+        stream: bool,
+    ) -> Result<anyllm_translate::openai::ChatCompletionRequest, BackendError> {
+        let body = build_openai_request_body(&self.model, messages, tools, sampling, stream);
+        serde_json::from_value(body).map_err(|e| BackendError::new(400, e.to_string()))
+    }
+}
+
+impl LLMClient for AnyLlmRuntimeClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+
+    fn last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    async fn send(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, BackendError> {
+        let req = self.build_request(messages, tools, sampling, false)?;
+        let result = self
+            .service
+            .complete(req)
+            .await
+            .map_err(runtime_error_to_backend_error)?;
+        let usage = result.usage.as_ref().or(result.response.usage.as_ref());
+        record_usage_cell(&self.last_usage, usage);
+        Ok(parse_openai_response(result.response))
+    }
+
+    async fn send_stream(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, StreamError> {
+        let req = self
+            .build_request(messages, tools, sampling, true)
+            .map_err(|e| StreamError::new(e.to_string()))?;
+        let result = self
+            .service
+            .complete_stream(req)
+            .await
+            .map_err(|e| StreamError::new(runtime_error_to_backend_error(e).to_string()))?;
+        Ok(Box::pin(parse_openai_chunks(
+            result.chunks,
+            self.last_usage.clone(),
+        )))
+    }
+
+    async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+        Ok(self.context_length)
+    }
+}
+
+fn build_openai_request_body(
+    model: &str,
+    messages: Vec<Value>,
+    tools: Option<Vec<ToolSpec>>,
+    sampling: Option<SamplingParams>,
+    stream: bool,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    });
+
+    if let Some(tool_specs) = tools {
+        if !tool_specs.is_empty() {
+            let formatted: Vec<Value> = tool_specs.iter().map(format_tool).collect();
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("tools".to_string(), Value::Array(formatted));
+            }
+        }
+    }
+
+    if let Some(params) = sampling {
+        if let Some(obj) = body.as_object_mut() {
+            for (key, value) in params {
+                obj.insert(key, value);
+            }
+        }
+    }
+
+    body
+}
+
+fn record_usage_cell(
+    cell: &Arc<Mutex<Option<TokenUsage>>>,
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) {
+    let token_usage = usage
+        .map(|u| {
+            TokenUsage::new(
+                u.prompt_tokens as i64,
+                u.completion_tokens as i64,
+                u.total_tokens as i64,
+            )
+        })
+        .unwrap_or_else(TokenUsage::empty);
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some(token_usage);
     }
 }
 
@@ -255,6 +375,7 @@ fn parse_args_string(args: &str) -> IndexMap<String, Value> {
 
 fn parse_openai_sse(
     resp: reqwest::Response,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     let byte_stream = resp.bytes_stream();
     async_stream::stream! {
@@ -296,6 +417,8 @@ fn parse_openai_sse(
                     Err(_) => continue,
                 };
 
+                record_usage_cell(&last_usage, evt.usage.as_ref());
+
                 for choice in evt.choices {
                     if let Some(reasoning) = choice.delta.reasoning_content {
                         accumulated_reasoning.push_str(&reasoning);
@@ -327,14 +450,69 @@ fn parse_openai_sse(
                             }
                         }
                     }
-                    if choice.finish_reason.is_some() {
-                        let final_response = final_stream_response(
-                            &accumulated_text,
-                            &accumulated_reasoning,
-                            &accumulated_tools,
-                        );
-                        yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
-                        return;
+                }
+            }
+        }
+
+        let final_response = final_stream_response(
+            &accumulated_text,
+            &accumulated_reasoning,
+            &accumulated_tools,
+        );
+        yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
+    }
+}
+
+fn parse_openai_chunks(
+    chunks: anyllm_proxy::runtime::ChatCompletionChunkStream,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
+) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
+    async_stream::stream! {
+        let mut inner = chunks;
+        let mut accumulated_text = String::new();
+        let mut accumulated_reasoning = String::new();
+        let mut accumulated_tools: Vec<(String, String, String)> = Vec::new();
+
+        while let Some(chunk) = inner.next().await {
+            let evt = match chunk {
+                Ok(evt) => evt,
+                Err(e) => {
+                    yield Err(StreamError::new(e.to_string()));
+                    return;
+                }
+            };
+
+            record_usage_cell(&last_usage, evt.usage.as_ref());
+
+            for choice in evt.choices {
+                if let Some(reasoning) = choice.delta.reasoning_content {
+                    accumulated_reasoning.push_str(&reasoning);
+                }
+                if let Some(content) = choice.delta.content {
+                    accumulated_text.push_str(&content);
+                    yield Ok(StreamChunk::new(ChunkType::TextDelta).with_content(content));
+                }
+                if let Some(tool_calls) = choice.delta.tool_calls {
+                    for tc in tool_calls {
+                        let index = tc.index as usize;
+                        while accumulated_tools.len() <= index {
+                            accumulated_tools.push((String::new(), String::new(), String::new()));
+                        }
+                        if let Some(id) = tc.id {
+                            if !id.is_empty() {
+                                accumulated_tools[index].0 = id;
+                            }
+                        }
+                        if let Some(function) = tc.function {
+                            if let Some(name) = function.name {
+                                if !name.is_empty() {
+                                    accumulated_tools[index].1 = name;
+                                }
+                            }
+                            if let Some(args) = function.arguments {
+                                accumulated_tools[index].2.push_str(&args);
+                            }
+                        }
                     }
                 }
             }
@@ -347,6 +525,12 @@ fn parse_openai_sse(
         );
         yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
     }
+}
+
+fn runtime_error_to_backend_error(
+    error: anyllm_proxy::runtime::ChatCompletionError,
+) -> BackendError {
+    BackendError::new(error.status_code() as i64, error.to_string())
 }
 
 fn final_stream_response(

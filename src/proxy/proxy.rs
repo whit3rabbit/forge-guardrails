@@ -389,32 +389,20 @@ pub fn has_respond_tool(tools: &[Value]) -> bool {
 pub fn extract_sampling(body: &Value) -> Option<Map<String, Value>> {
     let mut map = Map::new();
     let recognized = [
-        "max_tokens",
-        "max_completion_tokens",
         "temperature",
         "top_p",
         "top_k",
         "min_p",
         "repeat_penalty",
         "presence_penalty",
-        "frequency_penalty",
         "seed",
-        "stop",
-        "response_format",
-        "reasoning_effort",
-        "parallel_tool_calls",
-        "user",
+        "chat_template_kwargs",
     ];
 
     for key in &recognized {
         if let Some(v) = body.get(key) {
             map.insert((*key).to_string(), v.clone());
         }
-    }
-
-    // Handle chat_template_kwargs as a nested object.
-    if let Some(kwargs) = body.get("chat_template_kwargs") {
-        map.insert("chat_template_kwargs".to_string(), kwargs.clone());
     }
 
     if map.is_empty() {
@@ -623,6 +611,15 @@ mod tests {
         let body = json!({"temperature": 0.5, "chat_template_kwargs": {"enable_thinking": true}});
         let sampling = extract_sampling(&body).unwrap();
         assert!(sampling.contains_key("chat_template_kwargs"));
+    }
+
+    #[test]
+    fn extract_sampling_ignores_openai_only_fields() {
+        let body = json!({"temperature": 0.5, "frequency_penalty": 1.0, "response_format": {"type": "json_object"}});
+        let sampling = extract_sampling(&body).unwrap();
+        assert!(sampling.contains_key("temperature"));
+        assert!(!sampling.contains_key("frequency_penalty"));
+        assert!(!sampling.contains_key("response_format"));
     }
 
     #[test]

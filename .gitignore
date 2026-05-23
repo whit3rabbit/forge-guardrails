@@ -33,3 +33,8 @@ Icon?
 .VolumeIcon.icns
 .com.apple.timemachine.donotpresent
 .apdisk
+
+# Local files
+repomix-output.xml
+.syntext/
+.synrepo/

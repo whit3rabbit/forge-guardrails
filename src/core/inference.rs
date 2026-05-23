@@ -5,7 +5,7 @@ use crate::clients::base::{ChunkType, LLMClient, LLMResponse, StreamChunk};
 use crate::context::manager::ContextManager;
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
-use crate::error::StreamError;
+use crate::error::{ForgeError, StreamError, ToolCallError};
 use crate::guardrails::{ErrorTracker, ResponseValidator};
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -88,8 +88,8 @@ pub type OnChunkFn = Box<dyn Fn(&StreamChunk) + Send + Sync>;
 ///
 /// Takes a mutable message list (compaction modifies in-place), an LLM client,
 /// context manager, response validator, error tracker, tool specs, and
-/// configuration. Returns InferenceResult on success, or None if max_attempts
-/// is exhausted.
+/// configuration. Returns InferenceResult on success, None if max_attempts
+/// is exhausted, or an error for backend, stream, or retry-budget failures.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_inference<C: LLMClient>(
     messages: &mut Vec<Message>,
@@ -105,10 +105,11 @@ pub async fn run_inference<C: LLMClient>(
     stream: bool,
     on_chunk: Option<&OnChunkFn>,
     sampling: Option<&serde_json::Map<String, Value>>,
-) -> Option<InferenceResult> {
+) -> Result<Option<InferenceResult>, ForgeError> {
     let mut new_messages: Vec<Message> = Vec::new();
     let mut attempts = 0;
-    let max = max_attempts.unwrap_or(i32::MAX);
+    let retry_limit = error_tracker.max_retries().saturating_add(1);
+    let max = std::cmp::min(retry_limit, max_attempts.unwrap_or(i32::MAX));
     let api_format = client.api_format().as_str();
     let tools_opt = if tool_specs.is_empty() {
         None
@@ -148,57 +149,30 @@ pub async fn run_inference<C: LLMClient>(
 
         // Send to LLM.
         let response = if stream {
-            match client
+            let mut stream = client
                 .send_stream(wire, tools_opt.clone(), sampling_owned)
                 .await
-            {
-                Ok(mut stream) => {
-                    let mut final_response: Option<LLMResponse> = None;
-                    while let Some(chunk_result) = stream.next().await {
-                        match chunk_result {
-                            Ok(chunk) => {
-                                if let Some(ref cb) = on_chunk {
-                                    cb(&chunk);
-                                }
-                                if chunk.chunk_type == ChunkType::Final {
-                                    final_response = chunk.response.clone();
-                                }
-                            }
-                            Err(_) => {
-                                final_response = None;
-                                break;
-                            }
-                        }
-                    }
-                    match final_response {
-                        Some(resp) => resp,
-                        None => {
-                            // Stream ended without final chunk.
-                            error_tracker.record_retry();
-                            let err_msg = Message::new(
-                                MessageRole::User,
-                                StreamError::default().to_string(),
-                                MessageMeta::new(MessageType::RetryNudge),
-                            );
-                            messages.push(err_msg.clone());
-                            new_messages.push(err_msg);
-                            continue;
-                        }
-                    }
+                .map_err(ForgeError::from)?;
+            let mut final_response: Option<LLMResponse> = None;
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = chunk_result.map_err(ForgeError::from)?;
+                if let Some(ref cb) = on_chunk {
+                    cb(&chunk);
                 }
-                Err(_) => {
-                    error_tracker.record_retry();
-                    continue;
+                if chunk.chunk_type == ChunkType::Final {
+                    final_response = chunk.response.clone();
                 }
             }
+            final_response.ok_or_else(|| {
+                ForgeError::Stream(StreamError::new(
+                    "Stream ended without FINAL chunk - the client adapter may be malformed or the connection was interrupted",
+                ))
+            })?
         } else {
-            match client.send(wire, tools_opt.clone(), sampling_owned).await {
-                Ok(resp) => resp,
-                Err(_) => {
-                    error_tracker.record_retry();
-                    continue;
-                }
-            }
+            client
+                .send(wire, tools_opt.clone(), sampling_owned)
+                .await
+                .map_err(ForgeError::from)?
         };
 
         // Sync token count: prefer real usage from client, fall back to heuristic.
@@ -215,7 +189,14 @@ pub async fn run_inference<C: LLMClient>(
             error_tracker.record_retry();
 
             if error_tracker.retries_exhausted() {
-                return None;
+                let raw = response_to_raw_string(&response).unwrap_or_default();
+                return Err(ForgeError::ToolCall(
+                    ToolCallError::new(format!(
+                        "Retries exhausted after {} consecutive failed attempts",
+                        error_tracker.max_retries()
+                    ))
+                    .with_raw_response(raw),
+                ));
             }
 
             // Emit retry messages based on response type.
@@ -257,12 +238,11 @@ pub async fn run_inference<C: LLMClient>(
                             messages.push(reasoning_msg.clone());
                             new_messages.push(reasoning_msg);
                         }
-                        let call_id = if let Some(ref id) = tc.id {
-                            id.clone()
-                        } else {
+                        let call_id = tc.id.clone().unwrap_or_else(|| {
+                            let id = format_tool_call_id(*tool_call_counter);
                             *tool_call_counter += 1;
-                            format_tool_call_id(*tool_call_counter)
-                        };
+                            id
+                        });
                         let info = ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), &call_id);
                         tool_call_infos.push(info);
                     }
@@ -297,61 +277,15 @@ pub async fn run_inference<C: LLMClient>(
         error_tracker.reset_retries();
         let tool_calls = validation.tool_calls.unwrap_or_default();
 
-        if tool_calls.is_empty() {
-            // Validated text response (should not happen normally but handle it).
-            return Some(InferenceResult {
-                response,
-                new_messages,
-                tool_call_counter: *tool_call_counter,
-                attempts,
-            });
-        }
-
-        // Build reasoning and tool call messages.
-        for tc in &tool_calls {
-            if let Some(ref reasoning) = tc.reasoning {
-                let reasoning_msg = Message::new(
-                    MessageRole::Assistant,
-                    reasoning.as_str(),
-                    MessageMeta::new(MessageType::Reasoning).with_step_index(step_index),
-                );
-                messages.push(reasoning_msg.clone());
-                new_messages.push(reasoning_msg);
-            }
-        }
-
-        let mut tool_calls = tool_calls;
-        let mut infos = Vec::new();
-        for tc in &mut tool_calls {
-            let cid = if let Some(ref id) = tc.id {
-                id.clone()
-            } else {
-                *tool_call_counter += 1;
-                format_tool_call_id(*tool_call_counter)
-            };
-            tc.id = Some(cid.clone());
-            infos.push(ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), cid));
-        }
-
-        let tool_call_msg = Message::new(
-            MessageRole::Assistant,
-            "",
-            MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
-        )
-        .with_tool_calls(infos);
-        messages.push(tool_call_msg.clone());
-        new_messages.push(tool_call_msg);
-
-        return Some(InferenceResult {
+        return Ok(Some(InferenceResult {
             response: LLMResponse::ToolCalls(tool_calls),
             new_messages,
             tool_call_counter: *tool_call_counter,
             attempts,
-        });
+        }));
     }
 
-    // Max attempts exhausted.
-    None
+    Ok(None)
 }
 
 /// Rough token estimate from a response for syncing the context manager.

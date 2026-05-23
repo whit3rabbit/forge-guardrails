@@ -118,7 +118,18 @@ pub fn apply_sampling(
 
     if let Some(sp) = per_call {
         for (k, v) in sp {
-            params.insert(k.clone(), v.clone());
+            if matches!(
+                k.as_str(),
+                "temperature"
+                    | "top_p"
+                    | "top_k"
+                    | "min_p"
+                    | "repeat_penalty"
+                    | "presence_penalty"
+                    | "seed"
+            ) {
+                params.insert(k.clone(), v.clone());
+            }
         }
     }
 
@@ -126,7 +137,9 @@ pub fn apply_sampling(
         for (k, v) in params {
             obj.insert(k, v);
         }
-        if let Some(ref kwargs) = instance_chat_kwargs {
+        if let Some(kwargs) = per_call.and_then(|sp| sp.get("chat_template_kwargs")) {
+            obj.insert("chat_template_kwargs".into(), kwargs.clone());
+        } else if let Some(ref kwargs) = instance_chat_kwargs {
             obj.insert("chat_template_kwargs".into(), json!(kwargs));
         }
     }
@@ -188,7 +201,7 @@ pub fn extract_reasoning_tags(content: &str) -> String {
 
 fn extract_bracket_think(content: &str) -> String {
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?s)\[think\](.*?)\[/think\]").expect("regex")
+        regex_lite::Regex::new(r"(?is)\[think\](.*?)\[/think\]").expect("regex")
     });
     RE.captures_iter(content)
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
@@ -199,7 +212,7 @@ fn extract_bracket_think(content: &str) -> String {
 
 fn extract_xml_think(content: &str) -> String {
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?s)<think(?:\s[^>]*)?>(.*?)</think\s*>").expect("regex")
+        regex_lite::Regex::new(r"(?is)<think(?:\s[^>]*)?>(.*?)</think\s*>").expect("regex")
     });
     RE.captures_iter(content)
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
@@ -211,10 +224,10 @@ fn extract_xml_think(content: &str) -> String {
 /// Strip reasoning tags from text content.
 pub fn strip_reasoning_tags(content: &str) -> String {
     static BRACKET: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?s)\[think\].*?\[/think\]\s*").expect("regex")
+        regex_lite::Regex::new(r"(?is)\[think\].*?\[/think\]\s*").expect("regex")
     });
     static XML: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?s)<think(?:\s[^>]*)?>.*?</think\s*>\s*").expect("regex")
+        regex_lite::Regex::new(r"(?is)<think(?:\s[^>]*)?>.*?</think\s*>\s*").expect("regex")
     });
     let text = BRACKET.replace_all(content, "").to_string();
     XML.replace_all(&text, "").to_string()
@@ -339,6 +352,14 @@ mod tests {
     fn extract_bracket_think() {
         assert_eq!(
             extract_reasoning_tags("Some [think]deep[/think] text"),
+            "deep"
+        );
+    }
+
+    #[test]
+    fn extract_bracket_think_uppercase() {
+        assert_eq!(
+            extract_reasoning_tags("Some [THINK]deep[/THINK] text"),
             "deep"
         );
     }

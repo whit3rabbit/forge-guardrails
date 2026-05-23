@@ -196,8 +196,8 @@ pub async fn handle_chat_completions<C: LLMClient>(
     drop(ctx);
 
     let response = match inference_result {
-        Some(result) => result.response,
-        None => {
+        Ok(Some(result)) => result.response,
+        Ok(None) | Err(crate::error::ForgeError::ToolCall(_)) => {
             // Retries exhausted — return last text response or empty.
             let last_text = internal_msgs
                 .iter()
@@ -207,6 +207,7 @@ pub async fn handle_chat_completions<C: LLMClient>(
                 .unwrap_or_default();
             LLMResponse::Text(TextResponse::new(last_text))
         }
+        Err(err) => return Err(err.to_string()),
     };
 
     let handler_result = match response {

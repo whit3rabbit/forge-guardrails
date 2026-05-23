@@ -10,7 +10,7 @@ It provides foundation types and runtime pieces for guarded LLM-agent workflows:
 - prompt rescue and tool-call parsing
 - context tracking and compaction
 - backend adapters for Anthropic, Llamafile, and Ollama
-- anyllm sidecar client support for provider routing
+- anyllm runtime and sidecar client support for provider routing
 - Anthropic/OpenAI request translation through `anyllm_translate`
 - OpenAI-compatible proxy/server surfaces
 
@@ -29,10 +29,11 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 - `src/prompts/` - nudge prompts and JSON/tool-call rescue parsing
 - `src/context/` - context manager, token budget, compaction callbacks, compaction strategies, hardware helpers
 - `src/clients/base.rs` - `LLMClient`, streaming trait, OpenAI tool formatting
-- `src/clients/` - Anthropic, Llamafile, Ollama, and anyllm sidecar clients
+- `src/clients/` - Anthropic, Llamafile, Ollama, and anyllm runtime/sidecar clients
 - `src/server.rs` - backend lifecycle and context-budget resolution
 - `src/proxy/` - HTTP/OpenAI-compatible and Anthropic Messages proxy handling
 - `tests/` - integration coverage for core behavior
+- `tests/parity/` - Python-generated golden fixtures for Rust parity tests
 
 ## Commands
 
@@ -45,6 +46,15 @@ cargo test
 ```
 
 Use `cargo fmt --all` to apply formatting.
+
+Regenerate Python parity fixtures after intentional reference-behavior changes:
+
+```bash
+uv run --project forge python tests/parity/generate_fixtures.py
+```
+
+The generated `tests/parity/fixtures/python_golden.json` file is checked in.
+Normal Rust test runs consume that JSON and should not invoke Python.
 
 ## Agent rules
 
@@ -60,9 +70,11 @@ Preserve these invariants:
 - Per-call sampling overrides must not mutate client defaults.
 - Retry and rescue logic should nudge the model without hiding hard failures.
 - Server/proxy code must clearly separate passthrough behavior from guarded workflow behavior.
-- Forge owns interception and nudging. Do not route guarded traffic through `anyllm_proxy` handlers before forge validates it.
+- Forge owns interception and nudging. Do not route guarded traffic through `anyllm_proxy` HTTP handlers before forge validates it.
 - Use `anyllm_translate` for Anthropic/OpenAI compatibility instead of hand-rolling request or response translation.
-- Treat `anyllm_proxy` as a sidecar upstream through `AnyLlmProxyClient`, unless an explicit hook preserving forge guardrails exists.
+- Use `AnyLlmRuntimeClient` for in-process anyllm routing when possible. It must use `anyllm_proxy::runtime::ChatCompletionService`, not the axum router.
+- Use `AnyLlmProxyClient` for a separate sidecar process when admin UI, cache, metrics, batch, or standalone provider config is needed.
+- Keep anyllm server-side tool execution out of Forge's guarded path. Forge must inspect tool calls before anything executes them.
 
 When changing workflow execution:
 1. Add or update tests first.
@@ -78,6 +90,11 @@ When changing backend clients:
 1. Avoid shared assumptions between Anthropic, Ollama, and OpenAI-compatible backends.
 2. Mock HTTP responses in tests.
 3. Assert request bodies, not only parsed outputs.
+
+When changing Python parity behavior:
+1. Update or add a fixture case in `tests/parity/generate_fixtures.py`.
+2. Regenerate `tests/parity/fixtures/python_golden.json`.
+3. Assert the Rust behavior against the generated fixture in `tests/parity_tests.rs`.
 
 ## Current status notes
 

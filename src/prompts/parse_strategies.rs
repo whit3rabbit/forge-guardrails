@@ -9,34 +9,14 @@ use serde_json::Value;
 
 /// Strip thinking-block tags (bracket-style and Unicode-style).
 pub fn strip_think_tags(text: &str) -> String {
-    let mut result = text.to_string();
-    // Bracket-style: [THINK]...[/THINK]
-    loop {
-        let start = result.find("[THINK]");
-        let end = result.find("[/THINK]");
-        match (start, end) {
-            (Some(s), Some(e)) if s < e => {
-                result = format!("{}{}", &result[..s], &result[e + "[/THINK]".len()..]);
-            }
-            _ => break,
-        }
-    }
-    // Unicode-style with zero-width spaces
-    loop {
-        let start = result.find("\u{200B}[THINK]");
-        let end = result.find("[/THINK]\u{200B}");
-        match (start, end) {
-            (Some(s), Some(e)) if s < e => {
-                result = format!(
-                    "{}{}",
-                    &result[..s],
-                    &result[e + "[/THINK]\u{200B}".len()..]
-                );
-            }
-            _ => break,
-        }
-    }
-    result
+    static BRACKET: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(r"(?is)\u{200B}?\[think\].*?\[/think\]\u{200B}?\s*").expect("regex")
+    });
+    static XML: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
+        regex_lite::Regex::new(r"(?is)<think(?:\s[^>]*)?>.*?</think\s*>\s*").expect("regex")
+    });
+    let text = BRACKET.replace_all(text, "").to_string();
+    XML.replace_all(&text, "").to_string()
 }
 
 /// Extract the trailing sequence of word characters from a string.

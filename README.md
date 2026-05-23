@@ -186,11 +186,25 @@ The HTTP server also accepts Anthropic Messages API requests at
 run through the same guarded OpenAI-compatible handler used by
 `POST /v1/chat/completions`, then translated back to Anthropic responses.
 
-### 4. anyllm sidecar integration
+### 4. anyllm runtime and sidecar integration
 
-Use `AnyLlmProxyClient` when you want forge-guardrails to keep ownership of
-interception, validation, and nudging while delegating provider setup and
-routing to a running `anyllm_proxy` sidecar.
+Use `AnyLlmRuntimeClient` when you want in-process anyllm provider routing
+without handing HTTP route ownership to anyllm. Build it from
+`anyllm_proxy::runtime::ChatCompletionRuntime`, `Config`, or `MultiConfig`;
+Forge still owns interception, validation, nudging, and tool-call execution.
+
+```rust
+use forge_guardrails::AnyLlmRuntimeClient;
+
+let client = AnyLlmRuntimeClient::from_multi_config(
+    "gpt-4o-mini",
+    anyllm_proxy::config::MultiConfig::load().multi_config,
+)
+.with_context_length(128_000);
+```
+
+Use `AnyLlmProxyClient` when you prefer to run `anyllm_proxy` as a separate
+sidecar process.
 
 ```rust
 use forge_guardrails::AnyLlmProxyClient;
@@ -206,6 +220,12 @@ admin UI, cache, metrics, and batch surfaces. Point `AnyLlmProxyClient` at the
 sidecar. Clients can call forge-guardrails through either OpenAI
 `/v1/chat/completions` or Anthropic `/v1/messages`; forge still performs the
 guarded interception before any request reaches the sidecar.
+
+Do not embed anyllm's HTTP router for guarded traffic. That path owns request
+handling and can bypass Forge guardrails. The runtime client uses anyllm's
+OpenAI-native Chat Completions runtime, so provider-specific OpenAI-compatible
+fields such as `seed`, `top_k`, `min_p`, `repeat_penalty`, and
+`chat_template_kwargs` are preserved for compatible backends.
 
 ## Testing scope
 

@@ -1,0 +1,310 @@
+{
+  "cases": {
+    "anthropic_conversion_fallback_id": {
+      "expected": {
+        "messages": [
+          {
+            "content": [
+              {
+                "id": "toolu_0",
+                "input": {},
+                "name": "run",
+                "type": "tool_use"
+              }
+            ],
+            "role": "assistant"
+          },
+          {
+            "content": [
+              {
+                "content": "Not executed.",
+                "is_error": true,
+                "tool_use_id": "toolu_0",
+                "type": "tool_result"
+              },
+              {
+                "text": "next",
+                "type": "text"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "input": [
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "run"
+              }
+            }
+          ]
+        },
+        {
+          "content": "next",
+          "role": "user"
+        }
+      ]
+    },
+    "anthropic_conversion_unpaired": {
+      "expected": {
+        "messages": [
+          {
+            "content": "First",
+            "role": "user"
+          },
+          {
+            "content": [
+              {
+                "id": "abc",
+                "input": {},
+                "name": "run",
+                "type": "tool_use"
+              }
+            ],
+            "role": "assistant"
+          },
+          {
+            "content": [
+              {
+                "content": "Not executed.",
+                "is_error": true,
+                "tool_use_id": "abc",
+                "type": "tool_result"
+              },
+              {
+                "text": "next",
+                "type": "text"
+              }
+            ],
+            "role": "user"
+          }
+        ],
+        "system": "Sys"
+      },
+      "input": [
+        {
+          "content": "Sys",
+          "role": "system"
+        },
+        {
+          "content": "First",
+          "role": "user"
+        },
+        {
+          "content": "",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{}",
+                "name": "run"
+              },
+              "id": "abc"
+            }
+          ]
+        },
+        {
+          "content": "next",
+          "role": "user"
+        }
+      ]
+    },
+    "backend_error_propagation": {
+      "expected": {
+        "attempts": 1,
+        "error_type": "BackendError",
+        "message": "Backend returned 503: backend down"
+      },
+      "input": {
+        "body": "backend down",
+        "status_code": 503
+      }
+    },
+    "inference_retry_budget": {
+      "expected": {
+        "attempts": 3,
+        "error_type": "ToolCallError",
+        "messages": [
+          {
+            "content": "start",
+            "role": "user",
+            "type": "user_input"
+          },
+          {
+            "content": "bad 1",
+            "role": "assistant",
+            "type": "text_response"
+          },
+          {
+            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
+            "role": "user",
+            "type": "retry_nudge"
+          },
+          {
+            "content": "bad 2",
+            "role": "assistant",
+            "type": "text_response"
+          },
+          {
+            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
+            "role": "user",
+            "type": "retry_nudge"
+          }
+        ],
+        "raw_response": "bad 3"
+      },
+      "input": {
+        "max_attempts": 10,
+        "max_retries": 2
+      }
+    },
+    "llamafile_reasoning_extraction": {
+      "expected": {
+        "cleaned": "{\"tool\":\"run\",\"args\":{}}",
+        "tool_calls": [
+          {
+            "args": {},
+            "reasoning": "reason",
+            "tool": "run"
+          }
+        ]
+      },
+      "input": {
+        "content": "<think>reason</think>{\"tool\":\"run\",\"args\":{}}",
+        "tools": [
+          "run"
+        ]
+      }
+    },
+    "ollama_thinking": {
+      "expected": {
+        "tool_calls": [
+          {
+            "args": {
+              "x": 1
+            },
+            "reasoning": "reason",
+            "tool": "run"
+          }
+        ]
+      },
+      "input": {
+        "message": {
+          "content": "visible",
+          "thinking": "reason",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": {
+                  "x": 1
+                },
+                "name": "run"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "proxy_respond_stripping": {
+      "expected": {
+        "content": "done",
+        "finish_reason": "stop"
+      },
+      "input": {
+        "messages": [
+          {
+            "content": "hi",
+            "role": "user"
+          }
+        ],
+        "model": "test-model",
+        "stream": false,
+        "tools": [
+          {
+            "function": {
+              "description": "Search",
+              "name": "search",
+              "parameters": {
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "function"
+          }
+        ]
+      }
+    },
+    "proxy_sampling_fields": {
+      "expected": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        },
+        "min_p": 0.05,
+        "presence_penalty": 0.3,
+        "repeat_penalty": 1.1,
+        "seed": 42,
+        "temperature": 0.2,
+        "top_k": 40,
+        "top_p": 0.9
+      },
+      "input": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        },
+        "frequency_penalty": 1.0,
+        "min_p": 0.05,
+        "presence_penalty": 0.3,
+        "repeat_penalty": 1.1,
+        "response_format": {
+          "type": "json_object"
+        },
+        "seed": 42,
+        "temperature": 0.2,
+        "top_k": 40,
+        "top_p": 0.9
+      }
+    },
+    "streaming_without_final": {
+      "expected": {
+        "attempts": 1,
+        "error_type": "StreamError",
+        "message": "Stream ended without FINAL chunk \u2014 the client adapter may be malformed or the connection was interrupted"
+      },
+      "input": {
+        "chunks": [
+          "partial"
+        ]
+      }
+    },
+    "tool_call_id_generation": {
+      "expected": {
+        "call_ids": [
+          "call_000000000",
+          "call_000000001"
+        ],
+        "next_counter": 2
+      },
+      "input": {
+        "starting_counter": 0,
+        "tools": [
+          "first",
+          "second"
+        ]
+      }
+    }
+  },
+  "metadata": {
+    "command": "uv run --project forge python tests/parity/generate_fixtures.py",
+    "generator": "tests/parity/generate_fixtures.py",
+    "source": "forge Python reference submodule"
+  }
+}

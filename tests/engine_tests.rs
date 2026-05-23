@@ -8,7 +8,7 @@ use forge_guardrails::{
     respond::{respond_spec, respond_tool},
     workflow::{IntoToolCallable, TerminalToolInput, ToolDef},
     ApiFormat, ChunkStream, ContextManager, ForgeError, LLMClient, LLMResponse, Message,
-    MessageMeta, MessageRole, MessageType, OnMessageFn, SamplingParams, ToolCallInfo,
+    MessageMeta, MessageRole, MessageType, OnMessageFn, SamplingParams, StreamChunk, ToolCallInfo,
     ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
 };
 use indexmap::IndexMap;
@@ -25,6 +25,96 @@ use tokio::sync::{watch, Mutex};
 struct MockClient {
     responses: Vec<LLMResponse>,
     call_count: AtomicI32,
+}
+
+struct BackendErrorClient {
+    call_count: AtomicI32,
+}
+
+impl BackendErrorClient {
+    fn new() -> Self {
+        Self {
+            call_count: AtomicI32::new(0),
+        }
+    }
+}
+
+impl LLMClient for BackendErrorClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+
+    async fn send(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, forge_guardrails::BackendError> {
+        self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+        Err(forge_guardrails::BackendError::new(503, "backend down"))
+    }
+
+    async fn send_stream(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, forge_guardrails::StreamError> {
+        Err(forge_guardrails::StreamError::new("not used"))
+    }
+
+    async fn get_context_length(
+        &self,
+    ) -> Result<Option<i64>, forge_guardrails::ContextDiscoveryError> {
+        Ok(Some(4096))
+    }
+}
+
+struct NoFinalStreamClient {
+    call_count: AtomicI32,
+}
+
+impl NoFinalStreamClient {
+    fn new() -> Self {
+        Self {
+            call_count: AtomicI32::new(0),
+        }
+    }
+}
+
+impl LLMClient for NoFinalStreamClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+
+    async fn send(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, forge_guardrails::BackendError> {
+        Ok(make_text_response("not used"))
+    }
+
+    async fn send_stream(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, forge_guardrails::StreamError> {
+        self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+        let chunks = futures_util::stream::iter(vec![Ok(StreamChunk::new(
+            forge_guardrails::ChunkType::TextDelta,
+        )
+        .with_content("partial"))]);
+        Ok(Box::pin(chunks))
+    }
+
+    async fn get_context_length(
+        &self,
+    ) -> Result<Option<i64>, forge_guardrails::ContextDiscoveryError> {
+        Ok(Some(4096))
+    }
 }
 
 impl MockClient {
@@ -607,6 +697,128 @@ async fn ts012_retries_consume_iterations() {
     assert!(result.is_err(), "Should fail with max iterations");
 }
 
+#[tokio::test]
+async fn inference_retry_budget_raises_tool_call_error() {
+    let client = MockClient::new(vec![
+        make_text_response("bad 1"),
+        make_text_response("bad 2"),
+        make_text_response("bad 3"),
+        make_text_response("bad 4"),
+    ]);
+    let mut messages = vec![Message::new(
+        MessageRole::User,
+        "start",
+        MessageMeta::new(MessageType::UserInput),
+    )];
+    let mut ctx = ContextManager::new(Box::new(NoCompact), 4096, None, None, None);
+    let validator = forge_guardrails::guardrails::ResponseValidator::new(
+        vec!["respond".to_string()],
+        false,
+        None,
+    );
+    let mut tracker = forge_guardrails::ErrorTracker::new(2, 2);
+    let mut counter = 0;
+    let tools = vec![respond_spec()];
+
+    let result = forge_guardrails::run_inference(
+        &mut messages,
+        &client,
+        &mut ctx,
+        &validator,
+        &mut tracker,
+        &tools,
+        &mut counter,
+        0,
+        "",
+        Some(10),
+        false,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, Err(ForgeError::ToolCall(_))));
+    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn inference_backend_error_is_not_retried() {
+    let client = BackendErrorClient::new();
+    let mut messages = vec![Message::new(
+        MessageRole::User,
+        "start",
+        MessageMeta::new(MessageType::UserInput),
+    )];
+    let mut ctx = ContextManager::new(Box::new(NoCompact), 4096, None, None, None);
+    let validator = forge_guardrails::guardrails::ResponseValidator::new(
+        vec!["respond".to_string()],
+        false,
+        None,
+    );
+    let mut tracker = forge_guardrails::ErrorTracker::new(2, 2);
+    let mut counter = 0;
+    let tools = vec![respond_spec()];
+
+    let result = forge_guardrails::run_inference(
+        &mut messages,
+        &client,
+        &mut ctx,
+        &validator,
+        &mut tracker,
+        &tools,
+        &mut counter,
+        0,
+        "",
+        Some(10),
+        false,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, Err(ForgeError::Backend(_))));
+    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn inference_stream_without_final_is_stream_error() {
+    let client = NoFinalStreamClient::new();
+    let mut messages = vec![Message::new(
+        MessageRole::User,
+        "start",
+        MessageMeta::new(MessageType::UserInput),
+    )];
+    let mut ctx = ContextManager::new(Box::new(NoCompact), 4096, None, None, None);
+    let validator = forge_guardrails::guardrails::ResponseValidator::new(
+        vec!["respond".to_string()],
+        false,
+        None,
+    );
+    let mut tracker = forge_guardrails::ErrorTracker::new(2, 2);
+    let mut counter = 0;
+    let tools = vec![respond_spec()];
+
+    let result = forge_guardrails::run_inference(
+        &mut messages,
+        &client,
+        &mut ctx,
+        &validator,
+        &mut tracker,
+        &tools,
+        &mut counter,
+        0,
+        "",
+        Some(10),
+        true,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, Err(ForgeError::Stream(_))));
+    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 1);
+}
+
 // ---------------------------------------------------------------------------
 // TS-013: Escalating step nudge tiers
 // ---------------------------------------------------------------------------
@@ -891,6 +1103,7 @@ async fn test_protocol_pairing_invariant() {
 
     assert_eq!(tool_calls.len(), 2);
     assert_eq!(tool_results.len(), 2);
+    assert_eq!(tool_calls[0], "call_000000000");
     assert_eq!(tool_calls, tool_results, "Each assistant tool call ID must match the corresponding tool result tool_call_id exactly.");
 }
 

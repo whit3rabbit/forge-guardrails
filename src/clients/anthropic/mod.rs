@@ -6,7 +6,7 @@
 
 pub(crate) mod convert;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -26,7 +26,7 @@ pub struct AnthropicClient {
     timeout_secs: f64,
     max_retries: i64,
     tool_choice: Option<String>,
-    last_usage: Mutex<Option<TokenUsage>>,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
 }
 
 impl AnthropicClient {
@@ -39,7 +39,7 @@ impl AnthropicClient {
             timeout_secs: 300.0,
             max_retries: 3,
             tool_choice: None,
-            last_usage: Mutex::new(None),
+            last_usage: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -211,6 +211,7 @@ impl LLMClient for AnthropicClient {
         //   message_stop         → emit FINAL chunk built from accumulated state
         //   message_delta        → capture usage (input/output_tokens)
         let byte_stream = resp.bytes_stream();
+        let last_usage = self.last_usage.clone();
         let stream = async_stream::stream! {
             use futures_util::StreamExt;
             // SSE line buffer for partial-line data across byte chunks.
@@ -308,6 +309,9 @@ impl LLMClient for AnthropicClient {
                                 }
                             }
                             "message_stop" => {
+                                if let Ok(mut guard) = last_usage.lock() {
+                                    *guard = Some(TokenUsage::new(usage_input, usage_output, usage_input + usage_output));
+                                }
                                 // Build the final LLMResponse matching Python's message_stop handler.
                                 let final_resp = if !tool_blocks.is_empty() {
                                     let reasoning = if accumulated_text.is_empty() { None } else { Some(accumulated_text.clone()) };
@@ -465,18 +469,20 @@ mod tests {
 
     #[test]
     fn convert_messages_unpaired_tool_use() {
-        let msgs = vec![json!({
-            "role": "assistant", "content": "",
-            "tool_calls": [{"id": "abc", "function": {"name": "run", "arguments": "{}"}}],
-        })];
+        let msgs = vec![
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "abc", "function": {"name": "run", "arguments": "{}"}}],
+            }),
+            json!({"role": "user", "content": "next"}),
+        ];
         let (_, conv) = convert::convert_messages(&msgs);
-        let has_synthetic = conv.iter().any(|m| {
-            m.get("content")
-                .and_then(|c| c.as_array())
-                .map(|b| b.iter().any(|bl| bl["is_error"] == true))
-                .unwrap_or(false)
-        });
-        assert!(has_synthetic);
+        let blocks = conv[1]["content"].as_array().expect("array");
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["tool_use_id"], "abc");
+        assert_eq!(blocks[0]["is_error"], true);
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "next");
     }
 
     #[test]
@@ -487,7 +493,9 @@ mod tests {
         ];
         let (_, conv) = convert::convert_messages(&msgs);
         assert_eq!(conv.len(), 1);
-        assert_eq!(conv[0]["content"], "First\nSecond");
+        let blocks = conv[0]["content"].as_array().expect("array");
+        assert_eq!(blocks[0]["text"], "First");
+        assert_eq!(blocks[1]["text"], "Second");
     }
 
     #[test]
@@ -519,6 +527,36 @@ mod tests {
             .find(|b| b["type"] == "tool_use")
             .expect("found");
         assert_eq!(tu["input"]["path"], "/tmp/a");
+    }
+
+    #[test]
+    fn convert_messages_missing_tool_id_uses_non_empty_fallback() {
+        let msgs = vec![
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"function": {"name": "run", "arguments": "{}"}}],
+            }),
+            json!({"role": "user", "content": "next"}),
+        ];
+        let (_, conv) = convert::convert_messages(&msgs);
+        let tool_use = conv[0]["content"].as_array().expect("array")[0].clone();
+        assert_eq!(tool_use["id"], "toolu_0");
+        let synthetic = conv[1]["content"].as_array().expect("array")[0].clone();
+        assert_eq!(synthetic["tool_use_id"], "toolu_0");
+    }
+
+    #[test]
+    fn convert_messages_merges_array_and_text_same_role() {
+        let msgs = vec![
+            json!({"role": "tool", "tool_call_id": "c1", "content": "result"}),
+            json!({"role": "user", "content": "follow up"}),
+        ];
+        let (_, conv) = convert::convert_messages(&msgs);
+        assert_eq!(conv.len(), 1);
+        let blocks = conv[0]["content"].as_array().expect("array");
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "follow up");
     }
 
     #[test]

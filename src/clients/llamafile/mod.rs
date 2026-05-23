@@ -8,7 +8,7 @@ pub(crate) mod helpers;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
@@ -47,7 +47,7 @@ pub struct LlamafileClient {
     think: bool,
     cache_prompt: bool,
     slot_id: Option<i64>,
-    last_usage: Mutex<HashMap<i64, TokenUsage>>,
+    last_usage: Arc<Mutex<HashMap<i64, TokenUsage>>>,
     recommended_sampling: bool,
     sampling_defaults: Option<Map<String, Value>>,
 }
@@ -71,7 +71,7 @@ impl LlamafileClient {
             think: true,
             cache_prompt: true,
             slot_id: None,
-            last_usage: Mutex::new(HashMap::new()),
+            last_usage: Arc::new(Mutex::new(HashMap::new())),
             recommended_sampling: false,
             sampling_defaults: None,
         }
@@ -242,15 +242,20 @@ impl LlamafileClient {
             .and_then(|c| c.as_str())
             .unwrap_or("");
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        let calls = extract_tool_call(content, &names);
+        let (reasoning, cleaned) = if self.think {
+            helpers::extract_think_tags(content)
+        } else {
+            (String::new(), content.to_string())
+        };
+        let mut calls = extract_tool_call(&cleaned, &names);
         if calls.is_empty() {
-            let cleaned = if self.think {
-                helpers::strip_reasoning_tags(content)
-            } else {
-                content.to_string()
-            };
             LLMResponse::Text(TextResponse::new(cleaned))
         } else {
+            if let Some(first) = calls.first_mut() {
+                if !reasoning.is_empty() {
+                    *first = first.clone().with_reasoning(reasoning);
+                }
+            }
             LLMResponse::ToolCalls(calls)
         }
     }
@@ -544,7 +549,14 @@ impl LLMClient for LlamafileClient {
             .iter()
             .map(|t| t.name.clone())
             .collect();
-        let stream = parse_openai_sse(resp, think, tool_names, mode == LlamafileMode::Prompt);
+        let stream = parse_openai_sse(
+            resp,
+            think,
+            tool_names,
+            mode == LlamafileMode::Prompt,
+            self.last_usage.clone(),
+            self.slot_id.unwrap_or(0),
+        );
         Ok(Box::pin(stream))
     }
 
@@ -578,6 +590,8 @@ fn parse_openai_sse(
     think: bool,
     tool_names: Vec<String>,
     is_prompt: bool,
+    last_usage: Arc<Mutex<HashMap<i64, TokenUsage>>>,
+    slot_id: i64,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     let byte_stream = resp.bytes_stream();
     let stream = async_stream::stream! {
@@ -589,6 +603,7 @@ fn parse_openai_sse(
         let mut acc_reasoning = String::new();
         // tool_call_parts: index -> (name, accumulated_args_json, optional_id)
         let mut acc_tools: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut final_response: Option<LLMResponse> = None;
 
         loop {
             // Drain buffered lines first
@@ -596,18 +611,31 @@ fn parse_openai_sse(
                 let raw = line_buf[..newline_pos].trim_end_matches('\r').to_string();
                 line_buf = line_buf[newline_pos + 1..].to_string();
                 let Some(data) = raw.strip_prefix("data: ") else { continue; };
-                if data == "[DONE]" { break; }
+                if data == "[DONE]" {
+                    match final_response.take() {
+                        Some(response) => {
+                            yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
+                        }
+                        None => {
+                            yield Err(StreamError::default());
+                        }
+                    }
+                    return;
+                }
                 let evt: Value = match serde_json::from_str(data) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                if let Some(usage) = evt.get("usage") {
+                    let prompt = usage.get("prompt_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
+                    let completion = usage.get("completion_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
+                    if let Ok(mut guard) = last_usage.lock() {
+                        guard.insert(slot_id, TokenUsage::new(prompt, completion, prompt + completion));
+                    }
+                }
 
                 // Usage-only chunk (no choices) — Python: self._record_usage(chunk)
-                // We emit a zero-content TextDelta so the runner can update tokens.
-                // (Actual usage propagation happens via the Final chunk's metadata.)
                 if !evt.get("choices").is_some_and(|c| c.as_array().map(|a| !a.is_empty()).unwrap_or(false)) {
-                    // Record usage in the stream context if available
-                    // (we don't have access to self here; usage is returned via Final)
                     continue;
                 }
 
@@ -728,8 +756,7 @@ fn parse_openai_sse(
                         };
                         LLMResponse::Text(TextResponse::new(cleaned))
                     };
-                    yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
-                    return;
+                    final_response = Some(response);
                 }
             }
 
@@ -738,14 +765,14 @@ fn parse_openai_sse(
                 Some(Ok(bytes)) => line_buf.push_str(&String::from_utf8_lossy(&bytes)),
                 Some(Err(e)) => { yield Err(StreamError::new(e.to_string())); return; }
                 None => {
-                    // Stream ended without finish_reason — yield what we have
-                    let cleaned = if think {
-                        helpers::strip_reasoning_tags(&acc_content)
-                    } else {
-                        acc_content.clone()
-                    };
-                    yield Ok(StreamChunk::new(ChunkType::Final)
-                        .with_response(LLMResponse::Text(TextResponse::new(cleaned))));
+                    match final_response.take() {
+                        Some(response) => {
+                            yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
+                        }
+                        None => {
+                            yield Err(StreamError::default());
+                        }
+                    }
                     return;
                 }
             }
@@ -949,6 +976,23 @@ mod tests {
         match c.parse_native_response(&resp) {
             LLMResponse::Text(tr) => assert_eq!(tr.content, ""),
             _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn parse_prompt_strips_think_tags_and_attaches_reasoning() {
+        let c = LlamafileClient::new(Path::new("t.gguf")).with_mode("prompt");
+        let tool =
+            ToolSpec::from_json_schema("run", "Run", &json!({"type": "object", "properties": {}}))
+                .expect("ok");
+        let resp = json!({"choices": [{"message": {"content": "<think >reason</think >{\"tool\":\"run\",\"args\":{}}"}}]});
+
+        match c.parse_prompt_response(&resp, &[tool]) {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].reasoning, Some("reason".to_string()));
+            }
+            _ => panic!("expected tool calls"),
         }
     }
 

@@ -4,7 +4,7 @@
 //! calling. Messages pass through to Ollama unchanged. Supports think mode
 //! with auto-detection from model name keywords and fallback on unsupported.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
@@ -37,7 +37,7 @@ pub struct OllamaClient {
     think: Mutex<bool>,
     think_resolved: Mutex<bool>,
     num_ctx: Mutex<Option<i64>>,
-    last_usage: Mutex<Option<TokenUsage>>,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
     sampling_defaults: Option<Map<String, Value>>,
 }
 
@@ -58,7 +58,7 @@ impl OllamaClient {
             think: Mutex::new(think),
             think_resolved: Mutex::new(think_resolved),
             num_ctx: Mutex::new(None),
-            last_usage: Mutex::new(None),
+            last_usage: Arc::new(Mutex::new(None)),
             sampling_defaults: None,
         }
     }
@@ -167,7 +167,18 @@ impl OllamaClient {
         }
         if let Some(sp) = sampling {
             for (k, v) in sp {
-                opts.insert(k.clone(), v.clone());
+                if matches!(
+                    k.as_str(),
+                    "temperature"
+                        | "top_p"
+                        | "top_k"
+                        | "min_p"
+                        | "repeat_penalty"
+                        | "presence_penalty"
+                        | "seed"
+                ) {
+                    opts.insert(k.clone(), v.clone());
+                }
             }
         }
         if let Ok(guard) = self.num_ctx.lock() {
@@ -182,13 +193,17 @@ impl OllamaClient {
         if !think {
             return None;
         }
-        if let Some(r) = response.get("reasoning").and_then(|r| r.as_str()) {
+        let message = response.get("message");
+        if let Some(r) = message
+            .and_then(|m| m.get("thinking"))
+            .and_then(|r| r.as_str())
+        {
             if !r.is_empty() {
                 return Some(r.to_string());
             }
         }
-        response
-            .get("content")
+        message
+            .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -488,7 +503,11 @@ impl LLMClient for OllamaClient {
                             .send()
                             .await
                             .map_err(|e| StreamError::new(e.to_string()))?;
-                        return Ok(Box::pin(parse_ollama_ndjson(rr, false)));
+                        return Ok(Box::pin(parse_ollama_ndjson(
+                            rr,
+                            false,
+                            self.last_usage.clone(),
+                        )));
                     } else {
                         return Err(StreamError::new(format!(
                             "Thinking mode not supported for model '{}'",
@@ -515,7 +534,11 @@ impl LLMClient for OllamaClient {
                 *g = true;
             }
         }
-        Ok(Box::pin(parse_ollama_ndjson(resp, think)))
+        Ok(Box::pin(parse_ollama_ndjson(
+            resp,
+            think,
+            self.last_usage.clone(),
+        )))
     }
 
     async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
@@ -530,23 +553,22 @@ impl LLMClient for OllamaClient {
 fn parse_ollama_ndjson(
     resp: reqwest::Response,
     think: bool,
+    last_usage: Arc<Mutex<Option<TokenUsage>>>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     let byte_stream = resp.bytes_stream();
     let stream = async_stream::stream! {
         use futures_util::StreamExt;
         let mut inner = Box::pin(byte_stream);
+        let mut line_buf = String::new();
         let mut pending_tc: Option<Vec<Value>> = None;
         let mut acc_content = String::new();
         let mut acc_thinking = String::new();
         loop {
-            let chunk = match inner.next().await {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => { yield Err(StreamError::new(e.to_string())); return; }
-                None => return,
-            };
-            for line in String::from_utf8_lossy(&chunk).lines() {
+            while let Some(newline_pos) = line_buf.find('\n') {
+                let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
+                line_buf = line_buf[newline_pos + 1..].to_string();
                 if line.trim().is_empty() { continue; }
-                let obj: Value = match serde_json::from_str(line) {
+                let obj: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
@@ -566,7 +588,15 @@ fn parse_ollama_ndjson(
                     }
                 }
                 if done {
-                    let response_val = json!({"content": acc_content.clone(), "reasoning": if acc_thinking.is_empty() { Value::Null } else { json!(acc_thinking) }});
+                    let prompt = obj.get("prompt_eval_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let completion = obj.get("eval_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if let Ok(mut guard) = last_usage.lock() {
+                        *guard = Some(TokenUsage::new(prompt, completion, prompt + completion));
+                    }
+                    let response_val = json!({"message": {
+                        "content": acc_content.clone(),
+                        "thinking": if acc_thinking.is_empty() { Value::Null } else { json!(acc_thinking) },
+                    }});
                     let reasoning = OllamaClient::resolve_reasoning(think, &response_val);
                     let final_resp = if let Some(tcs) = pending_tc.take() {
                         let mut calls = Vec::new();
@@ -592,6 +622,16 @@ fn parse_ollama_ndjson(
                     };
                     yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_resp));
                     return;
+                }
+            }
+            match inner.next().await {
+                Some(Ok(b)) => line_buf.push_str(&String::from_utf8_lossy(&b)),
+                Some(Err(e)) => { yield Err(StreamError::new(e.to_string())); return; }
+                None => {
+                    if line_buf.trim().is_empty() {
+                        return;
+                    }
+                    line_buf.push('\n');
                 }
             }
         }
@@ -720,26 +760,34 @@ mod tests {
 
     // --- Reasoning ---
     #[test]
-    fn reasoning_server_preferred() {
+    fn reasoning_message_thinking_preferred() {
         assert_eq!(
-            OllamaClient::resolve_reasoning(true, &json!({"reasoning": "s", "content": "c"})),
+            OllamaClient::resolve_reasoning(
+                true,
+                &json!({"message": {"thinking": "s", "content": "c"}})
+            ),
             Some("s".into())
         );
     }
     #[test]
     fn reasoning_content_fallback() {
         assert_eq!(
-            OllamaClient::resolve_reasoning(true, &json!({"content": "c"})),
+            OllamaClient::resolve_reasoning(true, &json!({"message": {"content": "c"}})),
             Some("c".into())
         );
     }
     #[test]
     fn reasoning_disabled() {
-        assert!(OllamaClient::resolve_reasoning(false, &json!({"reasoning": "s"})).is_none());
+        assert!(
+            OllamaClient::resolve_reasoning(false, &json!({"message": {"thinking": "s"}}))
+                .is_none()
+        );
     }
     #[test]
     fn reasoning_empty() {
-        assert!(OllamaClient::resolve_reasoning(true, &json!({"content": ""})).is_none());
+        assert!(
+            OllamaClient::resolve_reasoning(true, &json!({"message": {"content": ""}})).is_none()
+        );
     }
 
     // --- Response parsing ---
@@ -897,7 +945,7 @@ mod tests {
     #[test]
     fn reasoning_first_tool_call() {
         let c = OllamaClient::new("llama3").with_think(Some(true));
-        let r = json!({"reasoning": "thinking", "message": {"content": "", "tool_calls": [
+        let r = json!({"message": {"thinking": "thinking", "content": "", "tool_calls": [
             {"function": {"name": "run", "arguments": {}}}
         ]}});
         match c.parse_send_response(&r, true) {

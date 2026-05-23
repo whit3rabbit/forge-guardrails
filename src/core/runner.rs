@@ -8,7 +8,7 @@ use super::message::{Message, MessageMeta, MessageRole, MessageType};
 use super::tool_spec::ToolSpec;
 use super::workflow::Workflow;
 use crate::clients::base::LLMClient;
-use crate::clients::base::LLMResponse;
+use crate::clients::base::{LLMResponse, ToolCall};
 use crate::context::manager::ContextManager;
 use crate::error::{
     ForgeError, MaxIterationsError, StepEnforcementError, ToolCallError, WorkflowCancelledError,
@@ -246,7 +246,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 self.on_chunk.as_ref().map(|f| f.as_ref()),
                 None,
             )
-            .await;
+            .await?;
 
             drop(ctx);
 
@@ -265,12 +265,30 @@ impl<C: LLMClient> WorkflowRunner<C> {
             for msg in &result.new_messages {
                 self.fire_message(msg);
             }
+            tool_call_counter = result.tool_call_counter;
+
+            if let LLMResponse::Text(ref text) = result.response {
+                let text_msg = Message::new(
+                    MessageRole::Assistant,
+                    &text.content,
+                    MessageMeta::new(MessageType::TextResponse).with_step_index(iteration as i64),
+                );
+                self.fire_message(&text_msg);
+                messages.push(text_msg);
+                continue;
+            }
 
             // Guardrails check.
             let check = guardrails.check(&result.response);
             match check.action {
                 GuardAction::Execute => {
                     let calls = check.tool_calls.expect("execute requires tool_calls");
+                    let calls = self.emit_assistant_tool_calls(
+                        calls,
+                        &mut messages,
+                        &mut tool_call_counter,
+                        iteration as i64,
+                    );
                     let result_val = self
                         .execute_tool_batch(
                             &calls,
@@ -294,7 +312,13 @@ impl<C: LLMClient> WorkflowRunner<C> {
                     let nudge = check.nudge.expect("step_blocked requires nudge");
 
                     if let LLMResponse::ToolCalls(ref calls) = result.response {
-                        for tc in calls {
+                        let calls = self.emit_assistant_tool_calls(
+                            calls.clone(),
+                            &mut messages,
+                            &mut tool_call_counter,
+                            iteration as i64,
+                        );
+                        for tc in &calls {
                             let call_id = tc.id.clone().unwrap_or_default();
                             let prefix = if nudge.kind == "prerequisite" {
                                 "[PrerequisiteError]"
@@ -366,8 +390,9 @@ impl<C: LLMClient> WorkflowRunner<C> {
             let call_id = if let Some(ref id) = tc.id {
                 id.clone()
             } else {
+                let id = inference::format_tool_call_id(*tool_call_counter);
                 *tool_call_counter += 1;
-                inference::format_tool_call_id(*tool_call_counter)
+                id
             };
 
             let callable = match workflow.get_callable(&tc.tool) {
@@ -459,6 +484,51 @@ impl<C: LLMClient> WorkflowRunner<C> {
         }
 
         Ok(None)
+    }
+
+    /// Record the assistant's successful tool-call turn after guardrail checks.
+    fn emit_assistant_tool_calls(
+        &self,
+        mut calls: Vec<ToolCall>,
+        messages: &mut Vec<Message>,
+        tool_call_counter: &mut i64,
+        step_index: i64,
+    ) -> Vec<ToolCall> {
+        if let Some(reasoning) = calls.first().and_then(|tc| tc.reasoning.as_ref()) {
+            let reasoning_msg = Message::new(
+                MessageRole::Assistant,
+                reasoning.as_str(),
+                MessageMeta::new(MessageType::Reasoning).with_step_index(step_index),
+            );
+            self.fire_message(&reasoning_msg);
+            messages.push(reasoning_msg);
+        }
+
+        let mut infos = Vec::new();
+        for tc in &mut calls {
+            let call_id = tc.id.clone().unwrap_or_else(|| {
+                let id = inference::format_tool_call_id(*tool_call_counter);
+                *tool_call_counter += 1;
+                id
+            });
+            tc.id = Some(call_id.clone());
+            infos.push(crate::core::message::ToolCallInfo::new(
+                &tc.tool,
+                Some(tc.args.clone()),
+                call_id,
+            ));
+        }
+
+        let tool_call_msg = Message::new(
+            MessageRole::Assistant,
+            "",
+            MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
+        )
+        .with_tool_calls(infos);
+        self.fire_message(&tool_call_msg);
+        messages.push(tool_call_msg);
+
+        calls
     }
 
     fn fire_message(&self, msg: &Message) {

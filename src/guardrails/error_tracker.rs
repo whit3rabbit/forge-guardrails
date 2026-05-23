@@ -56,4 +56,8 @@ impl ErrorTracker {
     pub fn consecutive_tool_errors(&self) -> i32 {
         self.consecutive_tool_errors
     }
+
+    pub fn max_retries(&self) -> i32 {
+        self.max_retries
+    }
 }

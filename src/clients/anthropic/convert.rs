@@ -29,6 +29,7 @@ pub fn convert_tools(tools: &[ToolSpec]) -> Vec<Value> {
 pub fn convert_messages(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
     let mut system = None;
     let mut converted = Vec::new();
+    let mut pending_tool_use_ids: Vec<String> = Vec::new();
 
     for msg in messages {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
@@ -61,12 +62,18 @@ pub fn convert_messages(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
                     Some(v @ Value::Object(_)) => v.clone(),
                     _ => Value::Object(Map::new()),
                 };
+                let fallback_id = format!("toolu_{}", converted.len());
                 blocks.push(json!({
                     "type": "tool_use",
-                    "id": id,
+                    "id": if id.is_empty() { fallback_id.as_str() } else { id },
                     "name": name,
                     "input": input,
                 }));
+                pending_tool_use_ids.push(if id.is_empty() {
+                    fallback_id
+                } else {
+                    id.to_string()
+                });
             }
             converted.push(json!({"role": "assistant", "content": blocks}));
             continue;
@@ -76,7 +83,8 @@ pub fn convert_messages(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
             let tool_call_id = msg
                 .get("tool_call_id")
                 .and_then(|i| i.as_str())
-                .unwrap_or("");
+                .unwrap_or("unknown");
+            pending_tool_use_ids.retain(|id| id != tool_call_id);
             converted.push(json!({
                 "role": "user",
                 "content": [{
@@ -88,10 +96,26 @@ pub fn convert_messages(messages: &[Value]) -> (Option<Value>, Vec<Value>) {
             continue;
         }
 
+        if role == "user" && !pending_tool_use_ids.is_empty() {
+            let mut blocks: Vec<Value> = pending_tool_use_ids
+                .drain(..)
+                .map(|id| {
+                    json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": "Not executed.",
+                        "is_error": true,
+                    })
+                })
+                .collect();
+            blocks.extend(content_to_blocks(&content));
+            converted.push(json!({"role": "user", "content": blocks}));
+            continue;
+        }
+
         converted.push(json!({"role": role, "content": content}));
     }
 
-    inject_synthetic_tool_results(&mut converted);
     merge_consecutive_roles(&mut converted);
     (system, converted)
 }
@@ -203,101 +227,38 @@ pub fn build_request_body(
     (system, body)
 }
 
-/// Inject synthetic error tool_results for unpaired tool_use blocks.
-fn inject_synthetic_tool_results(messages: &mut Vec<Value>) {
-    let (used_ids, tool_use_ids): (Vec<String>, Vec<String>) = {
-        let mut used: Vec<String> = Vec::new();
-        let mut tool_uses: Vec<String> = Vec::new();
-        for msg in messages.iter() {
-            if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
-                for block in blocks {
-                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    match block_type {
-                        "tool_result" => {
-                            if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
-                                used.push(id.to_string());
-                            }
-                        }
-                        "tool_use" => {
-                            if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
-                                tool_uses.push(id.to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        (used, tool_uses)
-    };
-
-    let unpaired_ids: Vec<String> = tool_use_ids
-        .into_iter()
-        .filter(|id| !used_ids.contains(id))
-        .collect();
-
-    for id in unpaired_ids {
-        messages.push(json!({
-            "role": "user",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": id,
-                "content": "Error: tool result not provided",
-                "is_error": true,
-            }],
-        }));
-    }
-}
-
 /// Merge consecutive same-role messages for Anthropic API compatibility.
 fn merge_consecutive_roles(messages: &mut Vec<Value>) {
     if messages.len() <= 1 {
         return;
     }
     let mut merged: Vec<Value> = Vec::new();
-    let mut i = 0;
-    while i < messages.len() {
-        let current = &messages[i];
-        let current_role = current.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        let has_array_content = current
-            .get("content")
-            .map(|c| c.is_array())
-            .unwrap_or(false);
-
-        if has_array_content || i + 1 >= messages.len() {
-            merged.push(current.clone());
-            i += 1;
-            continue;
-        }
-
-        let mut group: Vec<Value> = vec![current.clone()];
-        let mut j = i + 1;
-        while j < messages.len() {
-            let next = &messages[j];
-            let next_role = next.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            let next_has_array = next.get("content").map(|c| c.is_array()).unwrap_or(false);
-            if next_role == current_role && !next_has_array {
-                group.push(next.clone());
-                j += 1;
-            } else {
-                break;
+    for msg in messages.iter() {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        if let Some(last) = merged.last_mut() {
+            let last_role = last.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if last_role == role {
+                let mut blocks = content_to_blocks(last.get("content").unwrap_or(&Value::Null));
+                blocks.extend(content_to_blocks(
+                    msg.get("content").unwrap_or(&Value::Null),
+                ));
+                if let Some(obj) = last.as_object_mut() {
+                    obj.insert("content".to_string(), Value::Array(blocks));
+                }
+                continue;
             }
         }
 
-        if group.len() == 1 {
-            merged.push(group.into_iter().next().expect("one"));
-        } else {
-            let texts: Vec<String> = group
-                .iter()
-                .filter_map(|m| {
-                    m.get("content")
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
-                })
-                .collect();
-            merged.push(json!({"role": current_role, "content": texts.join("\n")}));
-        }
-        i = j;
+        merged.push(msg.clone());
     }
     *messages = merged;
+}
+
+fn content_to_blocks(content: &Value) -> Vec<Value> {
+    match content {
+        Value::Array(blocks) => blocks.clone(),
+        Value::String(text) => vec![json!({"type": "text", "text": text})],
+        Value::Null => Vec::new(),
+        other => vec![json!({"type": "text", "text": other.to_string()})],
+    }
 }

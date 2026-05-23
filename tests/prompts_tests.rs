@@ -227,6 +227,14 @@ fn rescue_unicode_think_tag() {
 }
 
 #[test]
+fn rescue_lowercase_xml_think_tag() {
+    let text = "<think >reason</think >{\"tool\": \"search\", \"args\": {\"query\": \"test\"}}";
+    let result = rescue_tool_call(text, &["search"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].tool, "search");
+}
+
+#[test]
 fn rescue_rehearsal_unknown_tool() {
     let text = "hack[ARGS]{\"query\": \"test\"}";
     let result = rescue_tool_call(text, &["search"]);
