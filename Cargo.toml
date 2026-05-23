@@ -1,0 +1,24 @@
+[package]
+name = "forge-guardrails"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Foundation types for an LLM-agent workflow framework"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+indexmap = { version = "2", features = ["serde"] }
+log = "0.4"
+futures-core = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+async-trait = "0.1"
+futures-util = "0.3"
+regex-lite = "0.1"
+async-stream = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+mockito = "1"

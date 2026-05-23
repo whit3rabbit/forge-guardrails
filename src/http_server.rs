@@ -1,0 +1,440 @@
+//! Lightweight HTTP server with OpenAI-compatible endpoints.
+//!
+//! Provides /health, /v1/models, /v1/chat/completions, and CORS preflight.
+//! Supports optional request serialization via a single-worker queue for
+//! single-GPU environments.
+
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+use tokio::sync::Mutex;
+
+use crate::client::LLMClient;
+use crate::context::ContextManager;
+use crate::handler::{self, HandlerResult};
+
+/// Maximum request body size (16 MB).
+const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
+/// HTTP server configuration for the OpenAI-compatible proxy.
+pub struct HTTPServer {
+    /// Host to bind.
+    pub host: String,
+    /// Port to bind.
+    pub port: u16,
+    /// Whether to serialize requests (single-worker queue).
+    pub serialize_requests: bool,
+    /// Maximum retries for tool-call validation.
+    pub max_retries: i32,
+    /// Whether rescue parsing is enabled.
+    pub rescue_enabled: bool,
+    /// The model name reported in responses.
+    pub model_name: String,
+    /// Mutex for request serialization.
+    request_mutex: Mutex<()>,
+}
+
+impl HTTPServer {
+    pub fn new(
+        host: &str,
+        port: u16,
+        serialize_requests: bool,
+        max_retries: i32,
+        rescue_enabled: bool,
+        model_name: &str,
+    ) -> Self {
+        Self {
+            host: host.to_string(),
+            port,
+            serialize_requests,
+            max_retries,
+            rescue_enabled,
+            model_name: model_name.to_string(),
+            request_mutex: Mutex::new(()),
+        }
+    }
+
+    /// Handle an incoming HTTP request.
+    ///
+    /// Returns (status_code, content_type, headers, body_string).
+    pub async fn handle_request<C: LLMClient>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        client: &Arc<C>,
+        context_manager: &Arc<Mutex<ContextManager>>,
+    ) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
+        let headers = Self::cors_headers();
+        match (method, path) {
+            ("GET", "/health") => {
+                let resp = json!({"status": "ok"});
+                (200, "application/json", headers, resp.to_string())
+            }
+
+            ("GET", "/v1/models") => {
+                let resp = json!({
+                    "object": "list",
+                    "data": [{
+                        "id": self.model_name,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "local"
+                    }]
+                });
+                (200, "application/json", headers, resp.to_string())
+            }
+
+            ("OPTIONS", _) => (204, "", headers, String::new()),
+
+            ("POST", "/v1/chat/completions") => {
+                let (status, ct, body_str) = self
+                    .handle_chat_completions(body, client, context_manager)
+                    .await;
+                (status, ct, headers, body_str)
+            }
+
+            _ => (
+                404,
+                "application/json",
+                headers,
+                json!({"error": "not found"}).to_string(),
+            ),
+        }
+    }
+
+    /// Handle /v1/chat/completions.
+    async fn handle_chat_completions<C: LLMClient>(
+        &self,
+        body: &[u8],
+        client: &Arc<C>,
+        context_manager: &Arc<Mutex<ContextManager>>,
+    ) -> (u16, &'static str, String) {
+        if body.len() > MAX_BODY_SIZE {
+            return (
+                413,
+                "application/json",
+                json!({"error": "request too large"}).to_string(),
+            );
+        }
+
+        let parsed: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    400,
+                    "application/json",
+                    json!({"error": e.to_string()}).to_string(),
+                );
+            }
+        };
+
+        let _guard = if self.serialize_requests {
+            Some(self.request_mutex.lock().await)
+        } else {
+            None
+        };
+
+        match handler::handle_chat_completions(
+            &parsed,
+            client,
+            context_manager,
+            self.max_retries,
+            self.rescue_enabled,
+        )
+        .await
+        {
+            Ok(result) => match result {
+                HandlerResult::Response(v) => (200, "application/json", v.to_string()),
+                HandlerResult::Events(events) => {
+                    let body = format_sse_body(&events);
+                    (200, "text/event-stream", body)
+                }
+            },
+            Err(e) => (502, "application/json", json!({"error": e}).to_string()),
+        }
+    }
+
+    /// Build CORS headers for OPTIONS responses.
+    pub fn cors_headers() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            (
+                "Access-Control-Allow-Headers",
+                "Content-Type, Authorization",
+            ),
+        ]
+    }
+}
+
+/// Format SSE events into a chunked transfer encoding body.
+///
+/// Each event is "data: <json>\n\n". Terminator is "data: [DONE]\n\n".
+pub fn format_sse_body(events: &[Value]) -> String {
+    let mut body = String::new();
+    for event in events {
+        body.push_str(&format!("data: {}\n\n", event));
+    }
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// Parse an HTTP request from raw bytes.
+/// Returns (method, path, headers, body) for routing.
+///
+/// WARNING: This parser is a simple helper designed strictly for testing and local/toy
+/// server use. It splits on `\r\n\r\n` and does not handle `Content-Length`, chunked encoding,
+/// pipelined requests, or partial reads. For production environments, use a robust HTTP
+/// framework such as `axum`, `hyper`, or `tiny_http`.
+pub fn parse_http_request(raw: &[u8]) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let mut parts = text.splitn(2, "\r\n\r\n");
+    let header_section = parts.next()?;
+    let body = parts.next().unwrap_or("").as_bytes();
+
+    let mut lines = header_section.split("\r\n");
+    let request_line = lines.next()?;
+    let mut rl_parts = request_line.split(' ');
+    let method = rl_parts.next()?.to_string();
+    let path = rl_parts.next()?.to_string();
+
+    let mut headers = Vec::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.push((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+
+    Some((method, path, headers, body.to_vec()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{ApiFormat, ChunkStream, SamplingParams, TokenUsage};
+    use crate::error::{BackendError, ContextDiscoveryError, StreamError};
+    use crate::tool_spec::ToolSpec;
+
+    // Dummy client for testing HTTP routing without a real backend.
+    struct DummyClient;
+
+    impl LLMClient for DummyClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<crate::streaming::LLMResponse, BackendError> {
+            Ok(crate::streaming::LLMResponse::Text(
+                crate::streaming::TextResponse::new("test"),
+            ))
+        }
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, StreamError> {
+            Err(StreamError::new("not implemented"))
+        }
+        async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    fn dummy_ctx() -> ContextManager {
+        ContextManager::new(Box::new(crate::compact::NoCompact), 4096, None, None, None)
+    }
+
+    #[test]
+    fn http_server_new() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, true, 3, true, "test-model");
+        assert_eq!(srv.host, "127.0.0.1");
+        assert_eq!(srv.port, 8081);
+        assert!(srv.serialize_requests);
+        assert_eq!(srv.max_retries, 3);
+    }
+
+    #[tokio::test]
+    async fn health_endpoint() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (status, _ct, _headers, body) = srv
+            .handle_request(
+                "GET",
+                "/health",
+                &[],
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn models_endpoint() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "my-model");
+        let (status, _ct, _headers, body) = srv
+            .handle_request(
+                "GET",
+                "/v1/models",
+                &[],
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["data"][0]["id"], "my-model");
+    }
+
+    #[tokio::test]
+    async fn cors_preflight() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (status, _ct, _headers, _body) = srv
+            .handle_request(
+                "OPTIONS",
+                "/v1/chat/completions",
+                &[],
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 204);
+    }
+
+    #[tokio::test]
+    async fn invalid_json_returns_400() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (status, _ct, _headers, _body) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                b"not json",
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn oversized_body_returns_413() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let big_body = vec![b'x'; 17 * 1024 * 1024];
+        let (status, _ct, _headers, _body) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                &big_body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 413);
+    }
+
+    #[tokio::test]
+    async fn unknown_route_returns_404() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (status, _ct, _headers, _body) = srv
+            .handle_request(
+                "GET",
+                "/unknown",
+                &[],
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_valid_request() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test"
+        }))
+        .unwrap();
+        let (status, _ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(v["choices"][0]["message"]["content"], "test");
+    }
+
+    #[tokio::test]
+    async fn streaming_request() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test",
+            "stream": true
+        }))
+        .unwrap();
+        let (status, ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(ct, "text/event-stream");
+        assert!(body_str.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn cors_headers_content() {
+        let headers = HTTPServer::cors_headers();
+        assert!(headers
+            .iter()
+            .any(|(k, _)| *k == "Access-Control-Allow-Origin"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| *k == "Access-Control-Allow-Headers" && v.contains("Content-Type")));
+    }
+
+    #[test]
+    fn format_sse_body_structure() {
+        let events = vec![json!({"test": 1})];
+        let body = format_sse_body(&events);
+        assert!(body.starts_with("data: "));
+        assert!(body.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn parse_http_request_basic() {
+        let raw = b"POST /v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"test\": true}";
+        let (method, path, headers, body) = parse_http_request(raw).unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/chat/completions");
+        assert_eq!(headers.len(), 1);
+        assert!(body.starts_with(b"{"));
+    }
+
+    #[test]
+    fn parse_http_request_invalid() {
+        assert!(parse_http_request(b"").is_none());
+    }
+
+    #[test]
+    fn max_body_size_is_16mb() {
+        assert_eq!(MAX_BODY_SIZE, 16 * 1024 * 1024);
+    }
+}
