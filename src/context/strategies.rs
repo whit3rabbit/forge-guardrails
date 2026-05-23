@@ -1,20 +1,20 @@
 //! Compaction strategies for context window management.
 
-use crate::hardware::estimate_tokens_heuristic;
-use crate::message::MessageType;
+use crate::context::hardware::estimate_tokens_heuristic;
+use crate::core::message::MessageType;
 
 /// Trait for compaction strategies that compress message history.
 ///
 /// Implementations receive the full message list, a token budget, and an
 /// optional step hint. They return a new (possibly unchanged) message list
 /// and a phase indicator: 0 means no compaction, 1+ means compaction.
-pub trait CompactStrategy {
+pub trait CompactStrategy: Send + Sync {
     fn compact(
         &self,
-        messages: &[crate::Message],
+        messages: &[crate::core::message::Message],
         budget_tokens: i64,
         step_hint: Option<&str>,
-    ) -> (Vec<crate::Message>, i64);
+    ) -> (Vec<crate::core::message::Message>, i64);
 }
 
 /// Passthrough strategy that performs no compaction.
@@ -25,10 +25,10 @@ pub struct NoCompact;
 impl CompactStrategy for NoCompact {
     fn compact(
         &self,
-        messages: &[crate::Message],
+        messages: &[crate::core::message::Message],
         _budget_tokens: i64,
         _step_hint: Option<&str>,
-    ) -> (Vec<crate::Message>, i64) {
+    ) -> (Vec<crate::core::message::Message>, i64) {
         (messages.to_vec(), 0)
     }
 }
@@ -57,10 +57,10 @@ impl SlidingWindowCompact {
 impl CompactStrategy for SlidingWindowCompact {
     fn compact(
         &self,
-        messages: &[crate::Message],
+        messages: &[crate::core::message::Message],
         budget_tokens: i64,
         _step_hint: Option<&str>,
-    ) -> (Vec<crate::Message>, i64) {
+    ) -> (Vec<crate::core::message::Message>, i64) {
         let trigger = (budget_tokens as f64 * self.compact_threshold) as i64;
         let current_tokens = estimate_tokens_heuristic(messages);
         if current_tokens <= trigger {
@@ -133,10 +133,10 @@ impl TieredCompact {
 impl CompactStrategy for TieredCompact {
     fn compact(
         &self,
-        messages: &[crate::Message],
+        messages: &[crate::core::message::Message],
         budget_tokens: i64,
         _step_hint: Option<&str>,
-    ) -> (Vec<crate::Message>, i64) {
+    ) -> (Vec<crate::core::message::Message>, i64) {
         let triggers = self.phase_triggers(budget_tokens);
         let initial_tokens = estimate_tokens_heuristic(messages);
 
@@ -174,7 +174,10 @@ impl CompactStrategy for TieredCompact {
 
 /// Identify messages belonging to the protected window (last keep_recent
 /// iterations). Returns a slice of messages from the rest (after header).
-fn find_protected_window(rest: &[crate::Message], keep_recent: i64) -> &[crate::Message] {
+fn find_protected_window(
+    rest: &[crate::core::message::Message],
+    keep_recent: i64,
+) -> &[crate::core::message::Message] {
     let mut step_indices: Vec<i64> = rest.iter().filter_map(|m| m.metadata.step_index).collect();
     step_indices.sort();
     step_indices.dedup();
@@ -203,7 +206,10 @@ fn find_protected_window(rest: &[crate::Message], keep_recent: i64) -> &[crate::
 }
 
 /// Phase 1: drop nudge messages from eligible zone, truncate long tool results.
-fn apply_phase1(messages: &[crate::Message], keep_recent: i64) -> Vec<crate::Message> {
+fn apply_phase1(
+    messages: &[crate::core::message::Message],
+    keep_recent: i64,
+) -> Vec<crate::core::message::Message> {
     let header = &messages[..2];
     let rest = &messages[2..];
     let protected = find_protected_window(rest, keep_recent);
@@ -242,7 +248,10 @@ fn apply_phase1(messages: &[crate::Message], keep_recent: i64) -> Vec<crate::Mes
 }
 
 /// Phase 2: Phase 1 + drop all tool_result and tool_call messages from eligible zone.
-fn apply_phase2(messages: &[crate::Message], keep_recent: i64) -> Vec<crate::Message> {
+fn apply_phase2(
+    messages: &[crate::core::message::Message],
+    keep_recent: i64,
+) -> Vec<crate::core::message::Message> {
     let header = &messages[..2];
     let rest = &messages[2..];
     let protected = find_protected_window(rest, keep_recent);
@@ -268,7 +277,10 @@ fn apply_phase2(messages: &[crate::Message], keep_recent: i64) -> Vec<crate::Mes
 }
 
 /// Phase 3: Phase 2 + drop reasoning and text_response from eligible zone.
-fn apply_phase3(messages: &[crate::Message], keep_recent: i64) -> Vec<crate::Message> {
+fn apply_phase3(
+    messages: &[crate::core::message::Message],
+    keep_recent: i64,
+) -> Vec<crate::core::message::Message> {
     let header = &messages[..2];
     let rest = &messages[2..];
     let protected = find_protected_window(rest, keep_recent);
@@ -297,7 +309,7 @@ fn apply_phase3(messages: &[crate::Message], keep_recent: i64) -> Vec<crate::Mes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{Message, MessageMeta, MessageRole, MessageType};
+    use crate::core::message::{Message, MessageMeta, MessageRole, MessageType};
 
     fn sys_msg(content: &str) -> Message {
         Message::new(

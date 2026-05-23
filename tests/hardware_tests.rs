@@ -90,7 +90,11 @@ fn detect_hardware_returns_ok() {
         Ok(Some(profile)) => {
             assert!(!profile.gpu_name.is_empty());
             assert!(profile.vram_total_mb > 0);
-            assert!(profile.gpu_vendor == "nvidia" || profile.gpu_vendor == "amd");
+            assert!(
+                profile.gpu_vendor == "nvidia"
+                    || profile.gpu_vendor == "amd"
+                    || profile.gpu_vendor == "apple"
+            );
         }
         Ok(None) => {
             // No GPU on this machine, expected behavior.

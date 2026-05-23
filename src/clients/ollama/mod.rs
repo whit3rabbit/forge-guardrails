@@ -9,11 +9,13 @@ use std::sync::Mutex;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-use crate::client::{ApiFormat, ChunkStream, LLMClient, SamplingParams, TokenUsage};
+use crate::clients::base::{
+    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams, StreamChunk,
+    TextResponse, TokenUsage, ToolCall,
+};
+use crate::clients::sampling::get_sampling_defaults;
+use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
-use crate::sampling::get_sampling_defaults;
-use crate::streaming::{ChunkType, LLMResponse, StreamChunk, TextResponse, ToolCall};
-use crate::tool_spec::ToolSpec;
 
 /// Keywords that indicate a model supports thinking/reasoning mode.
 const THINK_KEYWORDS: &[&str] = &["think", "reasoning", "r1", "deepseek", "qwq"];
@@ -29,8 +31,11 @@ pub struct OllamaClient {
     repeat_penalty: Option<f64>,
     presence_penalty: Option<f64>,
     timeout_secs: f64,
-    think: bool,
-    think_resolved: bool,
+    /// Whether think mode is active. Mutex for interior mutability — the
+    /// think-unsupported fallback must persist this across &self calls,
+    /// matching Python's `self._think = False` mutation pattern.
+    think: Mutex<bool>,
+    think_resolved: Mutex<bool>,
     num_ctx: Mutex<Option<i64>>,
     last_usage: Mutex<Option<TokenUsage>>,
     sampling_defaults: Option<Map<String, Value>>,
@@ -50,8 +55,8 @@ impl OllamaClient {
             repeat_penalty: None,
             presence_penalty: None,
             timeout_secs: 300.0,
-            think,
-            think_resolved,
+            think: Mutex::new(think),
+            think_resolved: Mutex::new(think_resolved),
             num_ctx: Mutex::new(None),
             last_usage: Mutex::new(None),
             sampling_defaults: None,
@@ -94,13 +99,13 @@ impl OllamaClient {
     pub fn with_think(mut self, think: Option<bool>) -> Self {
         match think {
             Some(t) => {
-                self.think = t;
-                self.think_resolved = true;
+                self.think = Mutex::new(t);
+                self.think_resolved = Mutex::new(true);
             }
             None => {
                 let (d, r) = Self::detect_think_mode(&self.model);
-                self.think = d;
-                self.think_resolved = r;
+                self.think = Mutex::new(d);
+                self.think_resolved = Mutex::new(r);
             }
         }
         self
@@ -123,10 +128,10 @@ impl OllamaClient {
     }
 
     pub fn is_think_enabled(&self) -> bool {
-        self.think
+        self.think.lock().map(|g| *g).unwrap_or(false)
     }
     pub fn is_think_resolved(&self) -> bool {
-        self.think_resolved
+        self.think_resolved.lock().map(|g| *g).unwrap_or(false)
     }
 
     pub fn set_num_ctx(&self, ctx: Option<i64>) {
@@ -309,14 +314,18 @@ impl LLMClient for OllamaClient {
         ApiFormat::Ollama
     }
 
+    fn last_usage(&self) -> Option<crate::clients::base::TokenUsage> {
+        self.last_usage.lock().ok().and_then(|g| g.clone())
+    }
+
     async fn send(
         &self,
         messages: Vec<Value>,
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<LLMResponse, BackendError> {
-        let mut think = self.think;
-        let mut think_resolved = self.think_resolved;
+        let think = self.think.lock().map(|g| *g).unwrap_or(false);
+        let think_resolved = self.think_resolved.lock().map(|g| *g).unwrap_or(false);
         let body =
             self.build_request_body(messages.clone(), tools.as_deref(), sampling.as_ref(), think);
         let resp = match reqwest::Client::new()
@@ -343,50 +352,61 @@ impl LLMClient for OllamaClient {
         }
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
+            // Detect think-unsupported on non-200 non-500 — may be a 400.
+            if status == 400 {
+                if let Ok(ej) = serde_json::from_str::<Value>(&text) {
+                    if Self::is_think_unsupported_error(&ej) {
+                        if !think_resolved {
+                            // Persist: disable think for future calls (Python parity).
+                            if let Ok(mut g) = self.think.lock() { *g = false; }
+                            if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+                            let retry_body = self.build_request_body(
+                                messages, tools.as_deref(), sampling.as_ref(), false,
+                            );
+                            let retry_resp = reqwest::Client::new()
+                                .post(format!("{}/api/chat", self.base_url))
+                                .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
+                                .json(&retry_body)
+                                .send()
+                                .await
+                                .map_err(|e| BackendError::new(0, e.to_string()))?;
+                            let rs = retry_resp.status().as_u16() as i64;
+                            if rs == 500 {
+                                return Ok(LLMResponse::Text(TextResponse::new(
+                                    retry_resp.text().await.unwrap_or_default(),
+                                )));
+                            }
+                            if !retry_resp.status().is_success() {
+                                return Err(BackendError::new(
+                                    rs,
+                                    retry_resp.text().await.unwrap_or_default(),
+                                ));
+                            }
+                            let rj2: Value = retry_resp
+                                .json()
+                                .await
+                                .map_err(|e| BackendError::new(rs, e.to_string()))?;
+                            self.record_usage(&rj2);
+                            return Ok(self.parse_send_response(&rj2, false));
+                        } else {
+                            return Err(BackendError::ThinkingNotSupported {
+                                model: self.model.clone(),
+                                status_code: status,
+                                body: text,
+                            });
+                        }
+                    }
+                }
+            }
             return Err(BackendError::new(status, text));
         }
         let rj: Value = resp
             .json()
             .await
             .map_err(|e| BackendError::new(status, e.to_string()))?;
-        if status == 400 && Self::is_think_unsupported_error(&rj) {
-            if !think_resolved {
-                think = false;
-                think_resolved = true;
-                let retry_body =
-                    json!({"model": self.model, "messages": messages, "stream": false});
-                let retry_resp = reqwest::Client::new()
-                    .post(format!("{}/api/chat", self.base_url))
-                    .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-                    .json(&retry_body)
-                    .send()
-                    .await
-                    .map_err(|e| BackendError::new(0, e.to_string()))?;
-                let rs = retry_resp.status().as_u16() as i64;
-                if rs == 500 {
-                    return Ok(LLMResponse::Text(TextResponse::new(
-                        retry_resp.text().await.unwrap_or_default(),
-                    )));
-                }
-                if !retry_resp.status().is_success() {
-                    return Err(BackendError::new(
-                        rs,
-                        retry_resp.text().await.unwrap_or_default(),
-                    ));
-                }
-                let rj2: Value = retry_resp
-                    .json()
-                    .await
-                    .map_err(|e| BackendError::new(rs, e.to_string()))?;
-                self.record_usage(&rj2);
-                return Ok(self.parse_send_response(&rj2, false));
-            } else {
-                return Err(BackendError::ThinkingNotSupported {
-                    model: self.model.clone(),
-                    status_code: status,
-                    body: serde_json::to_string(&rj).unwrap_or_default(),
-                });
-            }
+        // Mark resolved after first successful call.
+        if !think_resolved {
+            if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
         }
         self.record_usage(&rj);
         Ok(self.parse_send_response(&rj, think))
@@ -398,8 +418,8 @@ impl LLMClient for OllamaClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, StreamError> {
-        let mut think = self.think;
-        let think_resolved = self.think_resolved;
+        let think = self.think.lock().map(|g| *g).unwrap_or(false);
+        let think_resolved = self.think_resolved.lock().map(|g| *g).unwrap_or(false);
         let mut body =
             self.build_request_body(messages.clone(), tools.as_deref(), sampling.as_ref(), think);
         if let Some(obj) = body.as_object_mut() {
@@ -435,16 +455,24 @@ impl LLMClient for OllamaClient {
             if let Ok(ej) = serde_json::from_str::<Value>(&bt) {
                 if Self::is_think_unsupported_error(&ej) {
                     if !think_resolved {
-                        think = false;
-                        let rb = json!({"model": self.model, "messages": messages, "stream": true});
+                        // Persist: disable think for future calls (Python parity).
+                        if let Ok(mut g) = self.think.lock() { *g = false; }
+                        if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+                        let rb = self.build_request_body(
+                            messages, tools.as_deref(), sampling.as_ref(), false,
+                        );
+                        let mut rb_obj = rb;
+                        if let Some(obj) = rb_obj.as_object_mut() {
+                            obj.insert("stream".to_string(), Value::Bool(true));
+                        }
                         let rr = reqwest::Client::new()
                             .post(format!("{}/api/chat", self.base_url))
                             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-                            .json(&rb)
+                            .json(&rb_obj)
                             .send()
                             .await
                             .map_err(|e| StreamError::new(e.to_string()))?;
-                        return Ok(Box::pin(parse_ollama_ndjson(rr, think)));
+                        return Ok(Box::pin(parse_ollama_ndjson(rr, false)));
                     } else {
                         return Err(StreamError::new(format!(
                             "Thinking mode not supported for model '{}'",
@@ -465,6 +493,10 @@ impl LLMClient for OllamaClient {
                 resp.text().await.unwrap_or_default()
             )));
         }
+        // Mark resolved after first successful call.
+        if !think_resolved {
+            if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+        }
         Ok(Box::pin(parse_ollama_ndjson(resp, think)))
     }
 
@@ -481,7 +513,6 @@ fn parse_ollama_ndjson(
     resp: reqwest::Response,
     think: bool,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
-    use futures_util::StreamExt;
     let byte_stream = resp.bytes_stream();
     let stream = async_stream::stream! {
         use futures_util::StreamExt;

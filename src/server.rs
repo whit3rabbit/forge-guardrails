@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Mutex;
 
-use crate::compact::NoCompact;
-use crate::context::ContextManager;
+use crate::context::{detect_hardware, ContextManager, NoCompact};
 use crate::error::{BackendError, BudgetResolutionError};
-use crate::hardware::detect_hardware;
 
 /// Budget resolution strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,13 +33,27 @@ impl BudgetMode {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "backend" => Some(Self::Backend),
             "manual" => Some(Self::Manual),
             "forge-full" => Some(Self::ForgeFull),
             "forge-fast" => Some(Self::ForgeFast),
             _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for BudgetMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "backend" => Ok(Self::Backend),
+            "manual" => Ok(Self::Manual),
+            "forge-full" => Ok(Self::ForgeFull),
+            "forge-fast" => Ok(Self::ForgeFast),
+            _ => Err(()),
         }
     }
 }
@@ -66,7 +78,7 @@ struct RunConfig {
 pub struct ServerManager {
     backend: String,
     port: i64,
-    models_dir: Option<PathBuf>,
+    _models_dir: Option<PathBuf>,
     process: Mutex<Option<Child>>,
     current_config: Mutex<Option<RunConfig>>,
     last_context: Mutex<Option<i64>>,
@@ -77,7 +89,7 @@ impl ServerManager {
         Self {
             backend: backend.to_string(),
             port,
-            models_dir: models_dir.map(|p| p.to_path_buf()),
+            _models_dir: models_dir.map(|p| p.to_path_buf()),
             process: Mutex::new(None),
             current_config: Mutex::new(None),
             last_context: Mutex::new(None),
@@ -87,6 +99,7 @@ impl ServerManager {
     /// Start the backend process. No-op for ollama.
     /// For llamaserver/llamafile, spawns a subprocess with the given config.
     /// Returns true if a new process was spawned, false if reused.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &self,
         model: &str,
@@ -558,14 +571,14 @@ mod tests {
             ("forge-full", BudgetMode::ForgeFull),
             ("forge-fast", BudgetMode::ForgeFast),
         ] {
-            assert_eq!(BudgetMode::from_str(s), Some(mode));
+            assert_eq!(BudgetMode::parse(s), Some(mode));
             assert_eq!(mode.as_str(), s);
         }
     }
 
     #[test]
     fn budget_mode_unknown() {
-        assert_eq!(BudgetMode::from_str("unknown"), None);
+        assert_eq!(BudgetMode::parse("unknown"), None);
     }
 
     #[test]
@@ -691,7 +704,7 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
         assert!(mgr.process.lock().unwrap().is_none());
     }
 
@@ -767,7 +780,7 @@ mod tests {
         let port = server
             .host_with_port()
             .split(':')
-            .last()
+            .next_back()
             .unwrap()
             .parse::<i64>()
             .unwrap();

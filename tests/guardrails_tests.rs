@@ -28,6 +28,7 @@ fn make_guardrails(max_retries: i32, required_steps: Option<Vec<&str>>) -> Guard
         tools,
         TerminalTool::Single("respond".into()),
         required_steps.map(|s| s.into_iter().map(|x| x.into()).collect()),
+        None,
         max_retries,
         2,
         true,
@@ -237,7 +238,7 @@ fn step_enforcer_arg_matched_blocks_different_value() {
 // ts-009
 #[test]
 fn step_enforcer_batch_blocks_prereq_and_tool_together() {
-    let enforcer = StepEnforcer::new(
+    let mut enforcer = StepEnforcer::new(
         vec![],
         IndexSet::from(["respond".into()]),
         Some({
@@ -453,6 +454,7 @@ fn guardrails_custom_retry_nudge_receives_text() {
         tools,
         TerminalTool::Single("respond".into()),
         None,
+        None,
         3,
         2,
         false,
@@ -559,6 +561,7 @@ fn guardrails_terminal_tool_set() {
     let mut g = Guardrails::new(
         tools,
         TerminalTool::Multiple(IndexSet::from(["respond".into(), "submit".into()])),
+        None,
         None,
         3,
         2,

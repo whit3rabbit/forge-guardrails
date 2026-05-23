@@ -7,6 +7,16 @@ async fn test_anthropic_streaming_request() {
     let mut server = mockito::Server::new_async().await;
     let url = server.url();
 
+    // Anthropic SSE protocol: content_block_delta events carry text,
+    // message_delta carries usage, message_stop triggers the Final chunk.
+    let sse_body = concat!(
+        "data: {\"type\": \"message_start\", \"message\": {\"usage\": {\"input_tokens\": 10, \"output_tokens\": 0}}}\n\n",
+        "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"hello \"}}\n\n",
+        "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"world\"}}\n\n",
+        "data: {\"type\": \"message_delta\", \"usage\": {\"output_tokens\": 5}}\n\n",
+        "data: {\"type\": \"message_stop\"}\n\n",
+    );
+
     let _mock = server.mock("POST", "/messages")
         .match_header("content-type", "application/json")
         .match_body(mockito::Matcher::Json(json!({
@@ -17,7 +27,7 @@ async fn test_anthropic_streaming_request() {
         })))
         .with_status(200)
         .with_header("content-type", "text/event-stream")
-        .with_body("data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"hello \"}}\n\ndata: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"world\"}}\n\ndata: {\"type\": \"message_delta\", \"message\": {\"content\": [], \"usage\": {\"input_tokens\": 10, \"output_tokens\": 5}}}\n\n")
+        .with_body(sse_body)
         .create_async()
         .await;
 

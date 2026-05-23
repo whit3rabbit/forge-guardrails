@@ -3,10 +3,10 @@
 //! SlotWorker processes tasks one at a time from a priority queue.
 //! Higher-priority tasks (lower integer) can preempt the running task.
 
-use crate::client::LLMClient;
+use super::runner::WorkflowRunner;
+use super::workflow::Workflow;
+use crate::clients::base::LLMClient;
 use crate::error::ForgeError;
-use crate::runner::WorkflowRunner;
-use crate::workflow::Workflow;
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -215,13 +215,9 @@ mod tests {
     }
 
     fn dummy_workflow() -> Workflow {
-        use crate::respond::respond_tool;
-        use crate::workflow::ToolDef;
+        use crate::core::workflow::{TerminalToolInput, ToolDef};
+        use crate::tools::respond::respond_tool;
         use indexmap::IndexMap;
-
-        fn noop_tool(_args: Vec<String>) -> Result<String, crate::error::ToolResolutionError> {
-            Ok("ok".to_string())
-        }
 
         let mut tools: IndexMap<String, ToolDef> = IndexMap::new();
         tools.insert("respond".to_string(), respond_tool());
@@ -230,7 +226,7 @@ mod tests {
             "test workflow",
             tools,
             vec![],
-            crate::workflow::TerminalToolInput::Single("respond".to_string()),
+            TerminalToolInput::Single("respond".to_string()),
             "You are a helper.",
         )
         .expect("valid workflow")

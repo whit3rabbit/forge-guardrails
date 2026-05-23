@@ -1,14 +1,56 @@
-use crate::error::ToolResolutionError;
-use crate::tool_spec::ToolSpec;
+use crate::core::tool_spec::ToolSpec;
+use crate::error::{ToolError, ToolResolutionError};
+use futures_util::future::BoxFuture;
 use indexmap::IndexMap;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 
-/// Callable signature for tool implementations.
-pub type ToolCallable = fn(Vec<String>) -> Result<String, ToolResolutionError>;
+/// Callable signature for tool implementations: takes JSON arguments, returns a future yielding a JSON value.
+pub type ToolCallable = Arc<
+    dyn Fn(IndexMap<String, Value>) -> BoxFuture<'static, Result<Value, ToolError>> + Send + Sync,
+>;
+
+/// Trait to automatically convert sync or async tools into a standard ToolCallable.
+pub trait IntoToolCallable {
+    fn into_callable(self) -> ToolCallable;
+}
+
+impl IntoToolCallable for ToolCallable {
+    fn into_callable(self) -> Self {
+        self
+    }
+}
+
+// Convert the old sync signature Fn(Vec<String>) -> Result<String, ToolResolutionError>
+impl<F> IntoToolCallable for F
+where
+    F: Fn(Vec<String>) -> Result<String, ToolResolutionError> + Send + Sync + 'static,
+{
+    fn into_callable(self) -> ToolCallable {
+        let func_arc = Arc::new(self);
+        Arc::new(move |args| {
+            let func = func_arc.clone();
+            Box::pin(async move {
+                let mut vec_args = Vec::new();
+                for (k, v) in args {
+                    let val_str = match v {
+                        Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    vec_args.push(format!("{}={}", k, val_str));
+                }
+                (*func)(vec_args)
+                    .map(Value::String)
+                    .map_err(ToolError::Resolution)
+            })
+        })
+    }
+}
 
 /// Re-export ParamModel from the tool_spec module.
-pub use crate::tool_spec::ParamModel;
+pub use crate::core::tool_spec::ParamModel;
 
 /// A prerequisite specification: either name-only or arg-matched.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +60,7 @@ pub enum PrerequisiteSpec {
 }
 
 /// Binds a tool spec to a callable with optional prerequisites.
+#[derive(Clone)]
 pub struct ToolDef {
     pub spec: ToolSpec,
     pub callable: ToolCallable,
@@ -25,10 +68,13 @@ pub struct ToolDef {
 }
 
 impl ToolDef {
-    pub fn new(spec: ToolSpec, callable: ToolCallable) -> Self {
+    pub fn new<C>(spec: ToolSpec, callable: C) -> Self
+    where
+        C: IntoToolCallable,
+    {
         Self {
             spec,
-            callable,
+            callable: callable.into_callable(),
             prerequisites: Vec::new(),
         }
     }
@@ -176,7 +222,7 @@ impl Workflow {
     /// Returns an error if the tool name is not found.
     pub fn get_callable(&self, tool_name: &str) -> Result<ToolCallable, String> {
         match self.tools.get(tool_name) {
-            Some(def) => Ok(def.callable),
+            Some(def) => Ok(def.callable.clone()),
             None => Err(format!("Tool '{}' not found", tool_name)),
         }
     }

@@ -153,6 +153,6 @@ fn nemotron_super_chat_template_kwargs() {
 }
 
 #[test]
-fn model_defaults_map_has_sixteen_entries() {
-    assert_eq!(MODEL_SAMPLING_DEFAULTS.len(), 16);
+fn model_defaults_map_has_sixtynine_entries() {
+    assert_eq!(MODEL_SAMPLING_DEFAULTS.len(), 69);
 }

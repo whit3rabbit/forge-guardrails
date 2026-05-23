@@ -5,11 +5,13 @@
 //! - extract_tool_call: parses tool calls from freeform model output
 //! - rescue_tool_call: fallback parsing with multiple strategies
 
+pub mod nudges;
 mod parse_strategies;
 
-use crate::streaming::ToolCall;
-use crate::tool_spec::{ParamModel, ToolSpec};
+use crate::clients::base::ToolCall;
+use crate::core::tool_spec::{ParamModel, ToolSpec};
 use indexmap::IndexMap;
+pub use nudges::{prerequisite_nudge, retry_nudge, step_nudge, unknown_tool_nudge};
 use serde_json::Value;
 
 /// Build a structured prompt describing available tools and the expected

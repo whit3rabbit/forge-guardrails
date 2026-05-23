@@ -4,16 +4,15 @@
 //! It converts inbound OpenAI messages, runs inference with validation/retry,
 //! then strips respond() calls from output.
 
-use crate::client::LLMClient;
-use crate::context::ContextManager;
+use crate::clients::base::{LLMClient, LLMResponse, SamplingParams, TextResponse, ToolCall};
+use crate::context::manager::ContextManager;
+use crate::core::tool_spec::ToolSpec;
 use crate::proxy::{
     extract_sampling, has_respond_tool, openai_to_messages, respond_tool_openai,
     strip_respond_calls, text_response_to_openai, text_to_sse_events, tool_calls_to_openai,
     tool_calls_to_sse_events,
 };
-use crate::respond::RESPOND_TOOL_NAME;
-use crate::streaming::{LLMResponse, TextResponse, ToolCall};
-use crate::tool_spec::ToolSpec;
+use crate::tools::respond::RESPOND_TOOL_NAME;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -39,9 +38,9 @@ pub enum HandlerResult {
 pub async fn handle_chat_completions<C: LLMClient>(
     body: &Value,
     client: &Arc<C>,
-    _context_manager: &Arc<Mutex<ContextManager>>,
+    context_manager: &Arc<Mutex<ContextManager>>,
     max_retries: i32,
-    _rescue_enabled: bool,
+    rescue_enabled: bool,
 ) -> Result<HandlerResult, String> {
     let messages = body
         .get("messages")
@@ -67,7 +66,7 @@ pub async fn handle_chat_completions<C: LLMClient>(
     let sampling = extract_sampling(body);
 
     // Convert inbound OpenAI messages to internal format.
-    let internal_msgs = openai_to_messages(messages);
+    let mut internal_msgs = openai_to_messages(messages);
 
     // Serialize for the client's API format.
     let api_format = client.api_format().as_str();
@@ -90,86 +89,121 @@ pub async fn handle_chat_completions<C: LLMClient>(
     // Parse tools into ToolSpec for the client.
     let tool_specs = parse_tool_specs(&tools_with_respond);
 
-    // Run inference with retry.
-    let response = run_with_retry(
-        client,
-        &serialized,
-        Some(&tool_specs),
-        &sampling,
-        max_retries,
+    let tool_names: Vec<String> = tool_specs.iter().map(|s| s.name.clone()).collect();
+    let validator = crate::guardrails::ResponseValidator::new(tool_names, rescue_enabled, None);
+    let mut error_tracker = crate::guardrails::ErrorTracker::new(max_retries, 2);
+    let mut tool_call_counter = 0;
+
+    let mut ctx = context_manager.lock().await;
+
+    // Run inference (compact -> fold -> serialize -> send -> validate -> retry)
+    let inference_result = crate::core::inference::run_inference(
+        &mut internal_msgs,
+        client.as_ref(),
+        &mut ctx,
+        &validator,
+        &mut error_tracker,
+        &tool_specs,
+        &mut tool_call_counter,
+        0,                     // step_index
+        "",                    // step_hint
+        Some(max_retries + 1), // max_attempts
+        false,                 // stream is false during inference, matching Python
+        None,
+        sampling.as_ref(),
     )
     .await;
 
-    match response {
-        Ok(llm_response) => {
-            let result = process_response(&llm_response, model_name, stream);
-            Ok(result)
+    drop(ctx);
+
+    let response = match inference_result {
+        Some(result) => result.response,
+        None => {
+            // Retries exhausted — return last text response or empty.
+            let last_text = internal_msgs
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::core::message::MessageRole::Assistant)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            LLMResponse::Text(TextResponse::new(last_text))
         }
-        Err(_) => Err("Inference failed".to_string()),
-    }
+    };
+
+    let handler_result = match response {
+        LLMResponse::Text(ref text) => {
+            if stream {
+                HandlerResult::Events(text_to_sse_events(&text.content, model_name, 0))
+            } else {
+                HandlerResult::Response(text_response_to_openai(text, model_name))
+            }
+        }
+        LLMResponse::ToolCalls(ref calls) => {
+            let (real_calls, respond_text) = strip_respond_calls(calls);
+
+            if real_calls.is_empty() {
+                // Pure respond — convert to text
+                let text = respond_text.unwrap_or_default();
+                if stream {
+                    HandlerResult::Events(text_to_sse_events(&text, model_name, 0))
+                } else {
+                    let text_resp = TextResponse::new(text);
+                    HandlerResult::Response(text_response_to_openai(&text_resp, model_name))
+                }
+            } else {
+                // Real tool calls — return the real tool calls only, drop respond
+                if stream {
+                    HandlerResult::Events(tool_calls_to_sse_events(&real_calls, model_name))
+                } else {
+                    HandlerResult::Response(tool_calls_to_openai(&real_calls, model_name))
+                }
+            }
+        }
+    };
+
+    Ok(handler_result)
 }
 
-/// Pass-through mode: no tools, no guardrails, direct backend call.
-async fn run_passthrough<C: LLMClient>(
+/// Helper to forward requests to LLM Client without tools or guardrails (passthrough).
+pub async fn run_passthrough<C: LLMClient>(
     client: &Arc<C>,
-    messages: &[Value],
-    tools: Option<&[ToolSpec]>,
-    sampling: &Option<serde_json::Map<String, Value>>,
+    serialized: &[Value],
+    _tools: Option<Vec<ToolSpec>>,
+    sampling: &Option<SamplingParams>,
     model_name: &str,
     stream: bool,
 ) -> Result<HandlerResult, String> {
-    let sampling_clone = sampling.clone();
-    let llm_response = client
-        .send(messages.to_vec(), tools.map(|t| t.to_vec()), sampling_clone)
+    let response = client
+        .send(serialized.to_vec(), None, sampling.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(process_response(&llm_response, model_name, stream))
-}
-
-/// Run inference with retry for tool-guardrail mode.
-async fn run_with_retry<C: LLMClient>(
-    client: &Arc<C>,
-    messages: &[Value],
-    tools: Option<&[ToolSpec]>,
-    sampling: &Option<serde_json::Map<String, Value>>,
-    max_retries: i32,
-) -> Result<LLMResponse, String> {
-    let mut last_response: Option<LLMResponse> = None;
-
-    for attempt in 0..=max_retries {
-        let sampling_clone = sampling.clone();
-        let response = client
-            .send(messages.to_vec(), tools.map(|t| t.to_vec()), sampling_clone)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        match &response {
-            LLMResponse::ToolCalls(calls) => {
-                let (real_calls, respond_text) = strip_respond_calls(calls);
-
-                if !real_calls.is_empty() {
-                    return Ok(LLMResponse::ToolCalls(filter_respond(calls)));
-                }
-
-                if let Some(text) = respond_text {
-                    return Ok(LLMResponse::Text(TextResponse::new(text)));
-                }
-
-                // Empty tool calls list: return empty text.
-                return Ok(LLMResponse::Text(TextResponse::new("")));
+    match response {
+        LLMResponse::Text(text) => {
+            if stream {
+                Ok(HandlerResult::Events(text_to_sse_events(
+                    &text.content,
+                    model_name,
+                    0,
+                )))
+            } else {
+                Ok(HandlerResult::Response(text_response_to_openai(
+                    &text, model_name,
+                )))
             }
-            LLMResponse::Text(_) => {
-                last_response = Some(response);
-                if attempt >= max_retries {
-                    return Ok(last_response.unwrap_or(LLMResponse::Text(TextResponse::new(""))));
-                }
-                continue;
+        }
+        LLMResponse::ToolCalls(calls) => {
+            if stream {
+                Ok(HandlerResult::Events(tool_calls_to_sse_events(
+                    &calls, model_name,
+                )))
+            } else {
+                Ok(HandlerResult::Response(tool_calls_to_openai(
+                    &calls, model_name,
+                )))
             }
         }
     }
-
-    Ok(last_response.unwrap_or(LLMResponse::Text(TextResponse::new(""))))
 }
 
 /// Remove respond() calls, keeping only real tool calls.
@@ -234,7 +268,7 @@ pub fn parse_tool_specs(tools: &[Value]) -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streaming::ToolCall;
+    use crate::clients::base::{ApiFormat, ChunkStream, ToolCall};
     use indexmap::IndexMap;
     use serde_json::json;
 
@@ -365,14 +399,14 @@ mod tests {
     struct MockTextClient;
 
     impl LLMClient for MockTextClient {
-        fn api_format(&self) -> crate::client::ApiFormat {
-            crate::client::ApiFormat::OpenAI
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
         }
         async fn send(
             &self,
             _messages: Vec<Value>,
             _tools: Option<Vec<ToolSpec>>,
-            _sampling: Option<crate::client::SamplingParams>,
+            _sampling: Option<SamplingParams>,
         ) -> Result<LLMResponse, crate::error::BackendError> {
             Ok(LLMResponse::Text(TextResponse::new("mock response")))
         }
@@ -380,8 +414,8 @@ mod tests {
             &self,
             _messages: Vec<Value>,
             _tools: Option<Vec<ToolSpec>>,
-            _sampling: Option<crate::client::SamplingParams>,
-        ) -> Result<crate::client::ChunkStream, crate::error::StreamError> {
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
             Err(crate::error::StreamError::new("not implemented"))
         }
         async fn get_context_length(
@@ -394,14 +428,14 @@ mod tests {
     struct MockToolCallClient;
 
     impl LLMClient for MockToolCallClient {
-        fn api_format(&self) -> crate::client::ApiFormat {
-            crate::client::ApiFormat::OpenAI
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
         }
         async fn send(
             &self,
             _messages: Vec<Value>,
             _tools: Option<Vec<ToolSpec>>,
-            _sampling: Option<crate::client::SamplingParams>,
+            _sampling: Option<SamplingParams>,
         ) -> Result<LLMResponse, crate::error::BackendError> {
             let mut args = IndexMap::new();
             args.insert("message".into(), json!("responded text"));
@@ -411,8 +445,8 @@ mod tests {
             &self,
             _messages: Vec<Value>,
             _tools: Option<Vec<ToolSpec>>,
-            _sampling: Option<crate::client::SamplingParams>,
-        ) -> Result<crate::client::ChunkStream, crate::error::StreamError> {
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
             Err(crate::error::StreamError::new("not implemented"))
         }
         async fn get_context_length(
@@ -423,7 +457,13 @@ mod tests {
     }
 
     fn dummy_ctx() -> ContextManager {
-        ContextManager::new(Box::new(crate::compact::NoCompact), 4096, None, None, None)
+        ContextManager::new(
+            Box::new(crate::context::strategies::NoCompact),
+            4096,
+            None,
+            None,
+            None,
+        )
     }
 
     #[tokio::test]
@@ -466,14 +506,14 @@ mod tests {
 
     struct MockAlwaysTextClient;
     impl LLMClient for MockAlwaysTextClient {
-        fn api_format(&self) -> crate::client::ApiFormat {
-            crate::client::ApiFormat::OpenAI
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
         }
         async fn send(
             &self,
             _m: Vec<Value>,
             _t: Option<Vec<ToolSpec>>,
-            _s: Option<crate::client::SamplingParams>,
+            _s: Option<SamplingParams>,
         ) -> Result<LLMResponse, crate::error::BackendError> {
             Ok(LLMResponse::Text(TextResponse::new("always text")))
         }
@@ -481,8 +521,8 @@ mod tests {
             &self,
             _m: Vec<Value>,
             _t: Option<Vec<ToolSpec>>,
-            _s: Option<crate::client::SamplingParams>,
-        ) -> Result<crate::client::ChunkStream, crate::error::StreamError> {
+            _s: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
             Err(crate::error::StreamError::new("not implemented"))
         }
         async fn get_context_length(
@@ -514,14 +554,14 @@ mod tests {
 
     struct MockMixedToolClient;
     impl LLMClient for MockMixedToolClient {
-        fn api_format(&self) -> crate::client::ApiFormat {
-            crate::client::ApiFormat::OpenAI
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
         }
         async fn send(
             &self,
             _m: Vec<Value>,
             _t: Option<Vec<ToolSpec>>,
-            _s: Option<crate::client::SamplingParams>,
+            _s: Option<SamplingParams>,
         ) -> Result<LLMResponse, crate::error::BackendError> {
             let mut respond_args = IndexMap::new();
             respond_args.insert("message".into(), json!("ignored text"));
@@ -536,8 +576,8 @@ mod tests {
             &self,
             _m: Vec<Value>,
             _t: Option<Vec<ToolSpec>>,
-            _s: Option<crate::client::SamplingParams>,
-        ) -> Result<crate::client::ChunkStream, crate::error::StreamError> {
+            _s: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
             Err(crate::error::StreamError::new("not implemented"))
         }
         async fn get_context_length(
@@ -573,7 +613,7 @@ mod tests {
     }
 
     struct MockSamplingTracker {
-        last_sampling: std::sync::Mutex<Option<crate::client::SamplingParams>>,
+        last_sampling: std::sync::Mutex<Option<SamplingParams>>,
     }
     impl MockSamplingTracker {
         fn new() -> Self {
@@ -583,14 +623,14 @@ mod tests {
         }
     }
     impl LLMClient for MockSamplingTracker {
-        fn api_format(&self) -> crate::client::ApiFormat {
-            crate::client::ApiFormat::OpenAI
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
         }
         async fn send(
             &self,
             _m: Vec<Value>,
             _t: Option<Vec<ToolSpec>>,
-            sampling: Option<crate::client::SamplingParams>,
+            sampling: Option<SamplingParams>,
         ) -> Result<LLMResponse, crate::error::BackendError> {
             *self.last_sampling.lock().unwrap() = sampling;
             Ok(LLMResponse::Text(TextResponse::new("ok")))
@@ -599,8 +639,8 @@ mod tests {
             &self,
             _m: Vec<Value>,
             _t: Option<Vec<ToolSpec>>,
-            _s: Option<crate::client::SamplingParams>,
-        ) -> Result<crate::client::ChunkStream, crate::error::StreamError> {
+            _s: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
             Err(crate::error::StreamError::new("not implemented"))
         }
         async fn get_context_length(

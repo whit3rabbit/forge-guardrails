@@ -1,19 +1,19 @@
 //! Core inference: compaction, folding, validation, and retries.
 //! fold_and_serialize converts internal messages to API wire format.
 
-use crate::client::LLMClient;
-use crate::context::ContextManager;
+use crate::clients::base::{ChunkType, LLMClient, LLMResponse, StreamChunk};
+use crate::context::manager::ContextManager;
+use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
+use crate::core::tool_spec::ToolSpec;
 use crate::error::StreamError;
 use crate::guardrails::{ErrorTracker, ResponseValidator};
-use crate::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
-use crate::streaming::{ChunkType, LLMResponse, StreamChunk};
-use crate::tool_spec::ToolSpec;
 use futures_util::StreamExt;
 use serde_json::Value;
 
 /// Tool call ID prefix for monotonic counter formatting.
-const TOOL_CALL_ID_PREFIX: &str = "tc_";
-const TOOL_CALL_ID_WIDTH: usize = 4;
+/// Matches Python: f"call_{tool_call_counter:09d}"
+const TOOL_CALL_ID_PREFIX: &str = "call_";
+const TOOL_CALL_ID_WIDTH: usize = 9;
 
 /// Result of a single inference call.
 #[derive(Debug, Clone)]
@@ -140,6 +140,8 @@ pub async fn run_inference<C: LLMClient>(
                 MessageMeta::new(MessageType::ContextWarning),
             );
             wire.push(warning_msg.serialize(api_format));
+            // Also emit to new_messages so on_message consumers see it (Python parity).
+            new_messages.push(warning_msg);
         }
 
         let sampling_owned = sampling.cloned();
@@ -199,8 +201,12 @@ pub async fn run_inference<C: LLMClient>(
             }
         };
 
-        // Sync token count.
-        context_manager.update_token_count(estimate_tokens_from_response(&response));
+        // Sync token count: prefer real usage from client, fall back to heuristic.
+        if let Some(usage) = client.last_usage() {
+            context_manager.update_token_count(usage.total_tokens);
+        } else {
+            context_manager.update_token_count(estimate_tokens_from_response(&response));
+        }
 
         // Validate response.
         let validation = validator.validate(&response);
@@ -269,9 +275,9 @@ pub async fn run_inference<C: LLMClient>(
                     messages.push(tool_call_msg.clone());
                     new_messages.push(tool_call_msg);
 
-                    // Error results with prefix tag.
+                    // Error results with [UnknownTool] prefix (Python parity).
                     for info in &tool_call_infos {
-                        let error_content = format!("[TOOL_ERROR] {}", nudge_content);
+                        let error_content = format!("[UnknownTool] {}", nudge_content);
                         let result_msg = Message::new(
                             MessageRole::Tool,
                             &error_content,
@@ -287,7 +293,8 @@ pub async fn run_inference<C: LLMClient>(
             continue;
         }
 
-        // Valid response.
+        // Valid response — reset retry budget (Python parity: error_tracker.reset_retries()).
+        error_tracker.reset_retries();
         let tool_calls = validation.tool_calls.unwrap_or_default();
 
         if tool_calls.is_empty() {
@@ -366,6 +373,7 @@ fn estimate_tokens_from_response(response: &LLMResponse) -> i64 {
 }
 
 /// Extract a raw string from a response for error reporting.
+#[allow(dead_code)]
 pub(crate) fn response_to_raw_string(response: &LLMResponse) -> Option<String> {
     match response {
         LLMResponse::Text(t) => Some(t.content.clone()),
@@ -392,10 +400,10 @@ mod tests {
 
     #[test]
     fn tool_call_id_format() {
-        assert_eq!(format_tool_call_id(0), "tc_0000");
-        assert_eq!(format_tool_call_id(1), "tc_0001");
-        assert_eq!(format_tool_call_id(42), "tc_0042");
-        assert_eq!(format_tool_call_id(9999), "tc_9999");
+        assert_eq!(format_tool_call_id(0), "call_000000000");
+        assert_eq!(format_tool_call_id(1), "call_000000001");
+        assert_eq!(format_tool_call_id(42), "call_000000042");
+        assert_eq!(format_tool_call_id(999999999), "call_999999999");
     }
 
     #[test]
@@ -498,7 +506,7 @@ mod tests {
     #[test]
     fn inference_result_fields() {
         let result = InferenceResult {
-            response: LLMResponse::Text(crate::streaming::TextResponse::new("hi")),
+            response: LLMResponse::Text(crate::clients::base::TextResponse::new("hi")),
             new_messages: vec![],
             tool_call_counter: 5,
             attempts: 1,

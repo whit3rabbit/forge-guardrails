@@ -218,7 +218,7 @@ fn get_callable_not_found() {
 
     let result = wf.get_callable("nonexistent");
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("nonexistent"));
+    assert!(result.err().unwrap().contains("nonexistent"));
 }
 
 #[test]

@@ -3,9 +3,9 @@
 //! Provides a structured alternative to bare text responses,
 //! particularly useful for small local models.
 
+use crate::core::tool_spec::{ParamModel, ToolSpec};
+use crate::core::workflow::ToolDef;
 use crate::error::ToolResolutionError;
-use crate::tool_spec::{ParamModel, ToolSpec};
-use crate::workflow::ToolDef;
 use indexmap::IndexMap;
 
 /// Protocol-level constant for the respond tool name.
@@ -19,8 +19,10 @@ pub const RESPOND_TOOL_NAME: &str = "respond";
 pub fn respond_spec() -> ToolSpec {
     ToolSpec {
         name: RESPOND_TOOL_NAME.to_string(),
-        description: "Send a message to the user. Use this tool to chat with the user, \
-             ask questions, clarify their request, or report the final result."
+        description: "Respond to the user with a message. Use this when the user is chatting, \
+             asking a question, when you need to ask a clarifying question before \
+             proceeding, or when no other tool action is needed. Also use this \
+             after completing the user's request to report the result."
             .to_string(),
         parameters: ParamModel::Object {
             description: None,
@@ -66,7 +68,10 @@ fn respond_callable(args: Vec<String>) -> Result<String, ToolResolutionError> {
 /// The spec matches respond_spec(). The callable is an identity function:
 /// given a 'message' argument, it returns that argument unchanged.
 pub fn respond_tool() -> ToolDef {
-    ToolDef::new(respond_spec(), respond_callable as _)
+    ToolDef::new(
+        respond_spec(),
+        respond_callable as fn(Vec<String>) -> Result<String, ToolResolutionError>,
+    )
 }
 
 #[cfg(test)]

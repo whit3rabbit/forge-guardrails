@@ -6,9 +6,9 @@
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-use crate::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
-use crate::respond::RESPOND_TOOL_NAME;
-use crate::streaming::{TextResponse, ToolCall};
+use crate::clients::base::{TextResponse, ToolCall};
+use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
+use crate::tools::respond::RESPOND_TOOL_NAME;
 
 /// Generate a random-ish completion ID.
 fn generate_completion_id() -> String {
@@ -370,8 +370,8 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
 
 /// Build a respond ToolSpec in OpenAI wire format for injection.
 pub fn respond_tool_openai() -> Value {
-    let spec = crate::respond::respond_spec();
-    crate::client::format_tool(&spec)
+    let spec = crate::tools::respond::respond_spec();
+    crate::clients::base::format_tool(&spec)
 }
 
 /// Check if a list of tool specs already contains the respond tool.

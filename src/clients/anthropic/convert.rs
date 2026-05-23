@@ -3,8 +3,8 @@
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-use crate::streaming::{LLMResponse, TextResponse, ToolCall};
-use crate::tool_spec::ToolSpec;
+use crate::clients::base::{LLMResponse, TextResponse, ToolCall};
+use crate::core::tool_spec::ToolSpec;
 
 /// Convert tool specs to Anthropic tool definitions.
 pub fn convert_tools(tools: &[ToolSpec]) -> Vec<Value> {

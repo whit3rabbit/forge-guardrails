@@ -13,12 +13,14 @@ use std::sync::Mutex;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-use crate::client::{ApiFormat, ChunkStream, LLMClient, SamplingParams, TokenUsage};
+use crate::clients::base::{
+    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams, StreamChunk,
+    TextResponse, TokenUsage, ToolCall,
+};
+use crate::clients::sampling::get_sampling_defaults;
+use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 use crate::prompts::{build_tool_prompt, extract_tool_call};
-use crate::sampling::get_sampling_defaults;
-use crate::streaming::{ChunkType, LLMResponse, StreamChunk, TextResponse, ToolCall};
-use crate::tool_spec::ToolSpec;
 
 /// Function calling mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,7 +265,7 @@ impl LlamafileClient {
         let mut body = json!({"model": self.model, "messages": merged, "stream": false, "cache_prompt": self.cache_prompt});
         if let Some(tl) = tools {
             if !tl.is_empty() {
-                let fmt: Vec<Value> = tl.iter().map(|t| crate::client::format_tool(t)).collect();
+                let fmt: Vec<Value> = tl.iter().map(crate::clients::base::format_tool).collect();
                 if let Some(obj) = body.as_object_mut() {
                     obj.insert("tools".into(), json!(fmt));
                 }
@@ -394,6 +396,11 @@ impl LLMClient for LlamafileClient {
         ApiFormat::OpenAI
     }
 
+    fn last_usage(&self) -> Option<crate::clients::base::TokenUsage> {
+        let slot = self.slot_id.unwrap_or(0);
+        self.last_usage.lock().ok()?.get(&slot).cloned()
+    }
+
     async fn send(
         &self,
         messages: Vec<Value>,
@@ -410,7 +417,7 @@ impl LLMClient for LlamafileClient {
                     .await
             }
             _ => {
-                if tools.as_ref().map_or(true, |t| t.is_empty()) {
+                if tools.as_ref().is_none_or(|t| t.is_empty()) {
                     self.set_resolved_mode(LlamafileMode::Native);
                     return self
                         .native_send(messages, tools.as_deref(), sampling.as_ref())
@@ -441,19 +448,27 @@ impl LLMClient for LlamafileClient {
         sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, StreamError> {
         let resolved = self.get_resolved_mode();
-        if resolved.is_none() && tools.as_ref().map_or(false, |t| !t.is_empty()) {
+        if resolved.is_none() && tools.as_ref().is_some_and(|t| !t.is_empty()) {
             let _ = self
                 .send(messages.clone(), tools.clone(), sampling.clone())
                 .await;
         }
         let mode = self.get_resolved_mode().unwrap_or(LlamafileMode::Native);
 
-        let mut body = json!({"model": self.model, "messages": helpers::merge_messages(&messages), "stream": true, "cache_prompt": self.cache_prompt});
+        let mut body = json!({
+            "model": self.model,
+            "messages": helpers::merge_messages(&messages),
+            "stream": true,
+            // stream_options: include_usage so the final SSE chunk carries
+            // token counts, matching Python's {"stream_options": {"include_usage": True}}.
+            "stream_options": {"include_usage": true},
+            "cache_prompt": self.cache_prompt
+        });
         if mode == LlamafileMode::Native {
             if let Some(tl) = &tools {
                 if !tl.is_empty() {
                     let fmt: Vec<Value> =
-                        tl.iter().map(|t| crate::client::format_tool(t)).collect();
+                        tl.iter().map(crate::clients::base::format_tool).collect();
                     if let Some(obj) = body.as_object_mut() {
                         obj.insert("tools".into(), json!(fmt));
                     }
@@ -564,77 +579,174 @@ fn parse_openai_sse(
     tool_names: Vec<String>,
     is_prompt: bool,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
-    use futures_util::StreamExt;
     let byte_stream = resp.bytes_stream();
     let stream = async_stream::stream! {
         use futures_util::StreamExt;
-        let mut buf = Vec::new();
         let mut inner = Box::pin(byte_stream);
-        while let Some(chunk) = inner.next().await {
-            match chunk {
-                Ok(bytes) => buf.extend_from_slice(&bytes),
-                Err(e) => { yield Err(StreamError::new(e.to_string())); return; }
-            }
-        }
-        let body = String::from_utf8_lossy(&buf);
+        let mut line_buf = String::new();
+
         let mut acc_content = String::new();
-        let mut acc_tools: Vec<(String, String, Option<String>)> = Vec::new(); // (name, args_json, id)
-        for line in body.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" { continue; }
-                if let Ok(evt) = serde_json::from_str::<Value>(data) {
-                    let delta = evt.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("delta"));
-                    if let Some(d) = delta {
-                        if let Some(text) = d.get("content").and_then(|c| c.as_str()) {
+        let mut acc_reasoning = String::new();
+        // tool_call_parts: index -> (name, accumulated_args_json, optional_id)
+        let mut acc_tools: Vec<(String, String, Option<String>)> = Vec::new();
+
+        loop {
+            // Drain buffered lines first
+            while let Some(newline_pos) = line_buf.find('\n') {
+                let raw = line_buf[..newline_pos].trim_end_matches('\r').to_string();
+                line_buf = line_buf[newline_pos + 1..].to_string();
+                let Some(data) = raw.strip_prefix("data: ") else { continue; };
+                if data == "[DONE]" { break; }
+                let evt: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // Usage-only chunk (no choices) — Python: self._record_usage(chunk)
+                // We emit a zero-content TextDelta so the runner can update tokens.
+                // (Actual usage propagation happens via the Final chunk's metadata.)
+                if !evt.get("choices").is_some_and(|c| c.as_array().map(|a| !a.is_empty()).unwrap_or(false)) {
+                    // Record usage in the stream context if available
+                    // (we don't have access to self here; usage is returned via Final)
+                    continue;
+                }
+
+                let choice = &evt["choices"][0];
+                let delta = choice.get("delta");
+
+                if let Some(d) = delta {
+                    // reasoning_content (llama-server reasoning field)
+                    if let Some(rc) = d.get("reasoning_content").and_then(|r| r.as_str()) {
+                        if !rc.is_empty() {
+                            acc_reasoning.push_str(rc);
+                        }
+                    }
+
+                    // Regular content
+                    if let Some(text) = d.get("content").and_then(|c| c.as_str()) {
+                        if !text.is_empty() {
                             acc_content.push_str(text);
                             yield Ok(StreamChunk::new(ChunkType::TextDelta).with_content(text));
                         }
-                        if let Some(tcs) = d.get("tool_calls").and_then(|t| t.as_array()) {
-                            for tc in tcs {
-                                let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                                while acc_tools.len() <= idx { acc_tools.push((String::new(), String::new(), None)); }
-                                if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
-                                    acc_tools[idx].0 = name.to_string();
-                                }
-                                if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()) {
-                                    acc_tools[idx].1.push_str(args);
-                                }
-                                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                    acc_tools[idx].2 = Some(id.to_string());
-                                }
+                    }
+
+                    // Tool call deltas
+                    if let Some(tcs) = d.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tc in tcs {
+                            let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                            while acc_tools.len() <= idx {
+                                acc_tools.push((String::new(), String::new(), None));
+                            }
+                            if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                                acc_tools[idx].0 = name.to_string();
+                            }
+                            if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()) {
+                                acc_tools[idx].1.push_str(args);
+                                yield Ok(StreamChunk::new(ChunkType::ToolCallDelta).with_content(args));
+                            }
+                            if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                acc_tools[idx].2 = Some(id.to_string());
                             }
                         }
                     }
-                    if evt.get("choices").and_then(|c| c.get(0)).and_then(|c| c.get("finish_reason")).is_some() {
-                        let response = if !acc_tools.is_empty() {
-                            let reasoning = if think { helpers::extract_reasoning_tags(&acc_content).into() } else { None };
-                            let mut calls = Vec::new();
-                            for (i, (name, args_json, id)) in acc_tools.iter().enumerate() {
-                                let args = serde_json::from_str::<Value>(args_json)
-                                    .ok().and_then(|v| v.as_object().cloned())
-                                    .map(|obj| obj.iter().map(|(k,v)|(k.clone(),v.clone())).collect())
-                                    .unwrap_or_default();
-                                let mut tc = ToolCall::new(name, args);
-                                if let Some(id_val) = id {
-                                    tc = tc.with_id(id_val);
-                                }
-                                if i == 0 { if let Some(r) = &reasoning { tc = tc.with_reasoning(r); } }
-                                calls.push(tc);
-                            }
-                            LLMResponse::ToolCalls(calls)
-                        } else if is_prompt {
-                            let names: Vec<&str> = tool_names.iter().map(|n| n.as_str()).collect();
-                            let extracted = extract_tool_call(&acc_content, &names);
-                            if extracted.is_empty() {
-                                let cleaned = if think { helpers::strip_reasoning_tags(&acc_content) } else { acc_content.clone() };
-                                LLMResponse::Text(TextResponse::new(cleaned))
-                            } else { LLMResponse::ToolCalls(extracted) }
+                }
+
+                // finish_reason present → build Final chunk
+                if choice.get("finish_reason").and_then(|r| r.as_str()).is_some() {
+                    let response = if !acc_tools.is_empty() {
+                        let reasoning = if think {
+                            helpers::resolve_full_reasoning(&acc_reasoning, &acc_content)
                         } else {
-                            let cleaned = if think { helpers::strip_reasoning_tags(&acc_content) } else { acc_content.clone() };
-                            LLMResponse::Text(TextResponse::new(cleaned))
+                            None
                         };
-                        yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
-                    }
+                        let mut calls = Vec::new();
+                        let mut bad_args = false;
+                        for (i, (name, args_json, id)) in acc_tools.iter().enumerate() {
+                            let args = if args_json.is_empty() {
+                                IndexMap::new()
+                            } else {
+                                match serde_json::from_str::<Value>(args_json)
+                                    .ok()
+                                    .and_then(|v| v.as_object().cloned())
+                                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<IndexMap<String, Value>>())
+                                {
+                                    Some(a) => a,
+                                    None => {
+                                        bad_args = true;
+                                        break;
+                                    }
+                                }
+                            };
+                            let mut call = ToolCall::new(name, args);
+                            if let Some(id_val) = id {
+                                call = call.with_id(id_val);
+                            }
+                            if i == 0 {
+                                if let Some(r) = &reasoning {
+                                    call = call.with_reasoning(r);
+                                }
+                            }
+                            calls.push(call);
+                        }
+                        // Python: on bad JSON args, fall back to text
+                        if bad_args {
+                            let content = if acc_content.is_empty() {
+                                acc_tools.first().map(|(_, a, _)| a.as_str()).unwrap_or("").to_string()
+                            } else {
+                                acc_content.clone()
+                            };
+                            LLMResponse::Text(TextResponse::new(content))
+                        } else {
+                            LLMResponse::ToolCalls(calls)
+                        }
+                    } else if is_prompt {
+                        // Prompt-injected mode: extract JSON tool calls from text
+                        let (think_text, cleaned) = helpers::extract_think_tags(&acc_content);
+                        let names: Vec<&str> = tool_names.iter().map(|n| n.as_str()).collect();
+                        let extracted = extract_tool_call(&cleaned, &names);
+                        if extracted.is_empty() {
+                            LLMResponse::Text(TextResponse::new(cleaned))
+                        } else {
+                            let mut result = extracted;
+                            if let Some(first) = result.first_mut() {
+                                let r = if think {
+                                    helpers::resolve_full_reasoning(&acc_reasoning, &think_text)
+                                } else {
+                                    None
+                                };
+                                if let Some(r_val) = r {
+                                    *first = first.clone().with_reasoning(&r_val);
+                                }
+                            }
+                            LLMResponse::ToolCalls(result)
+                        }
+                    } else {
+                        let cleaned = if think {
+                            helpers::strip_reasoning_tags(&acc_content)
+                        } else {
+                            acc_content.clone()
+                        };
+                        LLMResponse::Text(TextResponse::new(cleaned))
+                    };
+                    yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
+                    return;
+                }
+            }
+
+            // Read next bytes from network
+            match inner.next().await {
+                Some(Ok(bytes)) => line_buf.push_str(&String::from_utf8_lossy(&bytes)),
+                Some(Err(e)) => { yield Err(StreamError::new(e.to_string())); return; }
+                None => {
+                    // Stream ended without finish_reason — yield what we have
+                    let cleaned = if think {
+                        helpers::strip_reasoning_tags(&acc_content)
+                    } else {
+                        acc_content.clone()
+                    };
+                    yield Ok(StreamChunk::new(ChunkType::Final)
+                        .with_response(LLMResponse::Text(TextResponse::new(cleaned))));
+                    return;
                 }
             }
         }
@@ -681,7 +793,7 @@ mod tests {
 
     #[test]
     fn sampling_absent_by_default() {
-        let c = LlamafileClient::new(Path::new("t.gguf"));
+        let _c = LlamafileClient::new(Path::new("t.gguf"));
         let mut body = json!({});
         helpers::apply_sampling(
             None, None, None, None, None, None, &None, &None, None, &mut body,

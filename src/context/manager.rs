@@ -1,8 +1,8 @@
 //! Context window manager with token tracking, compaction triggering,
 //! and threshold callbacks.
 
-use crate::compact::CompactStrategy;
-use crate::hardware::estimate_tokens_heuristic;
+use crate::context::hardware::estimate_tokens_heuristic;
+use crate::context::strategies::CompactStrategy;
 
 /// Immutable record of a compaction event.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,10 +17,10 @@ pub struct CompactEvent {
 }
 
 /// Callback type invoked when compaction occurs.
-pub type OnCompactFn = Box<dyn Fn(&CompactEvent)>;
+pub type OnCompactFn = Box<dyn Fn(&CompactEvent) + Send + Sync>;
 
 /// Callback type for threshold warnings. Returns an optional warning string.
-pub type OnThresholdFn = Box<dyn Fn(i64, i64, f64) -> Option<String>>;
+pub type OnThresholdFn = Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync>;
 
 /// Central context budget tracker.
 ///
@@ -74,7 +74,7 @@ impl ContextManager {
     ///
     /// Returns the stored count if `update_token_count` was called, otherwise
     /// falls back to the character-count heuristic.
-    pub fn estimate_tokens(&self, messages: &[crate::Message]) -> i64 {
+    pub fn estimate_tokens(&self, messages: &[crate::core::message::Message]) -> i64 {
         match self.stored_token_count {
             Some(count) => count,
             None => estimate_tokens_heuristic(messages),
@@ -95,10 +95,10 @@ impl ContextManager {
     /// or a new list when compaction occurs (phase > 0).
     pub fn maybe_compact<'a>(
         &mut self,
-        messages: &'a [crate::Message],
+        messages: &'a [crate::core::message::Message],
         step_index: i64,
         step_hint: Option<&str>,
-    ) -> std::borrow::Cow<'a, [crate::Message]> {
+    ) -> std::borrow::Cow<'a, [crate::core::message::Message]> {
         let tokens_before = self.estimate_tokens(messages);
         let (compacted, phase) = self
             .strategy
@@ -134,7 +134,10 @@ impl ContextManager {
     ///
     /// Returns `None` when thresholds or callback are not configured,
     /// budget is zero/negative, or no threshold is newly crossed.
-    pub fn check_thresholds(&mut self, messages: &[crate::Message]) -> Option<String> {
+    pub fn check_thresholds(
+        &mut self,
+        messages: &[crate::core::message::Message],
+    ) -> Option<String> {
         let thresholds = self.context_thresholds.as_ref()?;
         let callback = self.on_context_threshold.as_ref()?;
 
@@ -198,8 +201,8 @@ pub fn default_context_warning(tokens: i64, budget: i64, pct: f64) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compact::NoCompact;
-    use crate::message::{Message, MessageMeta, MessageRole, MessageType};
+    use crate::context::strategies::NoCompact;
+    use crate::core::message::{Message, MessageMeta, MessageRole, MessageType};
 
     #[test]
     fn compact_event_fields() {

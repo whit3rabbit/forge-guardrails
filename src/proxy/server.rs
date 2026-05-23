@@ -9,9 +9,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::client::LLMClient;
-use crate::context::ContextManager;
-use crate::handler::{self, HandlerResult};
+use super::handler::{self, HandlerResult};
+use crate::clients::base::LLMClient;
+use crate::context::manager::ContextManager;
 
 /// Maximum request body size (16 MB).
 const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
@@ -155,6 +155,174 @@ impl HTTPServer {
         }
     }
 
+    /// Serve the HTTP API using axum on a single-threaded local executor.
+    ///
+    /// Binds to `self.host:self.port`. Because `LLMClient` async methods
+    /// produce non-`Send` futures (native AFIT), this server runs on a
+    /// `tokio::task::LocalSet` which removes the cross-thread `Send` requirement,
+    /// matching Python's single-threaded asyncio model.
+    ///
+    /// Requests are serialized through `self.request_mutex` when
+    /// `serialize_requests=true`, matching Python's `asyncio.Semaphore(1)`.
+    pub fn serve_blocking<C>(self: Arc<Self>, client: Arc<C>, ctx: Arc<Mutex<ContextManager>>) -> anyhow::Result<()>
+    where
+        C: LLMClient + 'static,
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async move {
+            let addr: std::net::SocketAddr = format!("{}:{}", self.host, self.port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid bind address: {}", e))?;
+            let app = Self::build_router(self.clone(), client, ctx);
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(listener, app).await?;
+            Ok::<(), anyhow::Error>(())
+        })
+    }
+
+    /// Serve with graceful shutdown triggered by `shutdown_rx` resolving.
+    ///
+    /// Same single-threaded LocalSet model as `serve_blocking`.
+    pub fn serve_blocking_with_shutdown<C>(
+        self: Arc<Self>,
+        client: Arc<C>,
+        ctx: Arc<Mutex<ContextManager>>,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> anyhow::Result<()>
+    where
+        C: LLMClient + 'static,
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async move {
+            let addr: std::net::SocketAddr = format!("{}:{}", self.host, self.port)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid bind address: {}", e))?;
+            let app = Self::build_router(self.clone(), client, ctx);
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await?;
+            Ok::<(), anyhow::Error>(())
+        })
+    }
+
+    fn build_router<C>(
+        server: Arc<Self>,
+        client: Arc<C>,
+        ctx: Arc<Mutex<ContextManager>>,
+    ) -> axum::Router
+    where
+        C: LLMClient + 'static,
+    {
+        use axum::{
+            body::Bytes,
+            http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+            response::{IntoResponse, Response},
+            routing::{get, options, post},
+        };
+
+        // Helper: build a Response with status, content-type, body, and CORS headers.
+        fn build_response(status: u16, ct: &str, body: String) -> Response {
+            let status_code =
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut resp = (status_code, body).into_response();
+            if !ct.is_empty() {
+                if let Ok(v) = HeaderValue::from_str(ct) {
+                    resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+                }
+            }
+            for (k, v) in HTTPServer::cors_headers() {
+                let key_lower = match k {
+                    "Access-Control-Allow-Origin" => "access-control-allow-origin",
+                    "Access-Control-Allow-Methods" => "access-control-allow-methods",
+                    "Access-Control-Allow-Headers" => "access-control-allow-headers",
+                    _ => continue,
+                };
+                if let Ok(hk) = HeaderName::from_bytes(key_lower.as_bytes()) {
+                    resp.headers_mut().insert(hk, HeaderValue::from_static(v));
+                }
+            }
+            resp
+        }
+
+        // Capture shared state in Arcs for each route closure.
+        let srv_health = server.clone();
+        let cli_health = client.clone();
+        let ctx_health = ctx.clone();
+
+        let srv_models = server.clone();
+        let cli_models = client.clone();
+        let ctx_models = ctx.clone();
+
+        let srv_chat = server.clone();
+        let cli_chat = client.clone();
+        let ctx_chat = ctx.clone();
+
+        let health = move || {
+            let srv = srv_health.clone();
+            let cli = cli_health.clone();
+            let ctx = ctx_health.clone();
+            async move {
+                let (status, ct, _, body) =
+                    srv.handle_request("GET", "/health", &[], &cli, &ctx).await;
+                build_response(status, ct, body)
+            }
+        };
+
+        let models = move || {
+            let srv = srv_models.clone();
+            let cli = cli_models.clone();
+            let ctx = ctx_models.clone();
+            async move {
+                let (status, ct, _, body) =
+                    srv.handle_request("GET", "/v1/models", &[], &cli, &ctx).await;
+                build_response(status, ct, body)
+            }
+        };
+
+        let chat = move |body: Bytes| {
+            let srv = srv_chat.clone();
+            let cli = cli_chat.clone();
+            let ctx = ctx_chat.clone();
+            async move {
+                let (status, ct, _, resp_body) = srv
+                    .handle_request("POST", "/v1/chat/completions", &body, &cli, &ctx)
+                    .await;
+                build_response(status, ct, resp_body)
+            }
+        };
+
+        let opts = || async move {
+            let mut headers = HeaderMap::new();
+            for (k, v) in HTTPServer::cors_headers() {
+                let key_lower = match k {
+                    "Access-Control-Allow-Origin" => "access-control-allow-origin",
+                    "Access-Control-Allow-Methods" => "access-control-allow-methods",
+                    "Access-Control-Allow-Headers" => "access-control-allow-headers",
+                    _ => continue,
+                };
+                if let Ok(hk) = HeaderName::from_bytes(key_lower.as_bytes()) {
+                    headers.insert(hk, HeaderValue::from_static(v));
+                }
+            }
+            (StatusCode::NO_CONTENT, headers).into_response()
+        };
+
+        axum::Router::new()
+            .route("/health", get(health))
+            .route("/v1/models", get(models))
+            .route("/v1/chat/completions", post(chat))
+            .route("/v1/chat/completions", options(opts))
+    }
+
     /// Build CORS headers for OPTIONS responses.
     pub fn cors_headers() -> Vec<(&'static str, &'static str)> {
         vec![
@@ -187,6 +355,7 @@ pub fn format_sse_body(events: &[Value]) -> String {
 /// server use. It splits on `\r\n\r\n` and does not handle `Content-Length`, chunked encoding,
 /// pipelined requests, or partial reads. For production environments, use a robust HTTP
 /// framework such as `axum`, `hyper`, or `tiny_http`.
+#[allow(clippy::type_complexity)]
 pub fn parse_http_request(raw: &[u8]) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
     let text = std::str::from_utf8(raw).ok()?;
     let mut parts = text.splitn(2, "\r\n\r\n");
@@ -212,9 +381,9 @@ pub fn parse_http_request(raw: &[u8]) -> Option<(String, String, Vec<(String, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{ApiFormat, ChunkStream, SamplingParams, TokenUsage};
+    use crate::clients::base::{ApiFormat, ChunkStream, SamplingParams};
+    use crate::core::tool_spec::ToolSpec;
     use crate::error::{BackendError, ContextDiscoveryError, StreamError};
-    use crate::tool_spec::ToolSpec;
 
     // Dummy client for testing HTTP routing without a real backend.
     struct DummyClient;
@@ -228,9 +397,9 @@ mod tests {
             _messages: Vec<Value>,
             _tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
-        ) -> Result<crate::streaming::LLMResponse, BackendError> {
-            Ok(crate::streaming::LLMResponse::Text(
-                crate::streaming::TextResponse::new("test"),
+        ) -> Result<crate::clients::base::LLMResponse, BackendError> {
+            Ok(crate::clients::base::LLMResponse::Text(
+                crate::clients::base::TextResponse::new("test"),
             ))
         }
         async fn send_stream(
@@ -247,7 +416,13 @@ mod tests {
     }
 
     fn dummy_ctx() -> ContextManager {
-        ContextManager::new(Box::new(crate::compact::NoCompact), 4096, None, None, None)
+        ContextManager::new(
+            Box::new(crate::context::strategies::NoCompact),
+            4096,
+            None,
+            None,
+            None,
+        )
     }
 
     #[test]

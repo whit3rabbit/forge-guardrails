@@ -7,8 +7,9 @@
 /// of a tool call. The raw response argument is accepted for signature
 /// compatibility but is not incorporated into the output.
 pub fn retry_nudge(_raw_response: &str) -> String {
-    "Please respond with a tool call instead of free text. \
-     You must call one of the available tools using the JSON format."
+    "Your previous response was not a valid tool call. \
+     You must respond with a tool call, not free text. \
+     Please try again with a valid tool call."
         .to_string()
 }
 
@@ -17,9 +18,7 @@ pub fn retry_nudge(_raw_response: &str) -> String {
 pub fn unknown_tool_nudge(called_tool: &str, available_tools: &[&str]) -> String {
     let tools_list = available_tools.join(", ");
     format!(
-        "The tool '{}' does not exist. \
-         Available tools: {}. \
-         Please call one of the available tools.",
+        "Tool '{}' does not exist. Available tools: {}. Call one of them.",
         called_tool, tools_list
     )
 }
@@ -36,21 +35,19 @@ pub fn step_nudge(terminal_tool: &str, pending_steps: &[&str], tier: i32) -> Str
 
     match clamped {
         1 => format!(
-            "You cannot call '{}' yet. \
-             You must first complete the following required step(s): {}. \
-             Please call one of the required tools now.",
+            "You cannot call {} yet. \
+             You must first complete these required steps: {}. \
+             Call one of them now.",
             terminal_tool, steps_str
         ),
         2 => format!(
-            "You must complete the following required step(s) before proceeding: {}. \
-             Call one of these tools now.",
+            "You must call one of these tools now: {}. Pick one.",
             steps_str
         ),
         3 => format!(
-            "STOP. Do NOT call '{}'. \
-             You MUST call one of these tools immediately: {}. \
-             No other action is acceptable.",
-            terminal_tool, steps_str
+            "STOP. You MUST call one of: {}. Do NOT call {}. \
+             Your next response MUST be a tool call to one of: {}.",
+            steps_str, terminal_tool, steps_str
         ),
         _ => unreachable!("tier clamped to [1,3]"),
     }
@@ -61,9 +58,9 @@ pub fn step_nudge(terminal_tool: &str, pending_steps: &[&str], tier: i32) -> Str
 pub fn prerequisite_nudge(tool_name: &str, missing_prereqs: &[&str]) -> String {
     let prereqs_str = missing_prereqs.join(", ");
     format!(
-        "You cannot call '{}' yet because the following prerequisite(s) \
-         have not been completed: {}. \
-         Please call one of the prerequisite tools first.",
+        "You cannot call {} yet. \
+         You must first call: {}. \
+         Call the prerequisite tool now.",
         tool_name, prereqs_str
     )
 }

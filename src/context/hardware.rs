@@ -1,4 +1,4 @@
-//! GPU hardware detection via nvidia-smi and AMD sysfs probes.
+//! GPU hardware detection via nvidia-smi, Apple Silicon, and AMD sysfs probes.
 
 use crate::error::HardwareDetectionError;
 use std::path::Path;
@@ -35,13 +35,19 @@ impl HardwareProfile {
     }
 }
 
-/// Detect GPU hardware by probing nvidia-smi, then AMD sysfs.
+/// Detect GPU hardware by probing nvidia-smi, Apple Silicon, then AMD sysfs.
 ///
 /// Returns `Some(HardwareProfile)` on the first successful probe, or `None`
 /// if no GPU is found. Raises `HardwareDetectionError` on malformed nvidia-smi
-/// output (does not fall through to AMD in that case).
+/// output (does not fall through to later probes in that case).
 pub fn detect_hardware() -> Result<Option<HardwareProfile>, HardwareDetectionError> {
     match probe_nvidia_smi() {
+        Ok(Some(profile)) => return Ok(Some(profile)),
+        Ok(None) => {} // fall through to Apple Silicon
+        Err(e) => return Err(e),
+    }
+
+    match probe_apple_silicon() {
         Ok(Some(profile)) => return Ok(Some(profile)),
         Ok(None) => {} // fall through to AMD
         Err(e) => return Err(e),
@@ -52,6 +58,7 @@ pub fn detect_hardware() -> Result<Option<HardwareProfile>, HardwareDetectionErr
         Ok(None) => {
             eprintln!(
                 "GPU detection failed: nvidia-smi: not installed or failed, \
+                 apple-silicon: not detected or unsupported, \
                  amd-sysfs: no AMD card found"
             );
             Ok(None)
@@ -113,6 +120,73 @@ fn probe_nvidia_smi() -> Result<Option<HardwareProfile>, HardwareDetectionError>
         gpu_vendor: "nvidia".to_string(),
         memory_kind: MemoryKind::Discrete,
     }))
+}
+
+/// Probe Apple Silicon unified memory on macOS.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn probe_apple_silicon() -> Result<Option<HardwareProfile>, HardwareDetectionError> {
+    let memory_output = match Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
+        Ok(output) => output,
+        Err(_) => return Ok(None),
+    };
+    if !memory_output.status.success() {
+        return Ok(None);
+    }
+
+    let memory_stdout = String::from_utf8_lossy(&memory_output.stdout);
+    let vram_total_mb = parse_apple_unified_memory_mb(&memory_stdout)?;
+
+    let gpu_name = match Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_apple_chip_name(&stdout).unwrap_or_else(|| "Apple Silicon".to_string())
+        }
+        _ => "Apple Silicon".to_string(),
+    };
+
+    Ok(Some(HardwareProfile {
+        gpu_name,
+        vram_total_mb,
+        gpu_vendor: "apple".to_string(),
+        memory_kind: MemoryKind::Unified,
+    }))
+}
+
+/// Non-Apple platforms have no Apple Silicon probe.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn probe_apple_silicon() -> Result<Option<HardwareProfile>, HardwareDetectionError> {
+    Ok(None)
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn parse_apple_unified_memory_mb(stdout: &str) -> Result<i64, HardwareDetectionError> {
+    let memory_bytes: i64 = stdout.trim().parse().map_err(|e| {
+        HardwareDetectionError::new(format!(
+            "Failed to parse Apple unified memory value '{}': {}",
+            stdout.trim(),
+            e
+        ))
+    })?;
+    if memory_bytes <= 0 {
+        return Err(HardwareDetectionError::new(format!(
+            "Invalid Apple unified memory value '{}': must be positive",
+            stdout.trim()
+        )));
+    }
+    Ok(memory_bytes / (1024 * 1024))
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn parse_apple_chip_name(stdout: &str) -> Option<String> {
+    let name = stdout.lines().next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// Probe AMD GPU via /sys/class/drm sysfs entries.
@@ -199,7 +273,7 @@ fn probe_amd_sysfs() -> Result<Option<HardwareProfile>, HardwareDetectionError> 
 }
 
 /// Token estimation heuristic: total character count / 4 via integer division.
-pub fn estimate_tokens_heuristic(messages: &[crate::Message]) -> i64 {
+pub fn estimate_tokens_heuristic(messages: &[crate::core::message::Message]) -> i64 {
     let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
     total_chars as i64 / 4
 }
@@ -223,5 +297,46 @@ mod tests {
             memory_kind: MemoryKind::Discrete,
         };
         assert!((profile.vram_total_gb() - 12.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn apple_unified_memory_parse_bytes_to_mb() {
+        assert_eq!(
+            parse_apple_unified_memory_mb("38654705664\n").unwrap(),
+            36864
+        );
+    }
+
+    #[test]
+    fn apple_unified_memory_rejects_malformed_output() {
+        let err = parse_apple_unified_memory_mb("not-a-number\n").unwrap_err();
+        assert!(err.to_string().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn apple_unified_memory_rejects_zero() {
+        let err = parse_apple_unified_memory_mb("0\n").unwrap_err();
+        assert!(err.to_string().contains("must be positive"));
+    }
+
+    #[test]
+    fn apple_chip_name_parse_trims_first_line() {
+        assert_eq!(
+            parse_apple_chip_name("Apple M4 Max\nignored"),
+            Some("Apple M4 Max".to_string())
+        );
+        assert_eq!(parse_apple_chip_name("\n"), None);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn apple_silicon_detect_returns_unified_profile() {
+        let profile = detect_hardware()
+            .unwrap()
+            .expect("expected Apple Silicon hardware profile");
+        assert_eq!(profile.gpu_vendor, "apple");
+        assert_eq!(profile.memory_kind, MemoryKind::Unified);
+        assert!(profile.gpu_name.starts_with("Apple "));
+        assert!(profile.vram_total_mb > 0);
     }
 }

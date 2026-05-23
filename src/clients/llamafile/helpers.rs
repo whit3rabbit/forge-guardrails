@@ -5,7 +5,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::client::SamplingParams;
+use crate::clients::base::SamplingParams;
 
 /// Merge consecutive same-role messages for server template compatibility.
 ///
@@ -37,7 +37,7 @@ pub fn merge_messages(messages: &[Value]) -> Vec<Value> {
                 }
                 Some(r) => {
                     result.push(json!({"role": r, "content": pending_texts.join("\n")}));
-                    result.extend(pending_invisible.drain(..));
+                    result.append(&mut pending_invisible);
                     pending_texts = vec![text.to_string()];
                     pending_role = Some(role);
                 }
@@ -76,6 +76,7 @@ pub fn extract_model_identity(path: &std::path::Path) -> String {
 /// Apply sampling parameters to the request body.
 ///
 /// Per-call overrides win over instance fields. Instance is not mutated.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_sampling(
     instance_temp: Option<f64>,
     instance_top_p: Option<f64>,
@@ -253,6 +254,46 @@ pub fn resolve_reasoning(think: bool, response: &Value) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Resolve reasoning from streaming-accumulated fields.
+///
+/// Used when streaming has separately accumulated `reasoning_content` (from
+/// server-side reasoning field) and `content` (plain text accumulation).
+/// Priority matches Python's `_resolve_reasoning`:
+///   1. accumulated_reasoning (server reasoning_content field)
+///   2. think tags extracted from accumulated_content
+///   3. accumulated_content itself as fallback
+pub fn resolve_full_reasoning(
+    accumulated_reasoning: &str,
+    accumulated_content: &str,
+) -> Option<String> {
+    if !accumulated_reasoning.is_empty() {
+        return Some(accumulated_reasoning.to_string());
+    }
+    if !accumulated_content.is_empty() {
+        let tag_reasoning = extract_reasoning_tags(accumulated_content);
+        if !tag_reasoning.is_empty() {
+            return Some(tag_reasoning);
+        }
+        // Content fallback (model narrating before tool call)
+        return Some(accumulated_content.to_string());
+    }
+    None
+}
+
+/// Extract think tags from content, returning (reasoning, cleaned_content).
+///
+/// Matches Python's `_extract_think_tags(text)` return of `(reasoning, remaining)`.
+/// Supports [THINK]...[/THINK] (Mistral) and <think>...</think> (Qwen/DeepSeek).
+pub fn extract_think_tags(content: &str) -> (String, String) {
+    let reasoning = extract_reasoning_tags(content);
+    let cleaned = if reasoning.is_empty() {
+        content.to_string()
+    } else {
+        strip_reasoning_tags(content)
+    };
+    (reasoning, cleaned)
 }
 
 #[cfg(test)]

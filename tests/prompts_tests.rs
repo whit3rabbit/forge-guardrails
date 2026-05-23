@@ -7,19 +7,16 @@ use serde_json::Value;
 fn make_tool_spec(name: &str, desc: &str, params: Vec<(&str, &str, bool)>) -> ToolSpec {
     let mut properties = IndexMap::new();
     for (pname, ptype, required) in params {
-        match ptype {
-            "string" => {
-                properties.insert(
-                    pname.to_string(),
-                    ParamModel::String {
-                        description: Some(format!("The {} parameter", pname)),
-                        required,
-                        default: None,
-                        enum_values: None,
-                    },
-                );
-            }
-            _ => {}
+        if ptype == "string" {
+            properties.insert(
+                pname.to_string(),
+                ParamModel::String {
+                    description: Some(format!("The {} parameter", pname)),
+                    required,
+                    default: None,
+                    enum_values: None,
+                },
+            );
         }
     }
     ToolSpec {

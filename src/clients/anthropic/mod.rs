@@ -10,9 +10,12 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::client::{ApiFormat, ChunkStream, LLMClient, SamplingParams, TokenUsage};
+use crate::clients::base::{
+    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams, StreamChunk,
+    TokenUsage,
+};
+use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
-use crate::tool_spec::ToolSpec;
 
 /// Client for Anthropic Messages API (Claude models).
 pub struct AnthropicClient {
@@ -91,12 +94,16 @@ impl LLMClient for AnthropicClient {
         ApiFormat::OpenAI
     }
 
+    fn last_usage(&self) -> Option<crate::clients::base::TokenUsage> {
+        self.last_usage.lock().ok().and_then(|g| g.clone())
+    }
+
     async fn send(
         &self,
         messages: Vec<Value>,
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
-    ) -> Result<crate::streaming::LLMResponse, BackendError> {
+    ) -> Result<LLMResponse, BackendError> {
         if let Some(sp) = &sampling {
             log::debug!(
                 "AnthropicClient: ignoring sampling keys: {:?}",
@@ -196,48 +203,140 @@ impl LLMClient for AnthropicClient {
             )));
         }
 
-        // SSE streaming: yield accumulated chunks.
-        // Full SSE parsing requires a proper event parser. This placeholder
-        // returns the accumulated response as a single Final chunk once the
-        // stream completes.
+        // Incremental SSE streaming aligned with Python AnthropicClient.send_stream().
+        // Tracks:
+        //   content_block_start  → detect tool_use blocks by index
+        //   content_block_delta  → text_delta (TEXT_DELTA) or input_json_delta (TOOL_CALL_DELTA)
+        //   content_block_stop   → reset current tool index
+        //   message_stop         → emit FINAL chunk built from accumulated state
+        //   message_delta        → capture usage (input/output_tokens)
         let byte_stream = resp.bytes_stream();
         let stream = async_stream::stream! {
             use futures_util::StreamExt;
-            let mut buf = Vec::new();
+            // SSE line buffer for partial-line data across byte chunks.
+            let mut line_buf = String::new();
             let mut inner = Box::pin(byte_stream);
-            while let Some(chunk) = inner.next().await {
-                match chunk {
-                    Ok(bytes) => buf.extend_from_slice(&bytes),
-                    Err(e) => {
+
+            // Accumulated stream state.
+            let mut accumulated_text = String::new();
+            // (name, args_json) per tool_use block.
+            let mut tool_blocks: Vec<(String, String)> = Vec::new();
+            let mut current_tool_idx: i64 = -1;
+            let mut usage_input: i64 = 0;
+            let mut usage_output: i64 = 0;
+
+            loop {
+                match inner.next().await {
+                    Some(Ok(bytes)) => {
+                        line_buf.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    Some(Err(e)) => {
                         yield Err(StreamError::new(e.to_string()));
                         return;
                     }
+                    None => break,
                 }
-            }
-            let body_str = String::from_utf8_lossy(&buf);
-            // Extract JSON from SSE data lines
-            for line in body_str.lines() {
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" { continue; }
-                    if let Ok(evt) = serde_json::from_str::<Value>(data) {
+                // Process complete lines from the buffer.
+                while let Some(newline_pos) = line_buf.find('\n') {
+                    let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
+                    line_buf = line_buf[newline_pos + 1..].to_string();
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" { continue; }
+                        let evt: Value = match serde_json::from_str(data) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                         match evt.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                            "content_block_start" => {
+                                if let Some("tool_use") = evt
+                                    .get("content_block")
+                                    .and_then(|b| b.get("type"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    let name = evt
+                                        .get("content_block")
+                                        .and_then(|b| b.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    tool_blocks.push((name, String::new()));
+                                    current_tool_idx = (tool_blocks.len() as i64) - 1;
+                                }
+                            }
                             "content_block_delta" => {
                                 if let Some(delta) = evt.get("delta") {
-                                    if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                            yield Ok(crate::streaming::StreamChunk::new(
-                                                crate::streaming::ChunkType::TextDelta,
-                                            ).with_content(text));
+                                    match delta.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                                        "text_delta" => {
+                                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                                accumulated_text.push_str(text);
+                                                yield Ok(StreamChunk::new(ChunkType::TextDelta).with_content(text));
+                                            }
                                         }
+                                        "input_json_delta" => {
+                                            let idx = current_tool_idx;
+                                            if idx >= 0 {
+                                                if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str()) {
+                                                    if let Some(block) = tool_blocks.get_mut(idx as usize) {
+                                                        block.1.push_str(partial);
+                                                    }
+                                                    yield Ok(StreamChunk::new(ChunkType::ToolCallDelta).with_content(partial));
+                                                }
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
+                            "content_block_stop" => {
+                                current_tool_idx = -1;
+                            }
                             "message_delta" => {
-                                let response = evt.get("message").cloned().unwrap_or(serde_json::json!({}));
-                                let parsed = convert::parse_response(&response);
-                                yield Ok(crate::streaming::StreamChunk::new(
-                                    crate::streaming::ChunkType::Final,
-                                ).with_response(parsed));
+                                // Capture usage tokens from message_delta.
+                                if let Some(usage) = evt.get("usage") {
+                                    usage_input = usage.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(usage_input);
+                                    usage_output = usage.get("output_tokens").and_then(|t| t.as_i64()).unwrap_or(usage_output);
+                                }
+                            }
+                            "message_start" => {
+                                // Initial usage (prompt tokens) from message_start.
+                                if let Some(msg) = evt.get("message") {
+                                    if let Some(usage) = msg.get("usage") {
+                                        usage_input = usage.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
+                                        usage_output = usage.get("output_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
+                                    }
+                                }
+                            }
+                            "message_stop" => {
+                                // Build the final LLMResponse matching Python's message_stop handler.
+                                let final_resp = if !tool_blocks.is_empty() {
+                                    let reasoning = if accumulated_text.is_empty() { None } else { Some(accumulated_text.clone()) };
+                                    let calls: Vec<crate::clients::base::ToolCall> = tool_blocks
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, (name, args_json))| {
+                                            let args = serde_json::from_str::<Value>(args_json)
+                                                .ok()
+                                                .and_then(|v| v.as_object().cloned())
+                                                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                                                .unwrap_or_default();
+                                            let mut call = crate::clients::base::ToolCall::new(name, args);
+                                            if i == 0 {
+                                                if let Some(ref r) = reasoning {
+                                                    call = call.with_reasoning(r);
+                                                }
+                                            }
+                                            call
+                                        })
+                                        .collect();
+                                    crate::clients::base::LLMResponse::ToolCalls(calls)
+                                } else {
+                                    crate::clients::base::LLMResponse::Text(
+                                        crate::clients::base::TextResponse::new(&accumulated_text)
+                                    )
+                                };
+                                yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_resp));
+                                return;
                             }
                             _ => {}
                         }
@@ -256,7 +355,7 @@ impl LLMClient for AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streaming::LLMResponse;
+    use crate::clients::base::LLMResponse;
     use serde_json::json;
 
     fn make_tool_spec(name: &str, desc: &str, props: &[(&str, &str)]) -> ToolSpec {
@@ -280,12 +379,12 @@ mod tests {
     #[test]
     fn convert_tools_enum() {
         let mut properties = json!({});
-        properties.as_object_mut().map(|m| {
+        if let Some(m) = properties.as_object_mut() {
             m.insert(
                 "mode".to_string(),
                 json!({"type": "string", "enum": ["fast", "slow"]}),
             );
-        });
+        }
         let schema = json!({"type": "object", "properties": properties});
         let spec = ToolSpec::from_json_schema("run", "Run", &schema).expect("ok");
         let tools = convert::convert_tools(&[spec]);

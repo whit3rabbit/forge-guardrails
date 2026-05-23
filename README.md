@@ -35,8 +35,6 @@ It includes:
 
 ## What this is not
 
-This is not a legal safe harbor, legal opinion, or proof that a clean-room process is sufficient for a given use case. It is an engineering artifact produced by a clean-room workflow. Review the generated artifacts, licenses, and implementation before relying on it.
-
 This is also not a full multi-agent orchestration framework. It provides the lower-level pieces for one guarded LLM workflow loop and related proxy/server integration.
 
 ## Crate metadata
@@ -92,6 +90,12 @@ The library exposes backend clients for:
 - Ollama chat API
 
 Backend support is exposed through the shared `LLMClient` trait, plus common response types such as `LLMResponse`, `TextResponse`, `ToolCall`, `StreamChunk`, and `TokenUsage`.
+
+## macOS / Apple Silicon backends
+
+Apple Silicon is supported through the same backends. Ollama can be installed with Homebrew or the official macOS download. llama.cpp / llama-server can be installed with Homebrew or a Metal-enabled release build. llamafile works on macOS as a downloaded binary after `chmod +x`.
+
+Managed llama.cpp and llamafile startup passes `-ngl 999`; on macOS that uses Metal rather than CUDA, so no NVIDIA driver setup is required. Apple Silicon uses unified memory shared with the OS. Automatic Ollama context budgets use the existing Rust VRAM tiers: less than 24 GB gets 4096 tokens, 24 GB to 47 GB gets 32768 tokens, and 48 GB or more gets 262144 tokens.
 
 ## Public API surface
 
@@ -220,4 +224,4 @@ Use the clean-room skill repository for the workflow, installation instructions,
 
 MIT. See `LICENSE` if present in the repository.
 
-The upstream Forge project is separately licensed by its author. Preserve upstream attribution and review license compatibility before redistribution.
+The upstream Forge project is separately licensed by its author as MIT as well. Preserve upstream attribution and review license compatibility before redistribution.

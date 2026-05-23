@@ -117,7 +117,7 @@ impl fmt::Display for ToolExecutionError {
 
 /// A standalone error type that is NOT a subtype of ForgeError.
 /// Raised by tool callables to signal non-fatal resolution failure.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub struct ToolResolutionError {
     pub message: String,
     pub tool_name: Option<String>,
@@ -141,6 +141,15 @@ impl fmt::Display for ToolResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)
     }
+}
+
+/// Unified tool execution error returned by async tool callables.
+#[derive(Debug, Clone, thiserror::Error, PartialEq)]
+pub enum ToolError {
+    #[error(transparent)]
+    Resolution(#[from] ToolResolutionError),
+    #[error("Tool execution failed: {0}")]
+    Execution(String),
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -6,7 +6,7 @@ use forge_guardrails::{
     compact::NoCompact,
     fold_and_serialize, format_tool_call_id,
     respond::{respond_spec, respond_tool},
-    workflow::{TerminalToolInput, ToolCallable, ToolDef},
+    workflow::{IntoToolCallable, TerminalToolInput, ToolDef},
     ApiFormat, ChunkStream, ContextManager, ForgeError, LLMClient, LLMResponse, Message,
     MessageMeta, MessageRole, MessageType, OnMessageFn, SamplingParams, ToolCallInfo,
     ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
@@ -88,10 +88,11 @@ fn make_text_response(content: &str) -> LLMResponse {
     LLMResponse::Text(forge_guardrails::TextResponse::new(content))
 }
 
-fn make_workflow_with_step_and_terminal(
-    step_tool: ToolCallable,
-    terminal_tool: ToolCallable,
-) -> Workflow {
+fn make_workflow_with_step_and_terminal<S, T>(step_tool: S, terminal_tool: T) -> Workflow
+where
+    S: IntoToolCallable,
+    T: IntoToolCallable,
+{
     let mut tools: IndexMap<String, ToolDef> = IndexMap::new();
     tools.insert(
         "search".to_string(),
@@ -134,7 +135,7 @@ fn make_simple_workflow() -> Workflow {
         }
         Ok("default response".to_string())
     }
-    make_workflow_with_step_and_terminal(step_fn as _, terminal_fn as _)
+    make_workflow_with_step_and_terminal(step_fn, terminal_fn)
 }
 
 fn make_context_manager() -> Arc<Mutex<ContextManager>> {
@@ -252,14 +253,6 @@ async fn ts004_tool_error_feedback() {
     fn failing_step(_args: Vec<String>) -> Result<String, ToolResolutionError> {
         Err(ToolResolutionError::new("search failed: bad query"))
     }
-    fn terminal_fn(args: Vec<String>) -> Result<String, ToolResolutionError> {
-        for arg in &args {
-            if let Some(val) = arg.strip_prefix("message=") {
-                return Ok(val.to_string());
-            }
-        }
-        Ok("done".to_string())
-    }
 
     let mut args1 = IndexMap::new();
     args1.insert("query".to_string(), Value::String("bad query".to_string()));
@@ -290,7 +283,7 @@ async fn ts004_tool_error_feedback() {
                 }),
             )
             .expect("valid"),
-            failing_step as _,
+            failing_step,
         ),
     );
     tools.insert("respond".to_string(), respond_tool());
@@ -469,7 +462,7 @@ async fn ts008_resolution_error_soft() {
                 }),
             )
             .expect("valid"),
-            soft_fail_step as _,
+            soft_fail_step,
         ),
     );
     tools.insert("respond".to_string(), respond_tool());
@@ -666,12 +659,13 @@ async fn ts014_multiple_terminal_tools() {
                 }),
             )
             .expect("valid"),
-            |args: Vec<String>| Ok(format!("found: {:?}", args)) as _,
+            (|args: Vec<String>| Ok(format!("found: {:?}", args)))
+                as fn(Vec<String>) -> Result<String, ToolResolutionError>,
         ),
     );
     tools.insert(
         "respond".to_string(),
-        ToolDef::new(respond_spec(), respond_fn as _),
+        ToolDef::new(respond_spec(), respond_fn),
     );
     tools.insert(
         "summarize".to_string(),
@@ -684,7 +678,7 @@ async fn ts014_multiple_terminal_tools() {
                 }),
             )
             .expect("valid"),
-            summarize_fn as _,
+            summarize_fn,
         ),
     );
 
@@ -787,9 +781,9 @@ fn slot_worker_task_priority_ordering() {
 
 #[test]
 fn tool_call_id_monotonic() {
-    assert_eq!(format_tool_call_id(0), "tc_0000");
-    assert_eq!(format_tool_call_id(1), "tc_0001");
-    assert_eq!(format_tool_call_id(100), "tc_0100");
+    assert_eq!(format_tool_call_id(0), "call_000000000");
+    assert_eq!(format_tool_call_id(1), "call_000000001");
+    assert_eq!(format_tool_call_id(100), "call_000000100");
 }
 
 #[test]
@@ -965,7 +959,7 @@ async fn test_step_blocked_transcript() {
             }
         } else if msg.metadata.msg_type == MessageType::ToolResult {
             if let Some(ref name) = msg.tool_name {
-                if name == "respond" && msg.content.contains("Step blocked") {
+                if name == "respond" && msg.content.contains("[StepEnforcementError]") {
                     step_blocked_tool_result_ids.push(msg.tool_call_id.clone().unwrap_or_default());
                 }
             }

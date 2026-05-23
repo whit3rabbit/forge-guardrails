@@ -2,8 +2,6 @@ use forge_guardrails::{
     default_context_warning, CompactEvent, ContextManager, Message, MessageMeta, MessageRole,
     MessageType, NoCompact, TieredCompact,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
 
 fn sys_msg(content: &str) -> Message {
     Message::new(
@@ -109,10 +107,10 @@ fn maybe_compact_returns_original_on_phase0() {
 #[test]
 fn maybe_compact_emits_event() {
     let msgs = build_6pair();
-    let events: Rc<RefCell<Vec<CompactEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let events_clone = events.clone();
-    let on_compact: Box<dyn Fn(&CompactEvent)> = Box::new(move |e: &CompactEvent| {
-        events_clone.borrow_mut().push(e.clone());
+    let on_compact: Box<dyn Fn(&CompactEvent) + Send + Sync> = Box::new(move |e: &CompactEvent| {
+        events_clone.lock().unwrap().push(e.clone());
     });
     let mut mgr = ContextManager::new(
         Box::new(TieredCompact::new(2).with_threshold(0.0)),
@@ -122,7 +120,7 @@ fn maybe_compact_emits_event() {
         None,
     );
     let _result = mgr.maybe_compact(&msgs, 5, None);
-    let evts = events.borrow();
+    let evts = events.lock().unwrap();
     assert_eq!(evts.len(), 1);
     let evt = &evts[0];
     assert!(evt.tokens_before > evt.tokens_after);
@@ -208,7 +206,7 @@ fn check_thresholds_no_callback() {
 #[test]
 fn check_thresholds_no_thresholds() {
     let msgs = vec![sys_msg("sys")];
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> =
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
         Box::new(|_, _, _| Some("warning".to_string()));
     let mut mgr = ContextManager::new(Box::new(NoCompact), 8000, None, None, Some(callback));
     mgr.update_token_count(5000);
@@ -219,9 +217,10 @@ fn check_thresholds_no_thresholds() {
 #[test]
 fn check_thresholds_fires_on_cross() {
     let msgs = vec![sys_msg("sys")];
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> = Box::new(|tokens, budget, pct| {
-        Some(format!("{}% ({}/{})", (pct * 100.0) as i64, tokens, budget))
-    });
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
+        Box::new(|tokens, budget, pct| {
+            Some(format!("{}% ({}/{})", (pct * 100.0) as i64, tokens, budget))
+        });
     let mut mgr = ContextManager::new(
         Box::new(NoCompact),
         8000,
@@ -240,7 +239,7 @@ fn check_thresholds_fires_on_cross() {
 #[test]
 fn check_thresholds_no_fire_below() {
     let msgs = vec![sys_msg("sys")];
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> =
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
         Box::new(|_, _, _| Some("warning".to_string()));
     let mut mgr = ContextManager::new(
         Box::new(NoCompact),
@@ -257,7 +256,7 @@ fn check_thresholds_no_fire_below() {
 #[test]
 fn check_thresholds_fire_once() {
     let msgs = vec![sys_msg("sys")];
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> =
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
         Box::new(|_, _, _| Some("warning".to_string()));
     let mut mgr = ContextManager::new(
         Box::new(NoCompact),
@@ -277,7 +276,7 @@ fn check_thresholds_fire_once() {
 #[test]
 fn check_thresholds_reset_on_drop() {
     let msgs = vec![sys_msg("sys")];
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> =
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
         Box::new(|_, _, _| Some("warning".to_string()));
     let mut mgr = ContextManager::new(
         Box::new(NoCompact),
@@ -305,11 +304,11 @@ fn check_thresholds_reset_on_drop() {
 #[test]
 fn check_thresholds_highest_crossed() {
     let msgs = vec![sys_msg("sys")];
-    let fired = Rc::new(RefCell::new(Vec::new()));
+    let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let fired_clone = fired.clone();
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> =
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
         Box::new(move |_tokens, _budget, pct| {
-            fired_clone.borrow_mut().push(pct);
+            fired_clone.lock().unwrap().push(pct);
             Some(format!("{}%", (pct * 100.0) as i64))
         });
     let mut mgr = ContextManager::new(
@@ -324,9 +323,9 @@ fn check_thresholds_highest_crossed() {
     mgr.update_token_count(4800); // 60%
     let result = mgr.check_thresholds(&msgs);
     assert!(result.is_some());
-    assert_eq!(fired.borrow().len(), 1);
+    assert_eq!(fired.lock().unwrap().len(), 1);
     // The fired threshold should be 0.5 (the highest below 0.6).
-    let fired_pct = fired.borrow()[0];
+    let fired_pct = fired.lock().unwrap()[0];
     assert!((fired_pct - 0.6).abs() < f64::EPSILON);
 }
 
@@ -334,12 +333,13 @@ fn check_thresholds_highest_crossed() {
 #[test]
 fn check_thresholds_custom_callback_returns_none() {
     let msgs = vec![sys_msg("sys")];
-    let called = Rc::new(RefCell::new(false));
+    let called = std::sync::Arc::new(std::sync::Mutex::new(false));
     let called_clone = called.clone();
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> = Box::new(move |_, _, _| {
-        *called_clone.borrow_mut() = true;
-        None
-    });
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
+        Box::new(move |_, _, _| {
+            *called_clone.lock().unwrap() = true;
+            None
+        });
     let mut mgr = ContextManager::new(
         Box::new(NoCompact),
         8000,
@@ -350,14 +350,14 @@ fn check_thresholds_custom_callback_returns_none() {
     mgr.update_token_count(4800);
     let result = mgr.check_thresholds(&msgs);
     assert!(result.is_none());
-    assert!(*called.borrow());
+    assert!(*called.lock().unwrap());
 }
 
 // ts-059: check_thresholds with zero budget returns None.
 #[test]
 fn check_thresholds_zero_budget() {
     let msgs = vec![sys_msg("sys")];
-    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String>> =
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
         Box::new(|_, _, _| Some("warning".to_string()));
     let mut mgr = ContextManager::new(
         Box::new(NoCompact),
@@ -373,10 +373,10 @@ fn check_thresholds_zero_budget() {
 // ts-060: Per-phase thresholds through ContextManager, phase 1 only.
 #[test]
 fn context_manager_phase1_event() {
-    let events: Rc<RefCell<Vec<CompactEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let events_clone = events.clone();
-    let on_compact: Box<dyn Fn(&CompactEvent)> = Box::new(move |e: &CompactEvent| {
-        events_clone.borrow_mut().push(e.clone());
+    let on_compact: Box<dyn Fn(&CompactEvent) + Send + Sync> = Box::new(move |e: &CompactEvent| {
+        events_clone.lock().unwrap().push(e.clone());
     });
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
     // Use enough content so phase 1 compaction (just calls + results, no nudges to drop)
@@ -400,7 +400,7 @@ fn context_manager_phase1_event() {
         None,
     );
     let _result = mgr.maybe_compact(&msgs, 3, None);
-    let evts = events.borrow();
+    let evts = events.lock().unwrap();
     assert_eq!(evts.len(), 1);
     assert_eq!(evts[0].phase_reached, 1);
 }
@@ -408,10 +408,10 @@ fn context_manager_phase1_event() {
 // ts-061: All phases through ContextManager, phase 3.
 #[test]
 fn context_manager_phase3_event() {
-    let events: Rc<RefCell<Vec<CompactEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let events_clone = events.clone();
-    let on_compact: Box<dyn Fn(&CompactEvent)> = Box::new(move |e: &CompactEvent| {
-        events_clone.borrow_mut().push(e.clone());
+    let on_compact: Box<dyn Fn(&CompactEvent) + Send + Sync> = Box::new(move |e: &CompactEvent| {
+        events_clone.lock().unwrap().push(e.clone());
     });
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
     let long = "x".repeat(500);
@@ -432,7 +432,7 @@ fn context_manager_phase3_event() {
         None,
     );
     let _result = mgr.maybe_compact(&msgs, 5, None);
-    let evts = events.borrow();
+    let evts = events.lock().unwrap();
     assert_eq!(evts.len(), 1);
     assert_eq!(evts[0].phase_reached, 3);
 }
@@ -440,10 +440,10 @@ fn context_manager_phase3_event() {
 // ts-062: No compaction through ContextManager when under threshold.
 #[test]
 fn context_manager_no_compact_under_threshold() {
-    let events: Rc<RefCell<Vec<CompactEvent>>> = Rc::new(RefCell::new(Vec::new()));
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let events_clone = events.clone();
-    let on_compact: Box<dyn Fn(&CompactEvent)> = Box::new(move |e: &CompactEvent| {
-        events_clone.borrow_mut().push(e.clone());
+    let on_compact: Box<dyn Fn(&CompactEvent) + Send + Sync> = Box::new(move |e: &CompactEvent| {
+        events_clone.lock().unwrap().push(e.clone());
     });
     let msgs = vec![sys_msg("sys"), user_msg("usr")];
     let mut mgr = ContextManager::new(
@@ -455,5 +455,5 @@ fn context_manager_no_compact_under_threshold() {
     );
     let result = mgr.maybe_compact(&msgs, 0, None);
     assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
-    assert!(events.borrow().is_empty());
+    assert!(events.lock().unwrap().is_empty());
 }
