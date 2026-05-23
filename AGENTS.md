@@ -10,27 +10,28 @@ It provides foundation types and runtime pieces for guarded LLM-agent workflows:
 - prompt rescue and tool-call parsing
 - context tracking and compaction
 - backend adapters for Anthropic, Llamafile, and Ollama
+- anyllm sidecar client support for provider routing
+- Anthropic/OpenAI request translation through `anyllm_translate`
 - OpenAI-compatible proxy/server surfaces
 
 The reference Python implementation is available in the [forge](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/forge) git submodule. Use its `src/` directory as the gold standard for behavioral reference, structure, and details. Ensure that all benchmark matrix scenarios are implemented so we can guarantee complete alignment with the Python implementation.
 
 ## Core layout
 
-- `src/message.rs` - message roles, types, metadata, tool-call info
-- `src/tool_spec.rs` - tool schema and callable definitions
-- `src/workflow.rs` - workflow model, terminal tools, prerequisites
-- `src/steps.rs` - step tracking and required-step state
+- `src/core/message.rs` - message roles, types, metadata, tool-call info
+- `src/core/tool_spec.rs` - tool schema and callable definitions
+- `src/core/workflow.rs` - workflow model, terminal tools, prerequisites
+- `src/core/steps.rs` - step tracking and required-step state
 - `src/guardrails/` - response validation, error tracking, step enforcement
-- `src/runner.rs` - multi-turn workflow loop
-- `src/inference.rs` - inference helpers and message conversion
-- `src/respond.rs` - built-in `respond` terminal-style tool
+- `src/core/runner.rs` - multi-turn workflow loop
+- `src/core/inference.rs` - inference helpers and message conversion
+- `src/tools/respond.rs` - built-in `respond` terminal-style tool
 - `src/prompts/` - nudge prompts and JSON/tool-call rescue parsing
-- `src/context.rs` - context manager, token budget, compaction callbacks
-- `src/compact.rs` - no-op, sliding-window, and tiered compaction
-- `src/client.rs` - `LLMClient`, streaming trait, OpenAI tool formatting
-- `src/backends/` - Anthropic, Llamafile, and Ollama clients
+- `src/context/` - context manager, token budget, compaction callbacks, compaction strategies, hardware helpers
+- `src/clients/base.rs` - `LLMClient`, streaming trait, OpenAI tool formatting
+- `src/clients/` - Anthropic, Llamafile, Ollama, and anyllm sidecar clients
 - `src/server.rs` - backend lifecycle and context-budget resolution
-- `src/http_server.rs`, `src/handler.rs`, `src/proxy.rs` - HTTP/OpenAI-compatible proxy
+- `src/proxy/` - HTTP/OpenAI-compatible and Anthropic Messages proxy handling
 - `tests/` - integration coverage for core behavior
 
 ## Commands
@@ -59,6 +60,9 @@ Preserve these invariants:
 - Per-call sampling overrides must not mutate client defaults.
 - Retry and rescue logic should nudge the model without hiding hard failures.
 - Server/proxy code must clearly separate passthrough behavior from guarded workflow behavior.
+- Forge owns interception and nudging. Do not route guarded traffic through `anyllm_proxy` handlers before forge validates it.
+- Use `anyllm_translate` for Anthropic/OpenAI compatibility instead of hand-rolling request or response translation.
+- Treat `anyllm_proxy` as a sidecar upstream through `AnyLlmProxyClient`, unless an explicit hook preserving forge guardrails exists.
 
 When changing workflow execution:
 1. Add or update tests first.

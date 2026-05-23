@@ -13,6 +13,8 @@ use crate::proxy::{
     tool_calls_to_sse_events,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
+use anyllm_translate::anthropic::streaming::StreamEvent;
+use anyllm_translate::anthropic::MessageCreateRequest;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -24,6 +26,83 @@ pub enum HandlerResult {
     Response(Value),
     /// Streaming: list of SSE event objects.
     Events(Vec<Value>),
+}
+
+/// Result of handling an Anthropic Messages API request.
+#[derive(Debug)]
+pub enum AnthropicHandlerResult {
+    /// Non-streaming: single Anthropic message response object.
+    Response(Value),
+    /// Streaming: Anthropic SSE events.
+    Events(Vec<StreamEvent>),
+}
+
+/// Error class for Anthropic request handling.
+#[derive(Debug)]
+pub enum AnthropicHandlerError {
+    BadRequest(String),
+    Upstream(String),
+    Internal(String),
+}
+
+impl AnthropicHandlerError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::BadRequest(message) | Self::Upstream(message) | Self::Internal(message) => {
+                message
+            }
+        }
+    }
+}
+
+/// Handle /v1/messages by translating Anthropic input through the guarded
+/// OpenAI-compatible handler, then translating the response back to Anthropic.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_anthropic_messages<C: LLMClient>(
+    body: &MessageCreateRequest,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
+    let config = anyllm_translate::TranslationConfig::default();
+    let openai_req = anyllm_translate::translate_request(body, &config)
+        .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
+    let openai_value = serde_json::to_value(&openai_req)
+        .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+
+    match handle_chat_completions(
+        &openai_value,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+    )
+    .await
+    .map_err(AnthropicHandlerError::Upstream)?
+    {
+        HandlerResult::Response(openai_resp) => {
+            let response: anyllm_translate::openai::ChatCompletionResponse =
+                serde_json::from_value(openai_resp)
+                    .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+            let anthropic_resp = anyllm_translate::translate_response(&response, &body.model);
+            let value = serde_json::to_value(anthropic_resp)
+                .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+            Ok(AnthropicHandlerResult::Response(value))
+        }
+        HandlerResult::Events(openai_events) => {
+            let mut translator = anyllm_translate::new_stream_translator(body.model.clone());
+            let mut events = Vec::new();
+            for event in openai_events {
+                let chunk: anyllm_translate::openai::ChatCompletionChunk =
+                    serde_json::from_value(event)
+                        .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+                events.extend(translator.process_chunk(&chunk));
+            }
+            events.extend(translator.finish());
+            Ok(AnthropicHandlerResult::Events(events))
+        }
+    }
 }
 
 /// Main handler for /v1/chat/completions.

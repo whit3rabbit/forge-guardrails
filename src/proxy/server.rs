@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use super::handler::{self, HandlerResult};
+use super::handler::{self, AnthropicHandlerError, AnthropicHandlerResult, HandlerResult};
 use crate::clients::base::LLMClient;
 use crate::context::manager::ContextManager;
 
@@ -94,12 +94,77 @@ impl HTTPServer {
                 (status, ct, headers, body_str)
             }
 
+            ("POST", "/v1/messages") => {
+                let (status, ct, body_str) = self
+                    .handle_anthropic_messages(body, client, context_manager)
+                    .await;
+                (status, ct, headers, body_str)
+            }
+
             _ => (
                 404,
                 "application/json",
                 headers,
                 json!({"error": "not found"}).to_string(),
             ),
+        }
+    }
+
+    /// Handle /v1/messages.
+    async fn handle_anthropic_messages<C: LLMClient>(
+        &self,
+        body: &[u8],
+        client: &Arc<C>,
+        context_manager: &Arc<Mutex<ContextManager>>,
+    ) -> (u16, &'static str, String) {
+        if body.len() > MAX_BODY_SIZE {
+            return (
+                413,
+                "application/json",
+                json!({"error": "request too large"}).to_string(),
+            );
+        }
+
+        let parsed: anyllm_translate::anthropic::MessageCreateRequest =
+            match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    return (
+                        400,
+                        "application/json",
+                        json!({"error": e.to_string()}).to_string(),
+                    );
+                }
+            };
+
+        let _guard = if self.serialize_requests {
+            Some(self.request_mutex.lock().await)
+        } else {
+            None
+        };
+
+        match handler::handle_anthropic_messages(
+            &parsed,
+            client,
+            context_manager,
+            self.max_retries,
+            self.rescue_enabled,
+        )
+        .await
+        {
+            Ok(AnthropicHandlerResult::Response(v)) => (200, "application/json", v.to_string()),
+            Ok(AnthropicHandlerResult::Events(events)) => {
+                (200, "text/event-stream", format_anthropic_sse_body(&events))
+            }
+            Err(AnthropicHandlerError::BadRequest(e)) => {
+                (400, "application/json", json!({"error": e}).to_string())
+            }
+            Err(AnthropicHandlerError::Upstream(e)) => {
+                (502, "application/json", json!({"error": e}).to_string())
+            }
+            Err(AnthropicHandlerError::Internal(e)) => {
+                (500, "application/json", json!({"error": e}).to_string())
+            }
         }
     }
 
@@ -164,7 +229,11 @@ impl HTTPServer {
     ///
     /// Requests are serialized through `self.request_mutex` when
     /// `serialize_requests=true`, matching Python's `asyncio.Semaphore(1)`.
-    pub fn serve_blocking<C>(self: Arc<Self>, client: Arc<C>, ctx: Arc<Mutex<ContextManager>>) -> anyhow::Result<()>
+    pub fn serve_blocking<C>(
+        self: Arc<Self>,
+        client: Arc<C>,
+        ctx: Arc<Mutex<ContextManager>>,
+    ) -> anyhow::Result<()>
     where
         C: LLMClient + 'static,
     {
@@ -236,7 +305,8 @@ impl HTTPServer {
             let mut resp = (status_code, body).into_response();
             if !ct.is_empty() {
                 if let Ok(v) = HeaderValue::from_str(ct) {
-                    resp.headers_mut().insert(axum::http::header::CONTENT_TYPE, v);
+                    resp.headers_mut()
+                        .insert(axum::http::header::CONTENT_TYPE, v);
                 }
             }
             for (k, v) in HTTPServer::cors_headers() {
@@ -266,6 +336,10 @@ impl HTTPServer {
         let cli_chat = client.clone();
         let ctx_chat = ctx.clone();
 
+        let srv_messages = server.clone();
+        let cli_messages = client.clone();
+        let ctx_messages = ctx.clone();
+
         let health = move || {
             let srv = srv_health.clone();
             let cli = cli_health.clone();
@@ -282,8 +356,9 @@ impl HTTPServer {
             let cli = cli_models.clone();
             let ctx = ctx_models.clone();
             async move {
-                let (status, ct, _, body) =
-                    srv.handle_request("GET", "/v1/models", &[], &cli, &ctx).await;
+                let (status, ct, _, body) = srv
+                    .handle_request("GET", "/v1/models", &[], &cli, &ctx)
+                    .await;
                 build_response(status, ct, body)
             }
         };
@@ -300,7 +375,35 @@ impl HTTPServer {
             }
         };
 
-        let opts = || async move {
+        let messages = move |body: Bytes| {
+            let srv = srv_messages.clone();
+            let cli = cli_messages.clone();
+            let ctx = ctx_messages.clone();
+            async move {
+                let (status, ct, _, resp_body) = srv
+                    .handle_request("POST", "/v1/messages", &body, &cli, &ctx)
+                    .await;
+                build_response(status, ct, resp_body)
+            }
+        };
+
+        let opts_chat = || async move {
+            let mut headers = HeaderMap::new();
+            for (k, v) in HTTPServer::cors_headers() {
+                let key_lower = match k {
+                    "Access-Control-Allow-Origin" => "access-control-allow-origin",
+                    "Access-Control-Allow-Methods" => "access-control-allow-methods",
+                    "Access-Control-Allow-Headers" => "access-control-allow-headers",
+                    _ => continue,
+                };
+                if let Ok(hk) = HeaderName::from_bytes(key_lower.as_bytes()) {
+                    headers.insert(hk, HeaderValue::from_static(v));
+                }
+            }
+            (StatusCode::NO_CONTENT, headers).into_response()
+        };
+
+        let opts_messages = || async move {
             let mut headers = HeaderMap::new();
             for (k, v) in HTTPServer::cors_headers() {
                 let key_lower = match k {
@@ -320,7 +423,9 @@ impl HTTPServer {
             .route("/health", get(health))
             .route("/v1/models", get(models))
             .route("/v1/chat/completions", post(chat))
-            .route("/v1/chat/completions", options(opts))
+            .route("/v1/chat/completions", options(opts_chat))
+            .route("/v1/messages", post(messages))
+            .route("/v1/messages", options(opts_messages))
     }
 
     /// Build CORS headers for OPTIONS responses.
@@ -346,6 +451,46 @@ pub fn format_sse_body(events: &[Value]) -> String {
     }
     body.push_str("data: [DONE]\n\n");
     body
+}
+
+/// Format Anthropic SSE events.
+///
+/// Anthropic streams use named SSE events and do not use OpenAI's [DONE]
+/// sentinel.
+pub fn format_anthropic_sse_body(
+    events: &[anyllm_translate::anthropic::streaming::StreamEvent],
+) -> String {
+    let mut body = String::new();
+    for event in events {
+        body.push_str("event: ");
+        body.push_str(anthropic_event_name(event));
+        body.push('\n');
+        body.push_str("data: ");
+        body.push_str(&serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()));
+        body.push_str("\n\n");
+    }
+    body
+}
+
+fn anthropic_event_name(
+    event: &anyllm_translate::anthropic::streaming::StreamEvent,
+) -> &'static str {
+    match event {
+        anyllm_translate::anthropic::streaming::StreamEvent::MessageStart { .. } => "message_start",
+        anyllm_translate::anthropic::streaming::StreamEvent::ContentBlockStart { .. } => {
+            "content_block_start"
+        }
+        anyllm_translate::anthropic::streaming::StreamEvent::ContentBlockDelta { .. } => {
+            "content_block_delta"
+        }
+        anyllm_translate::anthropic::streaming::StreamEvent::ContentBlockStop { .. } => {
+            "content_block_stop"
+        }
+        anyllm_translate::anthropic::streaming::StreamEvent::MessageDelta { .. } => "message_delta",
+        anyllm_translate::anthropic::streaming::StreamEvent::MessageStop { .. } => "message_stop",
+        anyllm_translate::anthropic::streaming::StreamEvent::Ping { .. } => "ping",
+        anyllm_translate::anthropic::streaming::StreamEvent::Error { .. } => "error",
+    }
 }
 
 /// Parse an HTTP request from raw bytes.
@@ -384,6 +529,7 @@ mod tests {
     use crate::clients::base::{ApiFormat, ChunkStream, SamplingParams};
     use crate::core::tool_spec::ToolSpec;
     use crate::error::{BackendError, ContextDiscoveryError, StreamError};
+    use indexmap::IndexMap;
 
     // Dummy client for testing HTTP routing without a real backend.
     struct DummyClient;
@@ -401,6 +547,37 @@ mod tests {
             Ok(crate::clients::base::LLMResponse::Text(
                 crate::clients::base::TextResponse::new("test"),
             ))
+        }
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, StreamError> {
+            Err(StreamError::new("not implemented"))
+        }
+        async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    struct RespondClient;
+
+    impl LLMClient for RespondClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<crate::clients::base::LLMResponse, BackendError> {
+            let mut args = IndexMap::new();
+            args.insert("message".to_string(), json!("responded"));
+            Ok(crate::clients::base::LLMResponse::ToolCalls(vec![
+                crate::clients::base::ToolCall::new("respond", args),
+            ]))
         }
         async fn send_stream(
             &self,
@@ -549,6 +726,108 @@ mod tests {
         assert_eq!(status, 200);
         let v: Value = serde_json::from_str(&body_str).unwrap();
         assert_eq!(v["choices"][0]["message"]["content"], "test");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_valid_request() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "model": "claude-test",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let (status, ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/messages",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(ct, "application/json");
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["model"], "claude-test");
+        assert_eq!(v["content"][0]["text"], "test");
+        assert_eq!(v["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_with_tools_strips_respond() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "model": "claude-test",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "search",
+                "description": "Search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }]
+        }))
+        .unwrap();
+        let (status, _ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/messages",
+                &body,
+                &Arc::new(RespondClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(v["content"][0]["text"], "responded");
+        assert_eq!(v["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_invalid_json_returns_400() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (status, _ct, _headers, _body) = srv
+            .handle_request(
+                "POST",
+                "/v1/messages",
+                b"not json",
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_streaming_request() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "model": "claude-test",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .unwrap();
+        let (status, ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/messages",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(ct, "text/event-stream");
+        assert!(body_str.contains("event: message_start"));
+        assert!(body_str.contains("event: content_block_delta"));
+        assert!(body_str.contains("event: message_stop"));
+        assert!(body_str.contains("test"));
     }
 
     #[tokio::test]

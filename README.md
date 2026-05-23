@@ -181,6 +181,32 @@ Relevant pieces include:
 - `ServerManager`
 - `setup_backend`
 
+The HTTP server also accepts Anthropic Messages API requests at
+`POST /v1/messages`. Those requests are translated with `anyllm_translate`,
+run through the same guarded OpenAI-compatible handler used by
+`POST /v1/chat/completions`, then translated back to Anthropic responses.
+
+### 4. anyllm sidecar integration
+
+Use `AnyLlmProxyClient` when you want forge-guardrails to keep ownership of
+interception, validation, and nudging while delegating provider setup and
+routing to a running `anyllm_proxy` sidecar.
+
+```rust
+use forge_guardrails::AnyLlmProxyClient;
+
+let client = AnyLlmProxyClient::new("gpt-4o-mini")
+    .with_base_url("http://127.0.0.1:3000")
+    .with_api_key("local-proxy-key")
+    .with_context_length(128_000);
+```
+
+Run `anyllm_proxy` separately for its provider catalog, routing, config files,
+admin UI, cache, metrics, and batch surfaces. Point `AnyLlmProxyClient` at the
+sidecar. Clients can call forge-guardrails through either OpenAI
+`/v1/chat/completions` or Anthropic `/v1/messages`; forge still performs the
+guarded interception before any request reaches the sidecar.
+
 ## Testing scope
 
 The clean-room summary reports:

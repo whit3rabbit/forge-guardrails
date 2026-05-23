@@ -358,10 +358,17 @@ impl LLMClient for OllamaClient {
                     if Self::is_think_unsupported_error(&ej) {
                         if !think_resolved {
                             // Persist: disable think for future calls (Python parity).
-                            if let Ok(mut g) = self.think.lock() { *g = false; }
-                            if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+                            if let Ok(mut g) = self.think.lock() {
+                                *g = false;
+                            }
+                            if let Ok(mut g) = self.think_resolved.lock() {
+                                *g = true;
+                            }
                             let retry_body = self.build_request_body(
-                                messages, tools.as_deref(), sampling.as_ref(), false,
+                                messages,
+                                tools.as_deref(),
+                                sampling.as_ref(),
+                                false,
                             );
                             let retry_resp = reqwest::Client::new()
                                 .post(format!("{}/api/chat", self.base_url))
@@ -406,7 +413,9 @@ impl LLMClient for OllamaClient {
             .map_err(|e| BackendError::new(status, e.to_string()))?;
         // Mark resolved after first successful call.
         if !think_resolved {
-            if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+            if let Ok(mut g) = self.think_resolved.lock() {
+                *g = true;
+            }
         }
         self.record_usage(&rj);
         Ok(self.parse_send_response(&rj, think))
@@ -456,10 +465,17 @@ impl LLMClient for OllamaClient {
                 if Self::is_think_unsupported_error(&ej) {
                     if !think_resolved {
                         // Persist: disable think for future calls (Python parity).
-                        if let Ok(mut g) = self.think.lock() { *g = false; }
-                        if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+                        if let Ok(mut g) = self.think.lock() {
+                            *g = false;
+                        }
+                        if let Ok(mut g) = self.think_resolved.lock() {
+                            *g = true;
+                        }
                         let rb = self.build_request_body(
-                            messages, tools.as_deref(), sampling.as_ref(), false,
+                            messages,
+                            tools.as_deref(),
+                            sampling.as_ref(),
+                            false,
                         );
                         let mut rb_obj = rb;
                         if let Some(obj) = rb_obj.as_object_mut() {
@@ -495,7 +511,9 @@ impl LLMClient for OllamaClient {
         }
         // Mark resolved after first successful call.
         if !think_resolved {
-            if let Ok(mut g) = self.think_resolved.lock() { *g = true; }
+            if let Ok(mut g) = self.think_resolved.lock() {
+                *g = true;
+            }
         }
         Ok(Box::pin(parse_ollama_ndjson(resp, think)))
     }

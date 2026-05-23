@@ -389,13 +389,21 @@ pub fn has_respond_tool(tools: &[Value]) -> bool {
 pub fn extract_sampling(body: &Value) -> Option<Map<String, Value>> {
     let mut map = Map::new();
     let recognized = [
+        "max_tokens",
+        "max_completion_tokens",
         "temperature",
         "top_p",
         "top_k",
         "min_p",
         "repeat_penalty",
         "presence_penalty",
+        "frequency_penalty",
         "seed",
+        "stop",
+        "response_format",
+        "reasoning_effort",
+        "parallel_tool_calls",
+        "user",
     ];
 
     for key in &recognized {

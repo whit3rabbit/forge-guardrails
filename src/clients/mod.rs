@@ -1,10 +1,12 @@
 pub mod anthropic;
+pub mod anyllm_proxy;
 pub mod base;
 pub mod llamafile;
 pub mod ollama;
 pub mod sampling;
 
 pub use anthropic::AnthropicClient;
+pub use anyllm_proxy::AnyLlmProxyClient;
 pub use base::{
     format_tool, ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams,
     StreamChunk, TextResponse, TokenUsage, ToolCall,

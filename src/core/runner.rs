@@ -166,10 +166,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             self.rescue_enabled,
             retry_nudge_for_validator,
         );
-        let mut error_tracker = crate::guardrails::ErrorTracker::new(
-            self.max_retries_per_step,
-            self.max_tool_errors,
-        );
+        let mut error_tracker =
+            crate::guardrails::ErrorTracker::new(self.max_retries_per_step, self.max_tool_errors);
         let mut guardrails = Guardrails::new(
             tool_names.clone(),
             terminal_tool,

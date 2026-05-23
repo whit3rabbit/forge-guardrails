@@ -17,7 +17,8 @@ async fn test_anthropic_streaming_request() {
         "data: {\"type\": \"message_stop\"}\n\n",
     );
 
-    let _mock = server.mock("POST", "/messages")
+    let _mock = server
+        .mock("POST", "/messages")
         .match_header("content-type", "application/json")
         .match_body(mockito::Matcher::Json(json!({
             "model": "claude-3",
