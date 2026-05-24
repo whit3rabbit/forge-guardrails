@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import sys
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +50,10 @@ def _print_early_help() -> None:
     )
     parser.add_argument("--output")
     parser.add_argument("--budget-tokens", type=int)
+    parser.add_argument("--backend-label", default="openai-proxy")
+    parser.add_argument("--mode-label", default="proxy")
+    parser.add_argument("--eval-target-backend", default="openai-proxy")
+    parser.add_argument("--no-recommended-sampling", action="store_true")
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)
@@ -58,12 +65,53 @@ if __name__ == "__main__" and any(arg in {"--help", "-h"} for arg in sys.argv[1:
     raise SystemExit(0)
 
 
-from forge.clients.base import ChunkType, StreamChunk, format_tool
-from forge.core.workflow import TextResponse, ToolCall, ToolSpec
+from forge.clients.base import format_tool
+from forge.clients.sampling_defaults import get_sampling_defaults
+from forge.core.workflow import ToolSpec, Workflow
 from tests.eval.ablation import ABLATION_PRESETS
-from tests.eval.eval_runner import EvalConfig, run_scenario
-from tests.eval.metrics import analyze_history
+from tests.eval.eval_runner import _build_workflow_with_capture
 from tests.eval.scenarios import ALL_SCENARIOS, EvalScenario
+
+
+@dataclass
+class ProxyToolCall:
+    id: str
+    name: str
+    args: dict[str, Any]
+    arguments_json: str
+    reasoning: str | None = None
+
+
+@dataclass
+class ProxyTurn:
+    kind: str
+    content: str = ""
+    tool_calls: list[ProxyToolCall] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
+class ProxyRunResult:
+    scenario_name: str
+    completeness: bool
+    iterations_used: int
+    terminal_args: dict[str, Any] | None = None
+    accuracy: bool | None = None
+    validate_error: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+    elapsed_seconds: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    retry_nudges: int = 0
+    step_nudges: int = 0
+    tool_errors: int = 0
+    reasoning_msgs: int = 0
+    tool_sequence: list[str] = field(default_factory=list)
+    tool_args: list[dict[str, Any]] = field(default_factory=list)
+    final_text: str = ""
+    proxy_terminal_source: str | None = None
 
 
 class OpenAIProxyClient:
@@ -71,46 +119,39 @@ class OpenAIProxyClient:
 
     api_format = "openai"
 
-    def __init__(self, base_url: str, model: str, timeout: float = 300.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 300.0,
+        recommended_sampling: bool = True,
+    ) -> None:
         self.base_url = _chat_completions_url(base_url)
         self.model = model
         self.timeout = timeout
-        self.last_usage: dict[str, int] | None = None
+        self.sampling_defaults = (
+            get_sampling_defaults(model) if recommended_sampling else {}
+        )
 
-    async def send(
+    async def chat(
         self,
         messages: list[dict[str, Any]],
         tools: list[ToolSpec] | None = None,
         sampling: dict[str, Any] | None = None,
-    ) -> list[ToolCall] | TextResponse:
+        stream: bool = False,
+    ) -> ProxyTurn:
         import httpx
 
-        body = self._body(messages, tools, sampling, stream=False)
+        body = self._body(messages, tools, sampling, stream=stream)
+        if stream:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", self.base_url, json=body) as response:
+                    response.raise_for_status()
+                    return await _parse_openai_sse(response)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(self.base_url, json=body)
             response.raise_for_status()
-        data = response.json()
-        self._record_usage(data.get("usage"))
-        return _parse_openai_response(data)
-
-    async def send_stream(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[ToolSpec] | None = None,
-        sampling: dict[str, Any] | None = None,
-    ):
-        import httpx
-
-        body = self._body(messages, tools, sampling, stream=True)
-        self.last_usage = None
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", self.base_url, json=body) as response:
-                response.raise_for_status()
-                async for chunk in _parse_openai_sse(response, self._record_usage):
-                    yield chunk
-
-    async def get_context_length(self) -> int | None:
-        return None
+        return _parse_openai_response(response.json())
 
     def _body(
         self,
@@ -126,22 +167,10 @@ class OpenAIProxyClient:
         }
         if tools:
             body["tools"] = [format_tool(tool) for tool in tools]
+        body.update(self.sampling_defaults)
         if sampling:
             body.update(sampling)
         return body
-
-    def _record_usage(self, usage: dict[str, Any] | None) -> None:
-        if not usage:
-            self.last_usage = None
-            return
-        prompt = int(usage.get("prompt_tokens", 0) or 0)
-        completion = int(usage.get("completion_tokens", 0) or 0)
-        total = int(usage.get("total_tokens", prompt + completion) or 0)
-        self.last_usage = {
-            "input_tokens": prompt,
-            "output_tokens": completion,
-            "total_tokens": total,
-        }
 
 
 def _chat_completions_url(base_url: str) -> str:
@@ -153,27 +182,54 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{trimmed}/v1/chat/completions"
 
 
-def _parse_openai_response(data: dict[str, Any]) -> list[ToolCall] | TextResponse:
+def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int]:
+    if not usage:
+        return 0, 0
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    completion = int(usage.get("completion_tokens", 0) or 0)
+    return prompt, completion
+
+
+def _parse_openai_response(data: dict[str, Any]) -> ProxyTurn:
+    input_tokens, output_tokens = _usage_tokens(data.get("usage"))
     choices = data.get("choices") or []
     if not choices:
-        return TextResponse(content="")
+        return ProxyTurn("text", input_tokens=input_tokens, output_tokens=output_tokens)
     message = choices[0].get("message") or {}
     tool_calls = message.get("tool_calls") or []
     if tool_calls:
-        parsed: list[ToolCall] = []
+        parsed: list[ProxyToolCall] = []
         reasoning = message.get("content") or None
         for index, call in enumerate(tool_calls):
             function = call.get("function") or {}
-            args = _parse_args(function.get("arguments"))
-            parsed.append(
-                ToolCall(
-                    tool=function.get("name", ""),
-                    args=args,
-                    reasoning=reasoning if index == 0 else None,
-                )
-            )
-        return parsed
-    return TextResponse(content=message.get("content") or "")
+            arguments_json = _arguments_json(function.get("arguments"))
+            parsed.append(ProxyToolCall(
+                id=call.get("id") or f"call_{index}",
+                name=function.get("name", ""),
+                args=_parse_args(arguments_json),
+                arguments_json=arguments_json,
+                reasoning=reasoning if index == 0 else None,
+            ))
+        return ProxyTurn(
+            "tool_call",
+            tool_calls=parsed,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    return ProxyTurn(
+        "text",
+        content=message.get("content") or "",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+def _arguments_json(raw: Any) -> str:
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        return json.dumps(raw, separators=(",", ":"))
+    return "{}"
 
 
 def _parse_args(raw: Any) -> dict[str, Any]:
@@ -188,9 +244,12 @@ def _parse_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
-async def _parse_openai_sse(response: Any, record_usage: Any):
+async def _parse_openai_sse(response: Any) -> ProxyTurn:
     content = ""
     tool_parts: dict[int, dict[str, Any]] = {}
+    input_tokens = 0
+    output_tokens = 0
+    final_reason: str | None = None
 
     async for raw_line in response.aiter_lines():
         line = raw_line.strip()
@@ -203,7 +262,7 @@ async def _parse_openai_sse(response: Any, record_usage: Any):
 
         usage = data.get("usage")
         if usage:
-            record_usage(usage)
+            input_tokens, output_tokens = _usage_tokens(usage)
 
         choices = data.get("choices") or []
         if not choices:
@@ -215,33 +274,52 @@ async def _parse_openai_sse(response: Any, record_usage: Any):
         if "content" in delta:
             text = delta.get("content") or ""
             content += text
-            yield StreamChunk(type=ChunkType.TEXT_DELTA, content=text)
 
         for part in delta.get("tool_calls") or []:
             index = int(part.get("index", 0))
             existing = tool_parts.setdefault(
-                index, {"name": "", "arguments": "", "reasoning": None}
+                index,
+                {
+                    "id": f"call_{index}",
+                    "name": "",
+                    "arguments": "",
+                    "reasoning": None,
+                },
             )
+            if part.get("id"):
+                existing["id"] = part["id"]
             function = part.get("function") or {}
             if function.get("name"):
                 existing["name"] = function["name"]
             if function.get("arguments"):
                 existing["arguments"] += function["arguments"]
-            yield StreamChunk(type=ChunkType.TOOL_CALL_DELTA, content=json.dumps(part))
 
         if choice.get("finish_reason") in {"stop", "tool_calls"}:
-            if choice["finish_reason"] == "tool_calls":
-                calls = [
-                    ToolCall(
-                        tool=part["name"],
-                        args=_parse_args(part["arguments"]),
-                        reasoning=part.get("reasoning"),
-                    )
-                    for _, part in sorted(tool_parts.items())
-                ]
-                yield StreamChunk(type=ChunkType.FINAL, response=calls)
-            else:
-                yield StreamChunk(type=ChunkType.FINAL, response=TextResponse(content=content))
+            final_reason = choice["finish_reason"]
+
+    if final_reason == "tool_calls":
+        calls = [
+            ProxyToolCall(
+                id=part["id"],
+                name=part["name"],
+                args=_parse_args(part["arguments"]),
+                arguments_json=part["arguments"] or "{}",
+                reasoning=content if index == 0 and content else part.get("reasoning"),
+            )
+            for index, part in sorted(tool_parts.items())
+        ]
+        return ProxyTurn(
+            "tool_call",
+            tool_calls=calls,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    return ProxyTurn(
+        "text",
+        content=content,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 def _select_scenarios(names: list[str] | None, tags: list[str] | None) -> list[EvalScenario]:
@@ -263,39 +341,250 @@ def _select_scenarios(names: list[str] | None, tags: list[str] | None) -> list[E
     return scenarios
 
 
-def _tool_trace(messages: list[Any] | None) -> tuple[list[str], list[dict[str, Any]]]:
-    names: list[str] = []
-    args: list[dict[str, Any]] = []
-    if not messages:
-        return names, args
-    for message in messages:
-        tool_calls = getattr(message, "tool_calls", None) or []
-        for call in tool_calls:
-            names.append(call.name)
-            args.append(dict(call.args or {}))
-    return names, args
+def _proxy_tool_specs(workflow: Workflow) -> list[ToolSpec]:
+    specs = workflow.get_tool_specs()
+    if "respond" not in workflow.terminal_tools:
+        return specs
+    # `respond` is proxy-reserved. If a scenario supplies respond(answer=...),
+    # the proxy will strip it as respond(message=...) and lose the answer.
+    return [spec for spec in specs if spec.name != "respond"]
+
+
+def _openai_tool_call(call: ProxyToolCall) -> dict[str, Any]:
+    return {
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": call.arguments_json,
+        },
+    }
+
+
+async def _call_tool(fn: Any, args: dict[str, Any]) -> Any:
+    result = fn(**args)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _stringify_tool_result(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _is_proxy_failure_text(text: str) -> bool:
+    return text.startswith("Retries exhausted after ") or text.startswith(
+        "Max iterations ("
+    )
+
+
+def _terminal_args_from_text(workflow: Workflow, text: str) -> dict[str, Any]:
+    terminal = next(iter(workflow.terminal_tools))
+    fields = workflow.tools[terminal].spec.parameters.model_fields
+    args: dict[str, Any] = {}
+    for name, field in fields.items():
+        annotation = str(field.annotation)
+        if field.annotation is str or "str" in annotation:
+            args[name] = text
+    if args:
+        return args
+    if fields:
+        first = next(iter(fields))
+        args[first] = text
+    return args
+
+
+def _terminal_text(args: dict[str, Any]) -> str:
+    preferred = (
+        "message",
+        "answer",
+        "content",
+        "findings",
+        "summary",
+        "reason",
+        "report",
+        "diagnosis",
+        "action",
+        "rationale",
+        "candidate",
+    )
+    for key in preferred:
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            return value
+    for value in args.values():
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _validate_result(
+    scenario: EvalScenario,
+    terminal_args: dict[str, Any] | None,
+    validate_state_fn: Any,
+) -> tuple[bool | None, str | None]:
+    accuracy: bool | None = None
+    validate_error: str | None = None
+    if scenario.validate and terminal_args is not None:
+        try:
+            accuracy = scenario.validate(terminal_args)
+        except Exception as exc:  # pragma: no cover - defensive parity path
+            accuracy = None
+            validate_error = type(exc).__name__
+    if validate_state_fn is not None:
+        try:
+            state_ok = validate_state_fn()
+            accuracy = state_ok if accuracy is None else accuracy and state_ok
+        except Exception as exc:  # pragma: no cover - defensive parity path
+            accuracy = False
+            validate_error = f"validate_state: {type(exc).__name__}"
+    return accuracy, validate_error
+
+
+async def run_proxy_scenario(
+    client: OpenAIProxyClient,
+    scenario: EvalScenario,
+    *,
+    stream: bool,
+    budget_tokens: int | None,
+    ablation: Any,
+    verbose: bool = False,
+) -> ProxyRunResult:
+    workflow, capture, validate_state_fn = _build_workflow_with_capture(
+        scenario, ablation=ablation,
+    )
+    max_tool_errors = (
+        ablation.max_tool_errors if ablation is not None else scenario.max_tool_errors
+    )
+    consecutive_tool_errors = 0
+    proxy_tools = _proxy_tool_specs(workflow)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": workflow.build_system_prompt()},
+        {"role": "user", "content": scenario.user_message},
+    ]
+    result = ProxyRunResult(
+        scenario_name=scenario.name,
+        completeness=False,
+        iterations_used=0,
+    )
+    started = time.monotonic()
+
+    for _ in range(scenario.max_iterations):
+        turn = await client.chat(
+            messages,
+            tools=proxy_tools,
+            sampling=None,
+            stream=stream,
+        )
+        result.iterations_used += 1
+        result.input_tokens += turn.input_tokens
+        result.output_tokens += turn.output_tokens
+
+        if turn.kind == "text":
+            result.final_text = turn.content
+            if _is_proxy_failure_text(turn.content):
+                result.error_type = "ToolCallError"
+                result.error_message = turn.content
+                break
+            terminal_args = _terminal_args_from_text(workflow, turn.content)
+            accuracy, validate_error = _validate_result(
+                scenario, terminal_args, validate_state_fn,
+            )
+            result.completeness = True
+            result.terminal_args = terminal_args
+            result.accuracy = accuracy
+            result.validate_error = validate_error
+            result.proxy_terminal_source = "text"
+            break
+
+        if not turn.tool_calls:
+            result.error_type = "ToolCallError"
+            result.error_message = "Proxy returned an empty tool call batch"
+            break
+
+        if any(call.reasoning for call in turn.tool_calls):
+            result.reasoning_msgs += 1
+
+        messages.append({
+            "role": "assistant",
+            "content": turn.tool_calls[0].reasoning,
+            "tool_calls": [_openai_tool_call(call) for call in turn.tool_calls],
+        })
+        batch_had_error = False
+        terminal_args: dict[str, Any] | None = None
+        for call in turn.tool_calls:
+            result.tool_sequence.append(call.name)
+            result.tool_args.append(call.args)
+            try:
+                fn = workflow.get_callable(call.name)
+                tool_result = await _call_tool(fn, call.args)
+            except Exception as exc:
+                batch_had_error = True
+                content = f"[ToolError] {type(exc).__name__}: {exc}"
+            else:
+                content = _stringify_tool_result(tool_result)
+                if call.name in workflow.terminal_tools:
+                    terminal_args = call.args
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "name": call.name,
+                "content": content,
+            })
+
+        if batch_had_error:
+            result.tool_errors += 1
+            consecutive_tool_errors += 1
+            if consecutive_tool_errors > max_tool_errors:
+                result.error_type = "ToolExecutionError"
+                result.error_message = "Too many consecutive tool execution errors"
+                break
+        else:
+            consecutive_tool_errors = 0
+
+        if terminal_args is not None:
+            terminal_args = capture.get("args") or terminal_args
+            accuracy, validate_error = _validate_result(
+                scenario, terminal_args, validate_state_fn,
+            )
+            result.completeness = True
+            result.terminal_args = terminal_args
+            result.accuracy = accuracy
+            result.validate_error = validate_error
+            result.final_text = _terminal_text(terminal_args)
+            result.proxy_terminal_source = "tool_call"
+            break
+
+        if verbose:
+            names = ", ".join(call.name for call in turn.tool_calls)
+            print(f"    [tool_call] {names}", file=sys.stderr, flush=True)
+    else:
+        result.error_type = "MaxIterationsError"
+        result.error_message = (
+            f"Max iterations ({scenario.max_iterations}) exceeded. "
+            "The proxy did not return a terminal text response or terminal tool call."
+        )
+
+    result.elapsed_seconds = time.monotonic() - started
+    return result
 
 
 def _result_row(
-    result: Any,
+    result: ProxyRunResult,
     scenario: EvalScenario,
     run_idx: int,
     model: str,
     stream: bool,
     ablation: str,
     budget_tokens: int | None,
+    backend_label: str,
+    mode_label: str,
+    eval_target_backend: str,
 ) -> dict[str, Any]:
-    messages = result.messages
-    stats = analyze_history(messages) if messages is not None else None
-    tool_sequence, tool_args = _tool_trace(messages)
     success = bool(result.completeness and result.accuracy is not False)
-    terminal_args = result.terminal_args or {}
-    final_text = (
-        terminal_args.get("message")
-        or terminal_args.get("content")
-        or terminal_args.get("findings")
-        or ""
-    )
     ideal_iterations = scenario.ideal_iterations or (
         len(scenario.workflow.required_steps) + 1
     )
@@ -308,8 +597,9 @@ def _result_row(
     row = {
         "impl": "rust-proxy-oracle",
         "model": model,
-        "backend": "openai-proxy",
-        "mode": "proxy",
+        "backend": backend_label,
+        "mode": mode_label,
+        "eval_target_backend": eval_target_backend,
         "ablation": ablation,
         "tool_choice": "auto",
         "scenario": result.scenario_name,
@@ -325,39 +615,33 @@ def _result_row(
         "budget_tokens": (
             budget_tokens if budget_tokens is not None else scenario.budget_tokens
         ),
-        "retry_nudges": stats.retry_nudges if stats else None,
-        "step_nudges": stats.step_nudges if stats else None,
-        "tool_errors": stats.tool_errors if stats else None,
-        "reasoning_msgs": stats.reasoning_messages if stats else None,
-        "tool_sequence": tool_sequence,
-        "tool_args": tool_args,
-        "final_text": final_text,
+        "retry_nudges": result.retry_nudges,
+        "step_nudges": result.step_nudges,
+        "tool_errors": result.tool_errors,
+        "reasoning_msgs": result.reasoning_msgs,
+        "tool_sequence": result.tool_sequence,
+        "tool_args": result.tool_args,
+        "final_text": result.final_text,
+        "proxy_terminal_source": result.proxy_terminal_source,
         "raw_response_on_failure": result.error_message if not result.completeness else None,
         "ideal_iterations": ideal_iterations,
         "wasted_calls": wasted_calls,
-        "compaction_events": len(result.compaction_events),
+        "compaction_events": 0,
     }
-    stream_retries = getattr(result, "stream_retries", 0)
-    if stream_retries:
-        row["stream_retries"] = stream_retries
-    input_tokens = getattr(result, "input_tokens", 0)
-    output_tokens = getattr(result, "output_tokens", 0)
-    if input_tokens or output_tokens:
-        row["input_tokens"] = input_tokens
-        row["output_tokens"] = output_tokens
+    if result.input_tokens or result.output_tokens:
+        row["input_tokens"] = result.input_tokens
+        row["output_tokens"] = result.output_tokens
     return row
 
 
 async def main_async(args: argparse.Namespace) -> None:
     scenarios = _select_scenarios(args.scenario, args.tags)
     ablation = ABLATION_PRESETS[args.ablation]
-    client = OpenAIProxyClient(args.base_url, args.model, timeout=args.timeout)
-    config = EvalConfig(
-        runs_per_scenario=1,
-        stream=args.stream,
-        keep_message_history=not args.no_history,
-        verbose=args.verbose,
-        budget_override=args.budget_tokens,
+    client = OpenAIProxyClient(
+        args.base_url,
+        args.model,
+        timeout=args.timeout,
+        recommended_sampling=not args.no_recommended_sampling,
     )
 
     output = Path(args.output) if args.output else None
@@ -378,7 +662,14 @@ async def main_async(args: argparse.Namespace) -> None:
                 file=sys.stderr,
                 flush=True,
             )
-            result = await run_scenario(client, scenario, config, ablation=ablation)
+            result = await run_proxy_scenario(
+                client,
+                scenario,
+                stream=args.stream,
+                budget_tokens=args.budget_tokens,
+                ablation=ablation,
+                verbose=args.verbose,
+            )
             row = _result_row(
                 result,
                 scenario,
@@ -387,6 +678,9 @@ async def main_async(args: argparse.Namespace) -> None:
                 args.stream,
                 args.ablation,
                 args.budget_tokens,
+                args.backend_label,
+                args.mode_label,
+                args.eval_target_backend,
             )
             line = json.dumps(row, separators=(",", ":"))
             if output:
@@ -428,6 +722,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--output")
     parser.add_argument("--budget-tokens", type=int)
+    parser.add_argument("--backend-label", default="openai-proxy")
+    parser.add_argument("--mode-label", default="proxy")
+    parser.add_argument("--eval-target-backend", default="openai-proxy")
+    parser.add_argument("--no-recommended-sampling", action="store_true")
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)

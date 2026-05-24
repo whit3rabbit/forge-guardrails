@@ -7,6 +7,7 @@ DEFAULT_BACKEND_PORT="8080"
 DEFAULT_BUDGET_TOKENS="8192"
 DEFAULT_MODEL="Ministral-3-8B-Instruct-2512-Q8_0"
 DEFAULT_PUBLISHED_BACKEND_MODE="LS/N"
+DEFAULT_MANAGED_BACKEND="llamaserver"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -18,6 +19,7 @@ MODEL="$DEFAULT_MODEL"
 PUBLISHED_MODEL=""
 PUBLISHED_BACKEND_MODE="$DEFAULT_PUBLISHED_BACKEND_MODE"
 SKIP_PUBLISHED_COMPARE=0
+FORCE_PUBLISHED_COMPARE=0
 INCLUDE_COMPACTION_CHAIN=0
 PROXY_PORT="${FORGE_PROXY_PORT:-${PROXY_PORT:-$DEFAULT_PROXY_PORT}}"
 BACKEND_PORT="${FORGE_BACKEND_PORT:-${BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
@@ -49,6 +51,7 @@ Options:
   --published-model MODEL   Published baseline model (default: --model)
   --published-mode LS/N|LS/P Published baseline row (default: $DEFAULT_PUBLISHED_BACKEND_MODE)
   --skip-published-compare  Do not compare release results to published results
+  --force-published-compare Compare proxy rows to direct published rows anyway
   --include-compaction-chain Also run compaction-chain scenarios after published scenarios
   --proxy-port PORT         Proxy port (default: $DEFAULT_PROXY_PORT)
   --backend-port PORT       Managed llama-server port (default: $DEFAULT_BACKEND_PORT)
@@ -247,6 +250,9 @@ run_python_oracle() {
     --runs "$RUNS"
     --scenario "${scenarios[@]}"
     --budget-tokens "$budget"
+    --backend-label "$DEFAULT_MANAGED_BACKEND"
+    --mode-label proxy
+    --eval-target-backend openai-proxy
     --output "$output"
   )
   if [[ "$STREAM" == "1" ]]; then
@@ -285,6 +291,9 @@ run_published_compare() {
     --backend-mode "$PUBLISHED_BACKEND_MODE"
     --local-model "$MODEL"
   )
+  if [[ "$FORCE_PUBLISHED_COMPARE" == "1" ]]; then
+    cmd+=(--force-proxy-compare)
+  fi
   set +e
   run_python_script "${cmd[@]}" 2>&1 | tee "$compare_report"
   local status=${PIPESTATUS[0]}
@@ -305,8 +314,11 @@ published_model=${PUBLISHED_MODEL:-$MODEL}
 published_backend_mode=$PUBLISHED_BACKEND_MODE
 proxy_url=http://127.0.0.1:${PROXY_PORT}/v1
 managed_backend_url=http://127.0.0.1:${BACKEND_PORT}/v1
-managed_backend=llamaserver
+managed_backend=$DEFAULT_MANAGED_BACKEND
 eval_target_backend=openai-proxy
+mode=proxy
+recommended_sampling=1
+force_published_compare=$FORCE_PUBLISHED_COMPARE
 normal_budget_tokens=$DEFAULT_BUDGET_TOKENS
 compaction_chain_p1_budget_tokens=3600
 compaction_chain_p2_budget_tokens=2200
@@ -348,6 +360,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-published-compare)
       SKIP_PUBLISHED_COMPARE=1
+      shift
+      ;;
+    --force-published-compare)
+      FORCE_PUBLISHED_COMPARE=1
       shift
       ;;
     --include-compaction-chain)

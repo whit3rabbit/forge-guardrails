@@ -100,11 +100,11 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def local_metrics(
+def select_local_rows(
     rows: list[dict[str, Any]],
     scenarios: set[str],
     local_model: str | None,
-) -> tuple[float, float, dict[str, float], dict[str, int], list[str]]:
+) -> list[dict[str, Any]]:
     selected = []
     for row in rows:
         if row.get("scenario") not in scenarios:
@@ -114,7 +114,13 @@ def local_metrics(
         if row.get("ablation", "reforged") != "reforged":
             continue
         selected.append(row)
+    return selected
 
+
+def local_metrics(
+    selected: list[dict[str, Any]],
+    scenarios: set[str],
+) -> tuple[float, float, dict[str, float], dict[str, int], list[str]]:
     by_scenario: dict[str, list[dict[str, Any]]] = {scenario: [] for scenario in scenarios}
     for row in selected:
         by_scenario[row["scenario"]].append(row)
@@ -157,12 +163,39 @@ def main() -> int:
     parser.add_argument("--completeness-tolerance-pp", type=float, default=5.0)
     parser.add_argument("--scenario-tolerance-pp", type=float, default=30.0)
     parser.add_argument("--strict-scenarios", action="store_true")
+    parser.add_argument(
+        "--force-proxy-compare",
+        action="store_true",
+        help="Compare proxy rows to direct published rows despite backend/mode mismatch",
+    )
     args = parser.parse_args()
 
     published = parse_published_row(args.published, args.model, args.backend_mode)
     rows = load_jsonl(args.jsonl)
+    published_scenarios = set(published.scenarios)
+    selected = select_local_rows(rows, published_scenarios, args.local_model)
+    proxy_rows = [
+        row
+        for row in selected
+        if row.get("mode") == "proxy" or row.get("eval_target_backend") == "openai-proxy"
+    ]
+    if proxy_rows and not args.force_proxy_compare:
+        proxy_modes = sorted({
+            f"{row.get('backend', 'unknown')}/{row.get('mode', 'unknown')}"
+            for row in proxy_rows
+        })
+        print(f"Published baseline: {published.model} {published.backend_mode} [reforged]")
+        print(f"Local rows:         {len(selected)}")
+        print(f"Local modes:        {', '.join(proxy_modes)}")
+        print(
+            "\nPublished comparison skipped: local rows are proxy-mode rows, "
+            "not direct LS/N rows. Pass --force-proxy-compare to compare anyway."
+        )
+        return 0
+
     local_score, local_cmp, local_scenarios, counts, missing = local_metrics(
-        rows, set(published.scenarios), args.local_model
+        selected,
+        published_scenarios,
     )
 
     failures: list[str] = []
