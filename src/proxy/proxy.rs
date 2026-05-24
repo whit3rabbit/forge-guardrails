@@ -73,8 +73,9 @@ pub fn openai_to_messages(input: &[Value]) -> Vec<Message> {
                         let call_id = tc
                             .get("id")
                             .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(generate_call_id);
                         infos.push(ToolCallInfo::new(name, Some(args), call_id));
                     }
                     msg = msg.with_tool_calls(infos);
@@ -106,14 +107,18 @@ fn extract_content(item: &Value) -> String {
         Some(Value::Array(parts)) => {
             let texts: Vec<String> = parts
                 .iter()
-                .filter_map(|p| {
-                    if p.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        p.get("text")
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                    } else {
-                        None
+                .filter_map(|p| match p {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Object(_) => {
+                        if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            p.get("text")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
                     }
+                    _ => None,
                 })
                 .collect();
             texts.join("\n")
@@ -425,7 +430,9 @@ pub fn strip_respond_calls(calls: &[ToolCall]) -> (Vec<ToolCall>, Option<String>
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            respond_text = Some(msg.to_string());
+            if respond_text.is_none() {
+                respond_text = Some(msg.to_string());
+            }
         } else {
             real_calls.push(tc.clone());
         }
@@ -465,6 +472,33 @@ mod tests {
         let calls = msgs[0].tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].call_id, "c1");
+    }
+
+    #[test]
+    fn openai_to_messages_assistant_tool_call_missing_id_gets_fallback() {
+        let input = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "read", "arguments": "{}"}}]
+        })];
+        let msgs = openai_to_messages(&input);
+        let calls = msgs[0].tool_calls.as_ref().unwrap();
+        assert!(calls[0].call_id.starts_with("call_"));
+        assert!(calls[0].call_id.len() > "call_".len());
+    }
+
+    #[test]
+    fn openai_to_messages_assistant_tool_call_empty_id_gets_fallback() {
+        let input = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "", "type": "function", "function": {"name": "read", "arguments": "{}"}}]
+        })];
+        let msgs = openai_to_messages(&input);
+        let calls = msgs[0].tool_calls.as_ref().unwrap();
+        assert!(calls[0].call_id.starts_with("call_"));
+        assert!(calls[0].call_id.len() > "call_".len());
     }
 
     #[test]
@@ -512,6 +546,16 @@ mod tests {
         let input = vec![json!({
             "role": "user",
             "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": "World"}]
+        })];
+        let msgs = openai_to_messages(&input);
+        assert_eq!(msgs[0].content, "Hello\nWorld");
+    }
+
+    #[test]
+    fn openai_to_messages_list_content_keeps_string_blocks() {
+        let input = vec![json!({
+            "role": "user",
+            "content": ["Hello", {"type": "text", "text": "World"}]
         })];
         let msgs = openai_to_messages(&input);
         assert_eq!(msgs[0].content, "Hello\nWorld");
@@ -648,6 +692,25 @@ mod tests {
         assert_eq!(real.len(), 1);
         assert_eq!(real[0].tool, "search");
         assert_eq!(text, Some("hi".to_string()));
+    }
+
+    #[test]
+    fn strip_respond_preserves_first_respond_text() {
+        let calls = vec![
+            ToolCall::new("respond", {
+                let mut m = IndexMap::new();
+                m.insert("message".into(), json!("first"));
+                m
+            }),
+            ToolCall::new("respond", {
+                let mut m = IndexMap::new();
+                m.insert("message".into(), json!("second"));
+                m
+            }),
+        ];
+        let (real, text) = strip_respond_calls(&calls);
+        assert!(real.is_empty());
+        assert_eq!(text, Some("first".to_string()));
     }
 
     #[test]

@@ -332,6 +332,23 @@ fn qwen_xml_multi_param() {
 }
 
 #[test]
+fn qwen_xml_missing_param_close_before_next_param() {
+    let text = "<function=search><parameter=query>rust<parameter=mode>fast</parameter></function>";
+    let result = rescue_tool_call(text, &["search"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].args["query"], Value::String("rust".to_string()));
+    assert_eq!(result[0].args["mode"], Value::String("fast".to_string()));
+}
+
+#[test]
+fn qwen_xml_missing_param_close_before_function_close() {
+    let text = "<function=search><parameter=query>rust</function>";
+    let result = rescue_tool_call(text, &["search"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].args["query"], Value::String("rust".to_string()));
+}
+
+#[test]
 fn qwen_xml_multiline_value() {
     let text = "<function=write><parameter=content>\nline1\nline2\n</parameter></function>";
     let result = rescue_tool_call(text, &["write"]);

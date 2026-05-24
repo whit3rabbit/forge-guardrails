@@ -1394,6 +1394,55 @@ fn python_golden_proxy_sampling_fields_match() {
 }
 
 #[tokio::test]
+async fn python_golden_proxy_no_tools_tool_calls_match() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_no_tools_tool_calls");
+    let client = Arc::new(ScriptedClient::new(vec![LLMResponse::ToolCalls(vec![
+        scripted_call("search", json!({"q": "x"})),
+    ])]));
+    let context = proxy_context();
+
+    let response = handle_chat_completions(&case["input"], &client, &context, 2, true)
+        .await
+        .expect("proxy response");
+
+    match response {
+        HandlerResult::Response(value) => {
+            let choice = &value["choices"][0];
+            assert_eq!(choice["message"]["content"], case["expected"]["content"]);
+            assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn python_golden_proxy_retry_exhausted_raw_text_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_retry_exhausted_raw_text");
+    let client = Arc::new(ScriptedClient::new(vec![
+        LLMResponse::Text(forge_guardrails::TextResponse::new("first bad")),
+        LLMResponse::Text(forge_guardrails::TextResponse::new("raw final")),
+    ]));
+    let context = proxy_context();
+    let max_retries = case["input"]["max_retries"].as_i64().unwrap() as i32;
+
+    let response =
+        handle_chat_completions(&case["input"]["body"], &client, &context, max_retries, true)
+            .await
+            .expect("proxy response");
+
+    match response {
+        HandlerResult::Response(value) => {
+            let choice = &value["choices"][0];
+            assert_eq!(choice["message"]["content"], case["expected"]["content"]);
+            assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn python_golden_proxy_respond_stripping_matches() {
     let fixtures = golden();
     let case = golden_case(&fixtures, "proxy_respond_stripping");

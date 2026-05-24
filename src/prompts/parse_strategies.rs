@@ -193,14 +193,28 @@ pub fn parse_qwen_xml(text: &str, available_tools: &[&str]) -> Vec<ToolCall> {
             let param_name = body[param_after_eq..param_close_bracket].to_string();
             let param_body_start = param_close_bracket + 1;
             let param_close_marker = "</parameter>";
-            let param_close_pos = match body[param_body_start..].find(param_close_marker) {
-                Some(pos) => param_body_start + pos,
-                None => break,
+            let remaining = &body[param_body_start..];
+            let close_rel = remaining.find(param_close_marker);
+            let next_param_rel = remaining.find("<parameter=");
+            let (param_close_pos, next_search) = match (close_rel, next_param_rel) {
+                (Some(close), Some(next_param)) if next_param < close => {
+                    let pos = param_body_start + next_param;
+                    (pos, pos)
+                }
+                (Some(close), _) => {
+                    let pos = param_body_start + close;
+                    (pos, pos + param_close_marker.len())
+                }
+                (None, Some(next_param)) => {
+                    let pos = param_body_start + next_param;
+                    (pos, pos)
+                }
+                (None, None) => (body.len(), body.len()),
             };
             let raw_value = &body[param_body_start..param_close_pos];
             let stripped = strip_first_last_newline(raw_value);
             args.insert(param_name, Value::String(stripped));
-            param_search = param_close_pos + param_close_marker.len();
+            param_search = next_search;
         }
         results.push(ToolCall::new(func_name.to_string(), args));
         search_from = close_tag_pos + close_tag_marker.len();

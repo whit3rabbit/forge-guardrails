@@ -501,6 +501,69 @@ async def _proxy_respond_fixture() -> dict[str, Any]:
     }
 
 
+async def _proxy_no_tools_tool_calls_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": False,
+    }
+    response = await handle_chat_completions(
+        body,
+        ScriptedClient([[ToolCall(tool="search", args={"q": "x"})]]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=2,
+        rescue_enabled=True,
+    )
+    choice = response["choices"][0]
+    return {
+        "input": body,
+        "expected": {
+            "content": choice["message"]["content"],
+            "finish_reason": choice["finish_reason"],
+        },
+    }
+
+
+async def _proxy_retry_exhausted_raw_text_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    }
+    max_retries = 1
+    response = await handle_chat_completions(
+        body,
+        ScriptedClient([
+            TextResponse(content="first bad"),
+            TextResponse(content="raw final"),
+        ]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=max_retries,
+        rescue_enabled=True,
+    )
+    choice = response["choices"][0]
+    return {
+        "input": {"body": body, "max_retries": max_retries},
+        "expected": {
+            "content": choice["message"]["content"],
+            "finish_reason": choice["finish_reason"],
+        },
+    }
+
+
 def _anthropic_conversion_fixture() -> dict[str, Any]:
     messages = [
         {"role": "system", "content": "Sys"},
@@ -1118,6 +1181,8 @@ async def build_fixtures() -> dict[str, Any]:
             "pending_steps_only": _pending_steps_fixture(),
             "proxy_sampling_fields": _proxy_sampling_fixture(),
             "proxy_respond_stripping": await _proxy_respond_fixture(),
+            "proxy_no_tools_tool_calls": await _proxy_no_tools_tool_calls_fixture(),
+            "proxy_retry_exhausted_raw_text": await _proxy_retry_exhausted_raw_text_fixture(),
         },
     }
 

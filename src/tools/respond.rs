@@ -32,7 +32,7 @@ pub fn respond_spec() -> ToolSpec {
                 props.insert(
                     "message".to_string(),
                     ParamModel::String {
-                        description: Some("The message to send to the user".to_string()),
+                        description: Some("The message to send to the user.".to_string()),
                         required: true,
                         default: None,
                         enum_values: None,
@@ -110,7 +110,10 @@ mod tests {
                         ..
                     } => {
                         assert!(*required);
-                        assert!(description.is_some());
+                        assert_eq!(
+                            description.as_deref(),
+                            Some("The message to send to the user.")
+                        );
                     }
                     _ => panic!("message param should be String type"),
                 }

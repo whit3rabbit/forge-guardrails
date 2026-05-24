@@ -1,13 +1,17 @@
+use anyllm_proxy::config::model_router::{Deployment, ModelRouter};
 use anyllm_proxy::config::{
     BackendAuth, BackendConfig, BackendKind, ModelMapping, MultiConfig, OpenAIApiFormat, TlsConfig,
 };
 use forge_guardrails::{
-    AnyLlmProxyClient, AnyLlmRuntimeClient, ChunkType, LLMClient, LLMResponse, SamplingParams,
-    ToolSpec,
+    handle_chat_completions, AnyLlmProxyClient, AnyLlmRuntimeClient, ChunkType, ContextManager,
+    HandlerResult, LLMClient, LLMResponse, NoCompact, SamplingParams, ToolSpec,
 };
 use futures_util::StreamExt;
 use indexmap::IndexMap;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use tokio::sync::Mutex as TokioMutex;
 
 fn assert_positive_cost(cost: Option<f64>) {
     let cost = cost.expect("estimated cost is available");
@@ -453,6 +457,200 @@ async fn anyllm_runtime_client_parses_tool_calls() {
     assert_eq!(info.selected_backend.as_deref(), Some("openai"));
     assert_eq!(info.mapped_model.as_deref(), Some("gpt-4o-mini"));
     assert_positive_cost(info.estimated_cost_usd);
+}
+
+#[tokio::test]
+async fn anyllm_runtime_client_routes_model_and_handler_emits_tool_call() {
+    let fallback = mockito::Server::new_async().await;
+    let mut routed = mockito::Server::new_async().await;
+    let _mock = routed
+        .mock("POST", "/v1/chat/completions")
+        .match_header("authorization", "Bearer test-key")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_header("x-ratelimit-remaining-requests", "77")
+        .with_body(
+            json!({
+                "id": "chatcmpl-routed",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o-mini",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_routed",
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": "{\"query\":\"router\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let mut backends = IndexMap::new();
+    backends.insert(
+        "fallback".to_string(),
+        anyllm_backend_config(BackendKind::OpenAI, fallback.url()),
+    );
+    backends.insert(
+        "routed".to_string(),
+        anyllm_backend_config(BackendKind::OpenAI, routed.url()),
+    );
+    let runtime_config = MultiConfig {
+        listen_port: 0,
+        log_bodies: false,
+        default_backend: "fallback".to_string(),
+        backends,
+        expose_degradation_warnings: false,
+    };
+
+    let deployment = Arc::new(Deployment::new(
+        "routed".to_string(),
+        "gpt-4o-mini".to_string(),
+        None,
+        None,
+    ));
+    let mut routes = HashMap::new();
+    routes.insert("forge-virtual".to_string(), vec![deployment]);
+    let router = Arc::new(RwLock::new(ModelRouter::new(routes)));
+
+    let client = Arc::new(AnyLlmRuntimeClient::from_multi_config_with_model_router(
+        "forge-virtual",
+        runtime_config,
+        Some(router),
+    ));
+    let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
+        Box::new(NoCompact),
+        4096,
+        None,
+        None,
+        None,
+    )));
+    let body = json!({
+        "model": "forge-virtual",
+        "messages": [{"role": "user", "content": "find router docs"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }
+        }]
+    });
+
+    let result = handle_chat_completions(&body, &client, &context_manager, 1, true)
+        .await
+        .expect("handler succeeds");
+
+    match result {
+        HandlerResult::Response(value) => {
+            let calls = value["choices"][0]["message"]["tool_calls"]
+                .as_array()
+                .expect("tool calls");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["function"]["name"], "search");
+            assert_eq!(value["choices"][0]["finish_reason"], "tool_calls");
+        }
+        HandlerResult::Events(_) => panic!("expected non-streaming response"),
+    }
+
+    assert_eq!(client.last_usage().unwrap().total_tokens, 9);
+    let info = client.last_call_info().expect("call info recorded");
+    assert_eq!(info.requested_model.as_deref(), Some("forge-virtual"));
+    assert_eq!(info.response_model.as_deref(), Some("gpt-4o-mini"));
+    assert_eq!(info.selected_backend.as_deref(), Some("routed"));
+    assert_eq!(info.mapped_model.as_deref(), Some("gpt-4o-mini"));
+    assert_eq!(info.backend_kind.as_deref(), Some("OpenAI"));
+    assert_eq!(info.rate_limits.requests_remaining.as_deref(), Some("77"));
+    assert_positive_cost(info.estimated_cost_usd);
+}
+
+#[tokio::test]
+async fn anyllm_runtime_client_supports_mlx_openai_compatible_eval_backend() {
+    let mut server = mockito::Server::new_async().await;
+    let model = "mlx-community/Llama-3.2-3B-Instruct-4bit";
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(mockito::Matcher::Json(json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "hello from mac"}],
+            "stream": false,
+            "max_tokens": 16
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-mlx",
+                "object": "chat.completion",
+                "created": 1,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "mlx ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let mut sampling = SamplingParams::new();
+    sampling.insert("max_tokens".into(), json!(16));
+
+    let mut backends = IndexMap::new();
+    backends.insert(
+        "mlx".to_string(),
+        anyllm_backend_config(BackendKind::OpenAI, server.url()),
+    );
+    let runtime_config = MultiConfig {
+        listen_port: 0,
+        log_bodies: false,
+        default_backend: "mlx".to_string(),
+        backends,
+        expose_degradation_warnings: false,
+    };
+
+    let client = AnyLlmRuntimeClient::from_multi_config(model, runtime_config);
+    let response = client
+        .send(
+            vec![json!({"role": "user", "content": "hello from mac"})],
+            None,
+            Some(sampling),
+        )
+        .await
+        .expect("mlx-compatible runtime request succeeds");
+
+    match response {
+        LLMResponse::Text(text) => assert_eq!(text.content, "mlx ok"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    assert_eq!(client.last_usage().unwrap().total_tokens, 6);
+
+    let info = client.last_call_info().expect("call info recorded");
+    assert_eq!(info.requested_model.as_deref(), Some(model));
+    assert_eq!(info.response_model.as_deref(), Some(model));
+    assert_eq!(info.selected_backend.as_deref(), Some("mlx"));
+    assert_eq!(info.mapped_model.as_deref(), Some(model));
+    assert_eq!(info.backend_kind.as_deref(), Some("OpenAI"));
 }
 
 #[tokio::test]

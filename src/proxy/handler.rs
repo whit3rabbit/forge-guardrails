@@ -147,15 +147,10 @@ pub async fn handle_chat_completions<C: LLMClient>(
     // Convert inbound OpenAI messages to internal format.
     let mut internal_msgs = openai_to_messages(messages);
 
-    // Serialize for the client's API format.
-    let api_format = client.api_format().as_str();
-    let serialized: Vec<Value> = internal_msgs
-        .iter()
-        .map(|m| m.serialize(api_format))
-        .collect();
-
     // If no tools, pass through directly.
     if tools_raw.is_empty() {
+        let api_format = client.api_format().as_str();
+        let serialized = crate::core::inference::fold_and_serialize(&internal_msgs, api_format);
         return run_passthrough(client, &serialized, None, &sampling, model_name, stream).await;
     }
 
@@ -197,15 +192,18 @@ pub async fn handle_chat_completions<C: LLMClient>(
 
     let response = match inference_result {
         Ok(Some(result)) => result.response,
-        Ok(None) | Err(crate::error::ForgeError::ToolCall(_)) => {
-            // Retries exhausted — return last text response or empty.
-            let last_text = internal_msgs
-                .iter()
-                .rev()
-                .find(|m| m.role == crate::core::message::MessageRole::Assistant)
-                .map(|m| m.content.clone())
-                .unwrap_or_default();
-            LLMResponse::Text(TextResponse::new(last_text))
+        Ok(None) => LLMResponse::Text(TextResponse::new("")),
+        Err(crate::error::ForgeError::ToolCall(err)) => {
+            let raw = err.raw_response.unwrap_or_default();
+            if stream {
+                return Ok(HandlerResult::Events(text_to_sse_events(
+                    &raw, model_name, 0,
+                )));
+            }
+            let text_resp = TextResponse::new(raw);
+            return Ok(HandlerResult::Response(text_response_to_openai(
+                &text_resp, model_name,
+            )));
         }
         Err(err) => return Err(err.to_string()),
     };
@@ -272,14 +270,13 @@ pub async fn run_passthrough<C: LLMClient>(
                 )))
             }
         }
-        LLMResponse::ToolCalls(calls) => {
+        LLMResponse::ToolCalls(_) => {
+            let text = TextResponse::new("");
             if stream {
-                Ok(HandlerResult::Events(tool_calls_to_sse_events(
-                    &calls, model_name,
-                )))
+                Ok(HandlerResult::Events(text_to_sse_events("", model_name, 0)))
             } else {
-                Ok(HandlerResult::Response(tool_calls_to_openai(
-                    &calls, model_name,
+                Ok(HandlerResult::Response(text_response_to_openai(
+                    &text, model_name,
                 )))
             }
         }
@@ -536,6 +533,38 @@ mod tests {
         }
     }
 
+    struct MockPassthroughToolCallClient;
+
+    impl LLMClient for MockPassthroughToolCallClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            Ok(LLMResponse::ToolCalls(vec![ToolCall::new(
+                "search",
+                IndexMap::new(),
+            )]))
+        }
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            Err(crate::error::StreamError::new("not implemented"))
+        }
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
     fn dummy_ctx() -> ContextManager {
         ContextManager::new(
             Box::new(crate::context::strategies::NoCompact),
@@ -561,6 +590,47 @@ mod tests {
                 assert_eq!(v["choices"][0]["message"]["content"], "mock response");
             }
             _ => panic!("expected Response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_no_tools_tool_calls_become_empty_text() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": false
+        });
+        let client = Arc::new(MockPassthroughToolCallClient);
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
+        match result.unwrap() {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["message"]["content"], "");
+                assert_eq!(v["choices"][0]["finish_reason"], "stop");
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_no_tools_tool_calls_become_empty_text_streaming() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": true
+        });
+        let client = Arc::new(MockPassthroughToolCallClient);
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
+        match result.unwrap() {
+            HandlerResult::Events(events) => {
+                assert_eq!(events[0]["choices"][0]["delta"]["content"], "");
+                assert_eq!(
+                    events.last().unwrap()["choices"][0]["finish_reason"],
+                    "stop"
+                );
+            }
+            _ => panic!("expected Events"),
         }
     }
 
@@ -629,6 +699,98 @@ mod tests {
                 assert_eq!(v["choices"][0]["finish_reason"], "stop");
             }
             _ => panic!("expected Response"),
+        }
+    }
+
+    struct MockTextSequenceClient {
+        responses: Vec<String>,
+        calls: std::sync::Mutex<usize>,
+    }
+
+    impl MockTextSequenceClient {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: responses.into_iter().map(str::to_string).collect(),
+                calls: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    impl LLMClient for MockTextSequenceClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+        async fn send(
+            &self,
+            _m: Vec<Value>,
+            _t: Option<Vec<ToolSpec>>,
+            _s: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            let mut calls = self.calls.lock().unwrap();
+            let content = self
+                .responses
+                .get(*calls)
+                .or_else(|| self.responses.last())
+                .cloned()
+                .unwrap_or_default();
+            *calls += 1;
+            Ok(LLMResponse::Text(TextResponse::new(content)))
+        }
+        async fn send_stream(
+            &self,
+            _m: Vec<Value>,
+            _t: Option<Vec<ToolSpec>>,
+            _s: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            Err(crate::error::StreamError::new("not implemented"))
+        }
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_retries_exhausted_returns_raw_response() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}]
+        });
+        let client = Arc::new(MockTextSequenceClient::new(vec!["first bad", "raw final"]));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 1, true).await;
+        match result.unwrap() {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["message"]["content"], "raw final");
+                assert_eq!(v["choices"][0]["finish_reason"], "stop");
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_retries_exhausted_returns_raw_response_streaming() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}]
+        });
+        let client = Arc::new(MockTextSequenceClient::new(vec!["first bad", "raw final"]));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 1, true).await;
+        match result.unwrap() {
+            HandlerResult::Events(events) => {
+                assert_eq!(events[0]["choices"][0]["delta"]["content"], "raw final");
+                assert_eq!(
+                    events.last().unwrap()["choices"][0]["finish_reason"],
+                    "stop"
+                );
+            }
+            _ => panic!("expected Events"),
         }
     }
 

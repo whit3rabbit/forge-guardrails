@@ -4,7 +4,7 @@
 //! nudging while delegating provider routing and upstream compatibility to
 //! anyllm through either its in-process runtime or a running sidecar.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyllm_proxy::backend::RateLimitHeaders as AnyLlmRateLimitHeaders;
 use anyllm_proxy::runtime::{ChatCompletionRuntime, ChatCompletionService};
@@ -216,6 +216,17 @@ impl AnyLlmRuntimeClient {
         config: anyllm_proxy::config::MultiConfig,
     ) -> Self {
         Self::from_runtime(model, ChatCompletionRuntime::from_multi_config(config))
+    }
+
+    pub fn from_multi_config_with_model_router(
+        model: impl Into<String>,
+        config: anyllm_proxy::config::MultiConfig,
+        model_router: Option<Arc<RwLock<anyllm_proxy::config::model_router::ModelRouter>>>,
+    ) -> Self {
+        Self::from_runtime(
+            model,
+            ChatCompletionRuntime::from_multi_config_with_model_router(config, model_router),
+        )
     }
 
     pub fn with_context_length(mut self, tokens: i64) -> Self {

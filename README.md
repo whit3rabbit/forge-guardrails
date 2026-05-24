@@ -28,6 +28,7 @@ It includes:
 - typed message and streaming abstractions
 - context-window management and compaction strategies
 - backend clients for Anthropic, Llamafile / llama-server-compatible APIs, and Ollama
+- anyllm-routed OpenAI-compatible upstreams for optional provider and local eval paths
 - sampling defaults for common model families
 - a synthetic `respond` tool for forcing small models onto the tool channel
 - OpenAI-compatible message conversion, proxy helpers, and HTTP server components
@@ -88,6 +89,7 @@ The library exposes backend clients for:
 - Anthropic Messages API
 - Llamafile / llama-server-style OpenAI-compatible chat APIs
 - Ollama chat API
+- anyllm-routed OpenAI-compatible chat APIs, including optional local eval endpoints
 
 Backend support is exposed through the shared `LLMClient` trait, plus common response types such as `LLMResponse`, `TextResponse`, `ToolCall`, `StreamChunk`, and `TokenUsage`.
 
@@ -96,6 +98,16 @@ Backend support is exposed through the shared `LLMClient` trait, plus common res
 Apple Silicon is supported through the same backends. Ollama can be installed with Homebrew or the official macOS download. llama.cpp / llama-server can be installed with Homebrew or a Metal-enabled release build. llamafile works on macOS as a downloaded binary after `chmod +x`.
 
 Managed llama.cpp and llamafile startup passes `-ngl 999`; on macOS that uses Metal rather than CUDA, so no NVIDIA driver setup is required. Apple Silicon uses unified memory shared with the OS. Automatic Ollama context budgets use the existing Rust VRAM tiers: less than 24 GB gets 4096 tokens, 24 GB to 47 GB gets 32768 tokens, and 48 GB or more gets 262144 tokens.
+
+MLX is supported as an optional macOS eval path through an OpenAI-compatible
+server such as `mlx_lm.server`, routed by `AnyLlmRuntimeClient` or
+`AnyLlmProxyClient`. It is not a managed `ServerManager` backend and is not a
+Python-parity target. Prefer llama-server for parity runs; use MLX when the
+goal is local Apple Silicon throughput or comparing MLX-format models. Treat
+GGUF-on-MLX as experimental and server/model dependent: MLX's normal `mlx-lm`
+path is MLX-compatible Hugging Face repos or local converted models, while
+GGUF support has narrower quantization and architecture coverage than
+llama.cpp.
 
 ## Public API surface
 
@@ -235,6 +247,61 @@ handling and can bypass Forge guardrails. The runtime client uses anyllm's
 OpenAI-native Chat Completions runtime, so provider-specific OpenAI-compatible
 fields such as `seed`, `top_k`, `min_p`, `repeat_penalty`, and
 `chat_template_kwargs` are preserved for compatible backends.
+
+### Live backend smoke recipes
+
+These checks are manual. Keep CI on mock servers unless a test is explicitly
+qualifying a live local backend.
+
+For llama-server native function calling, start llama.cpp with Jinja tool
+templates enabled:
+
+```bash
+llama-server -m path/to/Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
+```
+
+Use `LlamafileClient::new(path).with_mode("native")` against
+`http://localhost:8080/v1`. For prompt-injected fallback on the same server,
+start without `--jinja` if desired and use `.with_mode("prompt")`.
+
+For Ollama Python-parity behavior, use the dedicated native client path:
+
+```bash
+ollama pull ministral-3:8b-instruct-2512-q4_K_M
+curl http://localhost:11434/api/chat -d '{
+  "model": "ministral-3:8b-instruct-2512-q4_K_M",
+  "messages": [{"role": "user", "content": "What is 2+2?"}],
+  "tools": [{"type": "function", "function": {"name": "calc", "description": "Math", "parameters": {"type": "object", "properties": {"expr": {"type": "string"}}, "required": ["expr"]}}}],
+  "stream": false
+}'
+```
+
+For generic OpenAI-compatible routing, configure anyllm with backend URLs such
+as `http://localhost:8080/v1` for llama-server or
+`http://localhost:11434/v1` for Ollama, then pass the resulting
+`MultiConfig` to `AnyLlmRuntimeClient`. If routing by virtual model name is
+needed, use `AnyLlmRuntimeClient::from_multi_config_with_model_router(...)`.
+
+For optional MLX eval on macOS, run an OpenAI-compatible MLX server and route
+it through anyllm as an `OpenAI` backend:
+
+```bash
+uv tool install mlx-lm
+mlx_lm.server --model mlx-community/Llama-3.2-3B-Instruct-4bit --port 8080
+curl localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mlx-community/Llama-3.2-3B-Instruct-4bit","messages":[{"role":"user","content":"Say ok"}],"max_tokens":16}'
+```
+
+Use `http://localhost:8080/v1` as the anyllm backend URL and keep Forge in
+front of the request. Unless a specific MLX server/model combination is
+qualified for native tool calls, evaluate it with Forge's prompt/rescue
+guardrails rather than treating it as equivalent to llama-server `--jinja`.
+
+For sidecar/admin/cache/metrics use, run `anyllm_proxy` separately and point
+`AnyLlmProxyClient` at that sidecar. The guarded request path remains:
+external client -> Forge `HTTPServer` or `handle_chat_completions` ->
+`AnyLlmProxyClient` -> anyllm sidecar -> provider.
 
 ## Testing scope
 

@@ -153,37 +153,20 @@ impl ServerManager {
             "llama-server".to_string()
         };
 
+        let args = build_backend_args(
+            &self.backend,
+            self.port,
+            gguf_path,
+            mode,
+            extra_flags,
+            ctx_override,
+            cache_type_k,
+            cache_type_v,
+            n_slots,
+            kv_unified,
+        );
         let mut cmd = std::process::Command::new(&binary);
-        cmd.arg("-m").arg(gguf_path);
-        cmd.arg("--port").arg(self.port.to_string());
-        cmd.arg("--host").arg("127.0.0.1");
-        cmd.arg("-ngl").arg("999");
-        cmd.arg("--temp").arg("0");
-
-        if mode == "native" {
-            cmd.arg("--temp").arg("0");
-        }
-
-        if let Some(ctx) = ctx_override {
-            cmd.arg("-c").arg(ctx.to_string());
-        }
-
-        if let Some(ck) = cache_type_k {
-            cmd.arg("--cache-type-k").arg(ck);
-        }
-        if let Some(cv) = cache_type_v {
-            cmd.arg("--cache-type-v").arg(cv);
-        }
-        if let Some(slots) = n_slots {
-            cmd.arg("-np").arg(slots.to_string());
-        }
-        if kv_unified {
-            cmd.arg("--parallel-unified");
-        }
-
-        for flag in extra_flags {
-            cmd.arg(flag);
-        }
+        cmd.args(&args);
 
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
@@ -559,6 +542,59 @@ impl Drop for ServerManager {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_backend_args(
+    backend: &str,
+    port: i64,
+    gguf_path: &Path,
+    mode: &str,
+    extra_flags: &[String],
+    ctx_override: Option<i64>,
+    cache_type_k: Option<&str>,
+    cache_type_v: Option<&str>,
+    n_slots: Option<i64>,
+    kv_unified: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "-m".to_string(),
+        gguf_path.to_string_lossy().to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "-ngl".to_string(),
+        "999".to_string(),
+    ];
+
+    if backend == "llamaserver" && mode == "native" {
+        args.push("--jinja".to_string());
+    }
+
+    if let Some(ctx) = ctx_override {
+        args.push("-c".to_string());
+        args.push(ctx.to_string());
+    }
+
+    if let Some(ck) = cache_type_k {
+        args.push("--cache-type-k".to_string());
+        args.push(ck.to_string());
+    }
+    if let Some(cv) = cache_type_v {
+        args.push("--cache-type-v".to_string());
+        args.push(cv.to_string());
+    }
+    if let Some(slots) = n_slots {
+        args.push("--parallel".to_string());
+        args.push(slots.to_string());
+    }
+    if kv_unified {
+        args.push("--kv-unified".to_string());
+    }
+
+    args.extend(extra_flags.iter().cloned());
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +615,65 @@ mod tests {
     #[test]
     fn budget_mode_unknown() {
         assert_eq!(BudgetMode::parse("unknown"), None);
+    }
+
+    fn args_for(
+        backend: &str,
+        mode: &str,
+        extra_flags: &[String],
+        n_slots: Option<i64>,
+        kv_unified: bool,
+    ) -> Vec<String> {
+        build_backend_args(
+            backend,
+            8080,
+            Path::new("model.gguf"),
+            mode,
+            extra_flags,
+            None,
+            None,
+            None,
+            n_slots,
+            kv_unified,
+        )
+    }
+
+    #[test]
+    fn llamaserver_native_args_include_jinja() {
+        let args = args_for("llamaserver", "native", &[], None, false);
+        assert!(args.iter().any(|arg| arg == "--jinja"));
+    }
+
+    #[test]
+    fn llamaserver_prompt_args_omit_jinja() {
+        let args = args_for("llamaserver", "prompt", &[], None, false);
+        assert!(!args.iter().any(|arg| arg == "--jinja"));
+    }
+
+    #[test]
+    fn backend_args_do_not_force_temperature() {
+        let args = args_for("llamaserver", "native", &[], None, false);
+        assert!(!args.iter().any(|arg| arg == "--temp"));
+    }
+
+    #[test]
+    fn backend_args_use_python_parallel_flags() {
+        let args = args_for("llamaserver", "native", &[], Some(4), true);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--parallel" && pair[1] == "4"));
+        assert!(args.iter().any(|arg| arg == "--kv-unified"));
+        assert!(!args.iter().any(|arg| arg == "-np"));
+        assert!(!args.iter().any(|arg| arg == "--parallel-unified"));
+    }
+
+    #[test]
+    fn backend_args_preserve_extra_flags() {
+        let extra = vec!["--reasoning-budget".to_string(), "0".to_string()];
+        let args = args_for("llamaserver", "native", &extra, None, false);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--reasoning-budget" && pair[1] == "0"));
     }
 
     #[test]

@@ -1388,6 +1388,58 @@
         "content": "done",
         "finish_reason": "stop"
       }
+    },
+    "proxy_no_tools_tool_calls": {
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "model": "test-model",
+        "stream": false
+      },
+      "expected": {
+        "content": "",
+        "finish_reason": "stop"
+      }
+    },
+    "proxy_retry_exhausted_raw_text": {
+      "input": {
+        "body": {
+          "messages": [
+            {
+              "role": "user",
+              "content": "hi"
+            }
+          ],
+          "model": "test-model",
+          "stream": false,
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "max_retries": 1
+      },
+      "expected": {
+        "content": "raw final",
+        "finish_reason": "stop"
+      }
     }
   }
 }
