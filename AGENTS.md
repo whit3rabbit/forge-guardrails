@@ -34,6 +34,10 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 - `src/server.rs` - backend lifecycle and context-budget resolution
 - `src/proxy/` - HTTP/OpenAI-compatible and Anthropic Messages proxy handling
 - `src/bin/forge-eval/` - small native Rust eval smoke runner
+- `Dockerfile` - Docker image that runs Forge proxy plus an internal anyllm sidecar
+- `docker/entrypoint.sh` - container supervisor for the private sidecar and public Forge proxy
+- `scripts/start_llamaserver_proxy.sh` - local managed llama-server proxy launcher for the default Ministral GGUF
+- `scripts/publish_docker.sh` - buildx publish helper for Docker Hub releases
 - `tests/` - integration coverage for core behavior
 - `tests/parity/` - Python-generated golden fixtures for Rust parity tests
 - `scripts/eval_openai_proxy.py` - Python eval oracle wrapper for Rust proxy checks
@@ -60,6 +64,56 @@ cargo test server::tests
 cargo test --bin forge-eval
 python scripts/eval_openai_proxy.py --help
 ```
+
+Local managed llama-server proxy launcher:
+
+```bash
+scripts/start_llamaserver_proxy.sh /path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf
+```
+
+Without an explicit path, the script looks for
+`mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf` in `FORGE_MODELS_DIR`,
+`MODELS_DIR`, the repo, nearby `models/` directories, `~/Models`,
+`~/models`, and the HuggingFace cache. It verifies `llama-server` is on
+`PATH`, checks that proxy port 8081 and backend port 8080 are available, then
+starts `forge-guardrails-proxy --backend llamaserver --gguf <path>`. Override
+ports with `FORGE_PROXY_PORT` and `FORGE_BACKEND_PORT`. The launcher must
+reuse an existing proxy binary from `FORGE_PROXY_BIN`, `PATH`,
+`CARGO_TARGET_DIR`, or `target/` before falling back to `cargo build`.
+
+When changing `scripts/start_llamaserver_proxy.sh`, preserve Ctrl+C behavior:
+the launcher must forward SIGINT/SIGTERM/SIGHUP to the proxy process and wait
+for it to exit so the proxy can stop the managed `llama-server` backend.
+
+Docker image and publish flow:
+
+```bash
+docker build -t forge-guardrails:local .
+docker image inspect forge-guardrails:local --format '{{json .Config.ExposedPorts}}'
+docker run --rm -p 8081:8081 \
+  -e OPENAI_API_KEY=sk-... \
+  -e FORGE_MODEL=gpt-4o-mini \
+  forge-guardrails:local
+```
+
+The Docker image must expose only the Forge proxy port, `8081/tcp`. The
+anyllm sidecar is an internal upstream hop and must not be published as a
+client-facing port. Keep the entrypoint behavior aligned with that invariant.
+
+Publish Docker Hub image `followthewhit3rabbit/forge-guardrails` only when
+explicitly asked to publish:
+
+```bash
+docker login -u followthewhit3rabbit
+scripts/publish_docker.sh
+```
+
+`scripts/publish_docker.sh` defaults to `VERSION=0.1.0`,
+`IMAGE=followthewhit3rabbit/forge-guardrails`,
+`PLATFORMS=linux/amd64,linux/arm64`, and
+`BUILDER=forge-guardrails-builder`. Override those environment variables for a
+different tag, registry, platform matrix, or buildx builder. The script pushes
+both `${VERSION}` and `latest`.
 
 Regenerate Python parity fixtures after intentional reference-behavior changes:
 

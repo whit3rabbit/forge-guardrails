@@ -144,7 +144,22 @@ cargo run --bin forge-guardrails-proxy -- \
   --backend llamaserver \
   --gguf path/to/model.gguf \
   --port 8081
+
+# Convenience launcher for the recommended Ministral GGUF.
+scripts/start_llamaserver_proxy.sh \
+  /path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf
 ```
+
+The launcher uses managed `llamaserver` mode, verifies the GGUF path,
+requires `llama-server` on `PATH`, checks that the proxy and backend ports are
+free, and reuses an existing proxy binary from `PATH`, `CARGO_TARGET_DIR`, or
+`target/`. If no binary is found, it falls back to `cargo build`.
+Without an explicit path it searches for
+`mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf`; set `FORGE_MODELS_DIR` or
+`MODELS_DIR` to point at your model directory. Defaults are proxy port `8081`
+and managed backend port `8080`; override them with `FORGE_PROXY_PORT` and
+`FORGE_BACKEND_PORT`. Press Ctrl+C to stop the proxy and its managed
+`llama-server` backend.
 
 Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`.
 
@@ -196,12 +211,15 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | Variable | Default | Purpose |
 |---|---|---|
 | `FORGE_HOST` | `0.0.0.0` | Bind address |
-| `FORGE_PORT` / `PORT` / `LISTEN_PORT` | `8081` | Listen port |
+| `FORGE_PORT` / `PORT` / `LISTEN_PORT` | `8081` | Forge proxy listen port |
 | `FORGE_MODEL` / `SMALL_MODEL` | `gpt-4o-mini` | Default model |
 | `FORGE_CONTEXT_TOKENS` | `128000` | Token budget |
 | `FORGE_MAX_RETRIES` | `3` | Retry budget per validation failure |
 | `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |
 | `FORGE_SERIALIZE_REQUESTS` | `false` | Force request serialization |
+| `FORGE_START_SIDECAR` | Docker: auto | Start the internal anyllm sidecar in Docker |
+| `ANYLLM_LISTEN_PORT` | Docker: `3000` | Internal anyllm sidecar port; do not publish it |
+| `FORGE_SIDECAR_API_KEY` / `PROXY_API_KEYS` | generated | Shared Forge-to-sidecar key in Docker |
 | `BACKEND` | `openai` | anyllm provider id or first-party backend |
 | `OPENAI_BASE_URL` | — | Route to a local OpenAI-compatible backend |
 | `OPENAI_API_KEY` | — | API key forwarded to the upstream |
@@ -210,7 +228,7 @@ Existing anyllm env and config are still honored, including provider API keys, `
 
 ### Docker
 
-You can run the Forge proxy as a Docker container. Expose only the Forge proxy port (`8081`) to clients. The optional anyllm sidecar is a private upstream hop, not the public proxy URL, and is not enabled by default.
+You can run the Forge proxy as a Docker container. The image starts Forge plus an internal anyllm sidecar by default, and exposes only the Forge proxy port (`8081`) to clients. The sidecar is an upstream hop from Forge to anyllm; do not publish the sidecar port.
 
 Build the image locally:
 
@@ -220,7 +238,7 @@ docker build -t forge-guardrails:local .
 
 After publishing, replace `forge-guardrails:local` in these examples with `followthewhit3rabbit/forge-guardrails:latest`.
 
-Run with OpenAI through the in-process anyllm runtime:
+Run with OpenAI through the internal anyllm sidecar:
 
 ```bash
 docker run --rm -p 8081:8081 \
@@ -228,6 +246,8 @@ docker run --rm -p 8081:8081 \
   -e FORGE_MODEL=gpt-4o-mini \
   forge-guardrails:local
 ```
+
+The entrypoint generates a private Forge-to-sidecar key unless you set `FORGE_SIDECAR_API_KEY` or `PROXY_API_KEYS`. It starts the sidecar with the upstream provider environment, then starts Forge with `OPENAI_API_KEY` set to the sidecar key and `--backend-url http://127.0.0.1:3000`.
 
 Start Ollama on the host in another terminal:
 
@@ -308,13 +328,10 @@ Publish to Docker Hub as `followthewhit3rabbit/forge-guardrails`:
 
 ```bash
 docker login -u followthewhit3rabbit
-docker buildx create --use --name forge-guardrails-builder || docker buildx use forge-guardrails-builder
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t followthewhit3rabbit/forge-guardrails:0.1.0 \
-  -t followthewhit3rabbit/forge-guardrails:latest \
-  --push .
+scripts/publish_docker.sh
 ```
+
+Override `VERSION`, `IMAGE`, `PLATFORMS`, or `BUILDER` when publishing a different tag or registry.
 
 ## Backends
 
