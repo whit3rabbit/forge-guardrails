@@ -218,6 +218,41 @@ pub struct LLMCallInfo {
     pub estimated_cost_usd: Option<f64>,
 }
 
+/// Provider-specific token cache details observed from the last LLM call.
+///
+/// `TokenUsage` intentionally stays token-only. These optional fields expose
+/// prompt-cache accounting for providers that report it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LLMUsageDetails {
+    /// Prompt tokens served from cache, normalized across providers.
+    pub cached_prompt_tokens: Option<i64>,
+    /// Prompt tokens written to a provider cache, normalized across providers.
+    pub cache_creation_prompt_tokens: Option<i64>,
+    /// Prompt tokens that missed a provider cache, normalized across providers.
+    pub cache_miss_prompt_tokens: Option<i64>,
+    /// Anthropic `cache_read_input_tokens`.
+    pub cache_read_input_tokens: Option<i64>,
+    /// Anthropic `cache_creation_input_tokens`.
+    pub cache_creation_input_tokens: Option<i64>,
+    /// DeepSeek `prompt_cache_hit_tokens`.
+    pub prompt_cache_hit_tokens: Option<i64>,
+    /// DeepSeek `prompt_cache_miss_tokens`.
+    pub prompt_cache_miss_tokens: Option<i64>,
+}
+
+impl LLMUsageDetails {
+    /// Returns true when no provider cache details were observed.
+    pub fn is_empty(&self) -> bool {
+        self.cached_prompt_tokens.is_none()
+            && self.cache_creation_prompt_tokens.is_none()
+            && self.cache_miss_prompt_tokens.is_none()
+            && self.cache_read_input_tokens.is_none()
+            && self.cache_creation_input_tokens.is_none()
+            && self.prompt_cache_hit_tokens.is_none()
+            && self.prompt_cache_miss_tokens.is_none()
+    }
+}
+
 /// Sampling parameters passed to an LLM call.
 ///
 /// Values are optional; when `None`, the backend or client instance defaults
@@ -300,6 +335,11 @@ pub trait LLMClient: Send + Sync {
 
     /// Get provider-routing and accounting metadata from the last request.
     fn last_call_info(&self) -> Option<LLMCallInfo> {
+        None
+    }
+
+    /// Get provider-specific cache usage details from the last request.
+    fn last_usage_details(&self) -> Option<LLMUsageDetails> {
         None
     }
 

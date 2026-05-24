@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 
 use crate::clients::base::{
     format_tool, ApiFormat, ChunkStream, ChunkType, LLMCallInfo, LLMClient, LLMRateLimitInfo,
-    LLMRequestOptions, LLMResponse, SamplingParams, StreamChunk, TextResponse, TokenUsage,
-    ToolCall,
+    LLMRequestOptions, LLMResponse, LLMUsageDetails, SamplingParams, StreamChunk, TextResponse,
+    TokenUsage, ToolCall,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -35,6 +35,7 @@ pub struct AnyLlmProxyClient {
     timeout_secs: f64,
     context_length: Option<i64>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
 }
 
@@ -48,6 +49,7 @@ impl AnyLlmProxyClient {
             timeout_secs: 300.0,
             context_length: None,
             last_usage: Arc::new(Mutex::new(None)),
+            last_usage_details: Arc::new(Mutex::new(None)),
             last_call_info: Arc::new(Mutex::new(None)),
         }
     }
@@ -136,6 +138,13 @@ impl LLMClient for AnyLlmProxyClient {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
     }
 
+    fn last_usage_details(&self) -> Option<LLMUsageDetails> {
+        self.last_usage_details
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     fn last_call_info(&self) -> Option<LLMCallInfo> {
         self.last_call_info
             .lock()
@@ -163,10 +172,18 @@ impl LLMClient for AnyLlmProxyClient {
         let resp = self.send_request(body).await?;
         let status = resp.status().as_u16() as i64;
         let headers = resp.headers().clone();
-        let response_json = resp
-            .json::<anyllm_translate::openai::ChatCompletionResponse>()
+        let response_value = resp
+            .json::<Value>()
             .await
             .map_err(|e| BackendError::new(status, e.to_string()))?;
+        record_usage_details_cell(
+            &self.last_usage_details,
+            usage_details_from_openai_usage_value(response_value.get("usage")),
+        );
+        let response_json = serde_json::from_value::<
+            anyllm_translate::openai::ChatCompletionResponse,
+        >(response_value)
+        .map_err(|e| BackendError::new(status, e.to_string()))?;
         self.record_call_info(sidecar_call_info(
             &self.model,
             &headers,
@@ -201,6 +218,7 @@ impl LLMClient for AnyLlmProxyClient {
         Ok(Box::pin(parse_openai_sse(
             resp,
             self.last_usage.clone(),
+            self.last_usage_details.clone(),
             self.last_call_info.clone(),
             Some(self.model.clone()),
         )))
@@ -218,6 +236,7 @@ pub struct AnyLlmRuntimeClient {
     service: Arc<dyn ChatCompletionService>,
     context_length: Option<i64>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
 }
 
@@ -229,6 +248,7 @@ impl AnyLlmRuntimeClient {
             service,
             context_length: None,
             last_usage: Arc::new(Mutex::new(None)),
+            last_usage_details: Arc::new(Mutex::new(None)),
             last_call_info: Arc::new(Mutex::new(None)),
         }
     }
@@ -279,6 +299,7 @@ impl AnyLlmRuntimeClient {
             service: self.service.clone(),
             context_length: self.context_length,
             last_usage: Arc::new(Mutex::new(None)),
+            last_usage_details: Arc::new(Mutex::new(None)),
             last_call_info: Arc::new(Mutex::new(None)),
         }
     }
@@ -302,6 +323,13 @@ impl LLMClient for AnyLlmRuntimeClient {
 
     fn last_usage(&self) -> Option<TokenUsage> {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    fn last_usage_details(&self) -> Option<LLMUsageDetails> {
+        self.last_usage_details
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     fn last_call_info(&self) -> Option<LLMCallInfo> {
@@ -335,6 +363,10 @@ impl LLMClient for AnyLlmRuntimeClient {
             .map_err(runtime_error_to_backend_error)?;
         let usage = result.usage.as_ref().or(result.response.usage.as_ref());
         record_usage_cell(&self.last_usage, usage);
+        record_usage_details_cell(
+            &self.last_usage_details,
+            usage_details_from_openai_usage(usage),
+        );
         record_call_info_cell(
             &self.last_call_info,
             runtime_call_info(
@@ -386,6 +418,7 @@ impl LLMClient for AnyLlmRuntimeClient {
         Ok(Box::pin(parse_openai_chunks(
             result.chunks,
             self.last_usage.clone(),
+            self.last_usage_details.clone(),
             self.last_call_info.clone(),
             Some(cost_model),
         )))
@@ -449,10 +482,69 @@ fn record_usage_cell(
     }
 }
 
+fn record_usage_details_cell(
+    cell: &Arc<Mutex<Option<LLMUsageDetails>>>,
+    details: Option<LLMUsageDetails>,
+) {
+    if let Ok(mut guard) = cell.lock() {
+        *guard = details;
+    }
+}
+
 fn record_call_info_cell(cell: &Arc<Mutex<Option<LLMCallInfo>>>, info: LLMCallInfo) {
     if let Ok(mut guard) = cell.lock() {
         *guard = Some(info);
     }
+}
+
+fn usage_details_from_openai_usage(
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) -> Option<LLMUsageDetails> {
+    let cached = usage
+        .and_then(|u| u.prompt_tokens_details.as_ref())
+        .and_then(cached_tokens_from_details);
+    let details = LLMUsageDetails {
+        cached_prompt_tokens: cached,
+        ..Default::default()
+    };
+    if details.is_empty() {
+        None
+    } else {
+        Some(details)
+    }
+}
+
+fn usage_details_from_openai_usage_value(usage: Option<&Value>) -> Option<LLMUsageDetails> {
+    let cached = usage
+        .and_then(|u| u.get("prompt_tokens_details"))
+        .and_then(cached_tokens_from_details)
+        .or_else(|| {
+            usage
+                .and_then(|u| u.get("input_token_details"))
+                .and_then(cached_tokens_from_details)
+        });
+    let deepseek_hit = usage_i64(usage, "prompt_cache_hit_tokens");
+    let deepseek_miss = usage_i64(usage, "prompt_cache_miss_tokens");
+    let details = LLMUsageDetails {
+        cached_prompt_tokens: cached.or(deepseek_hit),
+        cache_miss_prompt_tokens: deepseek_miss,
+        prompt_cache_hit_tokens: deepseek_hit,
+        prompt_cache_miss_tokens: deepseek_miss,
+        ..Default::default()
+    };
+    if details.is_empty() {
+        None
+    } else {
+        Some(details)
+    }
+}
+
+fn cached_tokens_from_details(details: &Value) -> Option<i64> {
+    details.get("cached_tokens").and_then(Value::as_i64)
+}
+
+fn usage_i64(usage: Option<&Value>, key: &str) -> Option<i64> {
+    usage.and_then(|u| u.get(key)).and_then(Value::as_i64)
 }
 
 fn runtime_call_info(
@@ -659,6 +751,7 @@ fn checked_stream_tool_call_index(
 fn parse_openai_sse(
     resp: reqwest::Response,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
     default_cost_model: Option<String>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
@@ -703,6 +796,10 @@ fn parse_openai_sse(
                 };
 
                 record_usage_cell(&last_usage, evt.usage.as_ref());
+                record_usage_details_cell(
+                    &last_usage_details,
+                    usage_details_from_openai_usage(evt.usage.as_ref()),
+                );
                 let cost_model = default_cost_model.as_deref().unwrap_or(&evt.model);
                 observe_stream_call_info(
                     &last_call_info,
@@ -767,6 +864,7 @@ fn parse_openai_sse(
 fn parse_openai_chunks(
     chunks: anyllm_proxy::runtime::ChatCompletionChunkStream,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
     cost_model: Option<String>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
@@ -786,6 +884,10 @@ fn parse_openai_chunks(
             };
 
             record_usage_cell(&last_usage, evt.usage.as_ref());
+            record_usage_details_cell(
+                &last_usage_details,
+                usage_details_from_openai_usage(evt.usage.as_ref()),
+            );
             let pricing_model = cost_model.as_deref().unwrap_or(&evt.model);
             observe_stream_call_info(
                 &last_call_info,

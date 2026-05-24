@@ -15,4 +15,7 @@ pub use proxy::{
     tool_calls_to_openai, tool_calls_to_openai_with_usage, tool_calls_to_sse_events,
     tool_calls_to_sse_events_with_usage,
 };
+pub(crate) use proxy::{
+    text_response_to_openai_with_usage_details, tool_calls_to_openai_with_usage_details,
+};
 pub use server::HTTPServer;

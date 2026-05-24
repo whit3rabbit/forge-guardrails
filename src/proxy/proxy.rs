@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::clients::base::{TextResponse, TokenUsage, ToolCall};
+use crate::clients::base::{LLMUsageDetails, TextResponse, TokenUsage, ToolCall};
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::tools::respond::RESPOND_TOOL_NAME;
 
@@ -215,6 +215,15 @@ pub fn tool_calls_to_openai_with_usage(
     model: &str,
     usage: Option<&TokenUsage>,
 ) -> Value {
+    tool_calls_to_openai_with_usage_details(calls, model, usage, None)
+}
+
+pub(crate) fn tool_calls_to_openai_with_usage_details(
+    calls: &[ToolCall],
+    model: &str,
+    usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
+) -> Value {
     let completion_id = generate_completion_id();
     let mut tool_calls_out = Vec::new();
 
@@ -263,7 +272,7 @@ pub fn tool_calls_to_openai_with_usage(
         "created": 0,
         "model": model,
         "choices": [Value::Object(choice)],
-        "usage": usage_to_openai_json(usage)
+        "usage": usage_to_openai_json_with_details(usage, usage_details)
     })
 }
 
@@ -278,6 +287,15 @@ pub fn text_response_to_openai_with_usage(
     model: &str,
     usage: Option<&TokenUsage>,
 ) -> Value {
+    text_response_to_openai_with_usage_details(response, model, usage, None)
+}
+
+pub(crate) fn text_response_to_openai_with_usage_details(
+    response: &TextResponse,
+    model: &str,
+    usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
+) -> Value {
     let completion_id = generate_completion_id();
 
     json!({
@@ -290,7 +308,7 @@ pub fn text_response_to_openai_with_usage(
             "message": {"role": "assistant", "content": response.content},
             "finish_reason": "stop"
         }],
-        "usage": usage_to_openai_json(usage)
+        "usage": usage_to_openai_json_with_details(usage, usage_details)
     })
 }
 
@@ -336,8 +354,18 @@ pub(crate) fn text_to_sse_event_iter_with_usage<'a>(
     chunk_size: usize,
     usage: Option<&'a TokenUsage>,
 ) -> impl Iterator<Item = Value> + 'a {
+    text_to_sse_event_iter_with_usage_details(text, model, chunk_size, usage, None)
+}
+
+pub(crate) fn text_to_sse_event_iter_with_usage_details<'a>(
+    text: &'a str,
+    model: &'a str,
+    chunk_size: usize,
+    usage: Option<&'a TokenUsage>,
+    usage_details: Option<&'a LLMUsageDetails>,
+) -> impl Iterator<Item = Value> + 'a {
     let completion_id = generate_completion_id();
-    let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
+    let usage_json = usage.map(|u| usage_to_openai_json_with_details(Some(u), usage_details));
     let mut chunks = text_chunks(text, chunk_size);
     let mut emitted_content = false;
     let mut emitted_final = false;
@@ -378,8 +406,17 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage<'a>(
     model: &'a str,
     usage: Option<&'a TokenUsage>,
 ) -> impl Iterator<Item = Value> + 'a {
+    tool_calls_to_sse_event_iter_with_usage_details(calls, model, usage, None)
+}
+
+pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
+    calls: &'a [ToolCall],
+    model: &'a str,
+    usage: Option<&'a TokenUsage>,
+    usage_details: Option<&'a LLMUsageDetails>,
+) -> impl Iterator<Item = Value> + 'a {
     let completion_id = generate_completion_id();
-    let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
+    let usage_json = usage.map(|u| usage_to_openai_json_with_details(Some(u), usage_details));
     let reasoning = calls.first().and_then(|c| c.reasoning.clone());
     let mut step = 0;
 
@@ -512,13 +549,30 @@ impl<'a> Iterator for TextChunks<'a> {
     }
 }
 
-pub(crate) fn usage_to_openai_json(usage: Option<&TokenUsage>) -> Value {
+pub(crate) fn usage_to_openai_json_with_details(
+    usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
+) -> Value {
     let usage = usage.cloned().unwrap_or_else(TokenUsage::empty);
-    json!({
+    let mut value = json!({
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens
-    })
+    });
+
+    if let Some(details) = usage_details {
+        if let Some(cached) = details.cached_prompt_tokens {
+            value["prompt_tokens_details"] = json!({"cached_tokens": cached});
+        }
+        if let Some(hit) = details.prompt_cache_hit_tokens {
+            value["prompt_cache_hit_tokens"] = json!(hit);
+        }
+        if let Some(miss) = details.prompt_cache_miss_tokens {
+            value["prompt_cache_miss_tokens"] = json!(miss);
+        }
+    }
+
+    value
 }
 
 /// Build a respond ToolSpec in OpenAI wire format for injection.

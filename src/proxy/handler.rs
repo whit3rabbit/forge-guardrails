@@ -5,15 +5,16 @@
 //! then strips respond() calls from output.
 
 use crate::clients::base::{
-    ChunkType, LLMClient, LLMRequestOptions, LLMResponse, TextResponse, TokenUsage, ToolCall,
+    ChunkType, LLMClient, LLMRequestOptions, LLMResponse, LLMUsageDetails, TextResponse,
+    TokenUsage, ToolCall,
 };
 use crate::context::manager::ContextManager;
 use crate::core::tool_spec::ToolSpec;
 use crate::error::StreamError;
 use crate::proxy::{
     extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,
-    respond_tool_openai, strip_respond_calls, text_response_to_openai_with_usage,
-    tool_calls_to_openai_with_usage,
+    respond_tool_openai, strip_respond_calls, text_response_to_openai_with_usage_details,
+    tool_calls_to_openai_with_usage_details,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 use anyllm_translate::anthropic::streaming::StreamEvent;
@@ -128,13 +129,29 @@ pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
                 serde_json::from_value(openai_resp)
                     .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
             let anthropic_resp = anyllm_translate::translate_response(&response, &body.model);
-            let value = serde_json::to_value(anthropic_resp)
+            let mut value = serde_json::to_value(anthropic_resp)
                 .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+            apply_anthropic_usage_details(&mut value, client.last_usage_details().as_ref());
             Ok(AnthropicHandlerResult::Response(value))
         }
         HandlerResult::StreamBody(openai_events) => Ok(AnthropicHandlerResult::StreamBody(
             anthropic_events_stream(openai_events, body.model.clone()),
         )),
+    }
+}
+
+fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDetails>) {
+    let Some(details) = details else {
+        return;
+    };
+    let Some(usage) = value.get_mut("usage").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(read) = details.cache_read_input_tokens {
+        usage.insert("cache_read_input_tokens".to_string(), json!(read));
+    }
+    if let Some(created) = details.cache_creation_input_tokens {
+        usage.insert("cache_creation_input_tokens".to_string(), json!(created));
     }
 }
 
@@ -263,31 +280,50 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         Err(crate::error::ForgeError::ToolCall(err)) => {
             let raw = err.raw_response.unwrap_or_default();
             let usage = client.last_usage();
+            let usage_details = client.last_usage_details();
             return Ok(text_content_result(
                 &raw,
                 model_name,
                 stream,
                 usage.as_ref(),
+                usage_details.as_ref(),
             ));
         }
         Err(err) => return Err(err.to_string()),
     };
     let usage = client.last_usage();
+    let usage_details = client.last_usage_details();
 
     let handler_result = match response {
-        LLMResponse::Text(ref text) => {
-            text_response_result(text, model_name, stream, usage.as_ref())
-        }
+        LLMResponse::Text(ref text) => text_response_result(
+            text,
+            model_name,
+            stream,
+            usage.as_ref(),
+            usage_details.as_ref(),
+        ),
         LLMResponse::ToolCalls(ref calls) => {
             let (real_calls, respond_text) = strip_respond_calls(calls);
 
             if real_calls.is_empty() {
                 // Pure respond: convert to text.
                 let text = respond_text.unwrap_or_default();
-                text_content_result(&text, model_name, stream, usage.as_ref())
+                text_content_result(
+                    &text,
+                    model_name,
+                    stream,
+                    usage.as_ref(),
+                    usage_details.as_ref(),
+                )
             } else {
                 // Real tool calls: return only those calls and drop respond.
-                tool_calls_result(&real_calls, model_name, stream, usage.as_ref())
+                tool_calls_result(
+                    &real_calls,
+                    model_name,
+                    stream,
+                    usage.as_ref(),
+                    usage_details.as_ref(),
+                )
             }
         }
     };
@@ -313,6 +349,7 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
         .await
         .map_err(|e| e.to_string())?;
     let usage = client.last_usage();
+    let usage_details = client.last_usage_details();
 
     match response {
         LLMResponse::Text(text) => Ok(text_response_result(
@@ -320,10 +357,17 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
             model_name,
             stream,
             usage.as_ref(),
+            usage_details.as_ref(),
         )),
         LLMResponse::ToolCalls(_) => {
             // No-tools passthrough must not expose unexpected backend tool calls.
-            Ok(text_content_result("", model_name, stream, usage.as_ref()))
+            Ok(text_content_result(
+                "",
+                model_name,
+                stream,
+                usage.as_ref(),
+                usage_details.as_ref(),
+            ))
         }
     }
 }
@@ -381,9 +425,13 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
                         ));
                     }
                     let usage = client.last_usage();
-                    let usage_json = usage
-                        .as_ref()
-                        .map(|u| crate::proxy::proxy::usage_to_openai_json(Some(u)));
+                    let usage_details = client.last_usage_details();
+                    let usage_json = usage.as_ref().map(|u| {
+                        crate::proxy::proxy::usage_to_openai_json_with_details(
+                            Some(u),
+                            usage_details.as_ref(),
+                        )
+                    });
                     yield Ok(crate::proxy::proxy::final_sse_event(
                         &completion_id,
                         &model_name,
@@ -408,15 +456,22 @@ fn text_response_result(
     model_name: &str,
     stream: bool,
     usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
 ) -> HandlerResult {
     if stream {
         HandlerResult::StreamBody(text_events_stream(
             text.content.clone(),
             model_name.to_string(),
             usage.cloned(),
+            usage_details.cloned(),
         ))
     } else {
-        HandlerResult::Response(text_response_to_openai_with_usage(text, model_name, usage))
+        HandlerResult::Response(text_response_to_openai_with_usage_details(
+            text,
+            model_name,
+            usage,
+            usage_details,
+        ))
     }
 }
 
@@ -425,16 +480,23 @@ fn text_content_result(
     model_name: &str,
     stream: bool,
     usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
 ) -> HandlerResult {
     if stream {
         HandlerResult::StreamBody(text_events_stream(
             content.to_string(),
             model_name.to_string(),
             usage.cloned(),
+            usage_details.cloned(),
         ))
     } else {
         let text = TextResponse::new(content);
-        HandlerResult::Response(text_response_to_openai_with_usage(&text, model_name, usage))
+        HandlerResult::Response(text_response_to_openai_with_usage_details(
+            &text,
+            model_name,
+            usage,
+            usage_details,
+        ))
     }
 }
 
@@ -443,17 +505,24 @@ fn tool_calls_result(
     model_name: &str,
     stream: bool,
     usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
 ) -> HandlerResult {
     if calls.is_empty() {
-        text_content_result("", model_name, stream, usage)
+        text_content_result("", model_name, stream, usage, usage_details)
     } else if stream {
         HandlerResult::StreamBody(tool_call_events_stream(
             calls.to_vec(),
             model_name.to_string(),
             usage.cloned(),
+            usage_details.cloned(),
         ))
     } else {
-        HandlerResult::Response(tool_calls_to_openai_with_usage(calls, model_name, usage))
+        HandlerResult::Response(tool_calls_to_openai_with_usage_details(
+            calls,
+            model_name,
+            usage,
+            usage_details,
+        ))
     }
 }
 
@@ -461,13 +530,15 @@ fn text_events_stream(
     content: String,
     model_name: String,
     usage: Option<TokenUsage>,
+    usage_details: Option<LLMUsageDetails>,
 ) -> OpenAiEventStream {
     Box::pin(async_stream::stream! {
-        for event in crate::proxy::proxy::text_to_sse_event_iter_with_usage(
+        for event in crate::proxy::proxy::text_to_sse_event_iter_with_usage_details(
             &content,
             &model_name,
             0,
             usage.as_ref(),
+            usage_details.as_ref(),
         ) {
             yield Ok(event);
         }
@@ -478,12 +549,14 @@ fn tool_call_events_stream(
     calls: Vec<ToolCall>,
     model_name: String,
     usage: Option<TokenUsage>,
+    usage_details: Option<LLMUsageDetails>,
 ) -> OpenAiEventStream {
     Box::pin(async_stream::stream! {
-        for event in crate::proxy::proxy::tool_calls_to_sse_event_iter_with_usage(
+        for event in crate::proxy::proxy::tool_calls_to_sse_event_iter_with_usage_details(
             &calls,
             &model_name,
             usage.as_ref(),
+            usage_details.as_ref(),
         ) {
             yield Ok(event);
         }
@@ -556,8 +629,8 @@ pub fn filter_respond(calls: &[ToolCall]) -> Vec<ToolCall> {
 /// Convert LLM response to OpenAI format (streaming or non-streaming).
 pub fn process_response(response: &LLMResponse, model_name: &str, stream: bool) -> HandlerResult {
     match response {
-        LLMResponse::ToolCalls(calls) => tool_calls_result(calls, model_name, stream, None),
-        LLMResponse::Text(text) => text_response_result(text, model_name, stream, None),
+        LLMResponse::ToolCalls(calls) => tool_calls_result(calls, model_name, stream, None, None),
+        LLMResponse::Text(text) => text_response_result(text, model_name, stream, None, None),
     }
 }
 
@@ -576,7 +649,8 @@ pub fn parse_tool_specs(tools: &[Value]) -> Vec<ToolSpec> {
                 .cloned()
                 .unwrap_or(json!({"type": "object", "properties": {}}));
 
-            if let Ok(spec) = ToolSpec::from_json_schema(name, description, &schema) {
+            if let Ok(mut spec) = ToolSpec::from_json_schema(name, description, &schema) {
+                spec.json_schema = Some(schema);
                 specs.push(spec);
             }
         }
@@ -588,8 +662,8 @@ pub fn parse_tool_specs(tools: &[Value]) -> Vec<ToolSpec> {
 mod tests {
     use super::*;
     use crate::clients::base::{
-        ApiFormat, ChunkStream, LLMRequestOptions, SamplingParams, StreamChunk, TokenUsage,
-        ToolCall,
+        ApiFormat, ChunkStream, LLMRequestOptions, LLMUsageDetails, SamplingParams, StreamChunk,
+        TokenUsage, ToolCall,
     };
     use crate::clients::AnthropicClient;
     use anyllm_translate::anthropic::MessageCreateRequest;
@@ -687,22 +761,25 @@ mod tests {
 
     #[test]
     fn parse_tool_specs_basic() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"}
+            },
+            "required": ["query"]
+        });
         let tools = vec![json!({
             "type": "function",
             "function": {
                 "name": "search",
                 "description": "Search things",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"}
-                    }
-                }
+                "parameters": schema.clone()
             }
         })];
         let specs = parse_tool_specs(&tools);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "search");
+        assert_eq!(specs[0].get_json_schema(), schema);
     }
 
     #[test]
@@ -765,6 +842,7 @@ mod tests {
     struct MockOptionsClient {
         last_options: std::sync::Mutex<Option<LLMRequestOptions>>,
         usage: Option<TokenUsage>,
+        usage_details: Option<LLMUsageDetails>,
     }
 
     struct MockStreamingOptionsClient {
@@ -841,6 +919,18 @@ mod tests {
             Self {
                 last_options: std::sync::Mutex::new(None),
                 usage,
+                usage_details: None,
+            }
+        }
+
+        fn new_with_details(
+            usage: Option<TokenUsage>,
+            usage_details: Option<LLMUsageDetails>,
+        ) -> Self {
+            Self {
+                last_options: std::sync::Mutex::new(None),
+                usage,
+                usage_details,
             }
         }
     }
@@ -852,6 +942,10 @@ mod tests {
 
         fn last_usage(&self) -> Option<TokenUsage> {
             self.usage.clone()
+        }
+
+        fn last_usage_details(&self) -> Option<LLMUsageDetails> {
+            self.usage_details.clone()
         }
 
         async fn send(
@@ -1039,6 +1133,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_no_tools_emits_cache_usage_details() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "stream": false
+        });
+        let details = LLMUsageDetails {
+            cached_prompt_tokens: Some(8),
+            prompt_cache_hit_tokens: Some(8),
+            prompt_cache_miss_tokens: Some(3),
+            cache_miss_prompt_tokens: Some(3),
+            ..Default::default()
+        };
+        let client = Arc::new(MockOptionsClient::new_with_details(
+            Some(TokenUsage::new(11, 5, 16)),
+            Some(details),
+        ));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
+
+        match result.unwrap() {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["usage"]["prompt_tokens"], 11);
+                assert_eq!(v["usage"]["prompt_tokens_details"]["cached_tokens"], 8);
+                assert_eq!(v["usage"]["prompt_cache_hit_tokens"], 8);
+                assert_eq!(v["usage"]["prompt_cache_miss_tokens"], 3);
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    struct MockRespondOptionsClient {
+        last_options: std::sync::Mutex<Option<LLMRequestOptions>>,
+    }
+
+    impl MockRespondOptionsClient {
+        fn new() -> Self {
+            Self {
+                last_options: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl LLMClient for MockRespondOptionsClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            let mut args = IndexMap::new();
+            args.insert("message".into(), json!("done"));
+            Ok(LLMResponse::ToolCalls(vec![ToolCall::new("respond", args)]))
+        }
+
+        async fn send_with_options(
+            &self,
+            messages: Vec<Value>,
+            tools: Option<Vec<ToolSpec>>,
+            options: LLMRequestOptions,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            *self.last_options.lock().unwrap() = Some(options.clone());
+            self.send(messages, tools, options.sampling).await
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            Ok(stream_from_response(LLMResponse::Text(TextResponse::new(
+                "done",
+            ))))
+        }
+
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_tools_forwards_prompt_cache_passthrough_fields() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "stream": false,
+            "prompt_cache_key": "tenant-a-tools-v1",
+            "prompt_cache_retention": "24h",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                }
+            }]
+        });
+        let client = Arc::new(MockRespondOptionsClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["message"]["content"], "done");
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let options = client
+            .last_options
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("options recorded");
+        let passthrough = options.passthrough.expect("passthrough");
+        assert_eq!(passthrough["prompt_cache_key"], "tenant-a-tools-v1");
+        assert_eq!(passthrough["prompt_cache_retention"], "24h");
+    }
+
+    #[tokio::test]
     async fn handle_no_tools_streaming_uses_stream_client() {
         let body = json!({
             "messages": [{"role": "user", "content": "hi"}],
@@ -1122,6 +1349,39 @@ mod tests {
             .clone()
             .expect("options recorded");
         assert_eq!(options.inbound_anthropic_body, Some(raw));
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_includes_cache_usage_details() {
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let details = LLMUsageDetails {
+            cached_prompt_tokens: Some(13),
+            cache_creation_prompt_tokens: Some(5),
+            cache_read_input_tokens: Some(13),
+            cache_creation_input_tokens: Some(5),
+            ..Default::default()
+        };
+        let client = Arc::new(MockOptionsClient::new_with_details(
+            Some(TokenUsage::new(20, 7, 27)),
+            Some(details),
+        ));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true).await;
+
+        match result.unwrap() {
+            AnthropicHandlerResult::Response(v) => {
+                assert_eq!(v["usage"]["input_tokens"], 20);
+                assert_eq!(v["usage"]["output_tokens"], 7);
+                assert_eq!(v["usage"]["cache_read_input_tokens"], 13);
+                assert_eq!(v["usage"]["cache_creation_input_tokens"], 5);
+            }
+            _ => panic!("expected Response"),
+        }
     }
 
     #[tokio::test]

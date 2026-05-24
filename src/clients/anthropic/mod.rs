@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::clients::base::{
-    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMRequestOptions, LLMResponse, SamplingParams,
-    StreamChunk, TokenUsage,
+    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMRequestOptions, LLMResponse, LLMUsageDetails,
+    SamplingParams, StreamChunk, TokenUsage,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -27,6 +27,7 @@ pub struct AnthropicClient {
     max_retries: i64,
     tool_choice: Option<String>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
 }
 
 impl AnthropicClient {
@@ -41,6 +42,7 @@ impl AnthropicClient {
             max_retries: 3,
             tool_choice: None,
             last_usage: Arc::new(Mutex::new(None)),
+            last_usage_details: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -80,19 +82,33 @@ impl AnthropicClient {
             .and_then(|u| u.get("input_tokens"))
             .and_then(|t| t.as_i64())
             .unwrap_or(0);
+        let cache_creation = usage_i64(usage, "cache_creation_input_tokens");
+        let cache_read = usage_i64(usage, "cache_read_input_tokens");
+        let prompt_total = prompt + cache_creation.unwrap_or(0) + cache_read.unwrap_or(0);
         let completion = usage
             .and_then(|u| u.get("output_tokens"))
             .and_then(|t| t.as_i64())
             .unwrap_or(0);
-        let token_usage = TokenUsage::new(prompt, completion, prompt + completion);
+        let token_usage = TokenUsage::new(prompt_total, completion, prompt_total + completion);
         if let Ok(mut guard) = self.last_usage.lock() {
             *guard = Some(token_usage);
+        }
+        if let Ok(mut guard) = self.last_usage_details.lock() {
+            *guard = anthropic_usage_details(cache_creation, cache_read);
         }
     }
 
     /// Returns the token usage of the last request made by this client, if any.
     pub fn get_last_usage(&self) -> Option<TokenUsage> {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// Returns provider-specific cache usage details from the last request, if any.
+    pub fn get_last_usage_details(&self) -> Option<LLMUsageDetails> {
+        self.last_usage_details
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     fn build_body_with_options(
@@ -180,6 +196,28 @@ fn openai_tool_choice_to_anthropic(value: &Value) -> Option<Value> {
     }
 }
 
+fn usage_i64(usage: Option<&Value>, key: &str) -> Option<i64> {
+    usage.and_then(|u| u.get(key)).and_then(Value::as_i64)
+}
+
+fn anthropic_usage_details(
+    cache_creation: Option<i64>,
+    cache_read: Option<i64>,
+) -> Option<LLMUsageDetails> {
+    let details = LLMUsageDetails {
+        cached_prompt_tokens: cache_read,
+        cache_creation_prompt_tokens: cache_creation,
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: cache_creation,
+        ..Default::default()
+    };
+    if details.is_empty() {
+        None
+    } else {
+        Some(details)
+    }
+}
+
 impl LLMClient for AnthropicClient {
     fn api_format(&self) -> ApiFormat {
         ApiFormat::OpenAI
@@ -187,6 +225,10 @@ impl LLMClient for AnthropicClient {
 
     fn last_usage(&self) -> Option<crate::clients::base::TokenUsage> {
         self.last_usage.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn last_usage_details(&self) -> Option<LLMUsageDetails> {
+        self.last_usage_details.lock().ok().and_then(|g| g.clone())
     }
 
     async fn send(
@@ -308,6 +350,7 @@ impl LLMClient for AnthropicClient {
         //   message_delta        → capture usage (input/output_tokens)
         let byte_stream = resp.bytes_stream();
         let last_usage = self.last_usage.clone();
+        let last_usage_details = self.last_usage_details.clone();
         let stream = async_stream::stream! {
             use futures_util::StreamExt;
             // SSE line buffer for partial-line data across byte chunks.
@@ -321,6 +364,8 @@ impl LLMClient for AnthropicClient {
             let mut current_tool_idx: i64 = -1;
             let mut usage_input: i64 = 0;
             let mut usage_output: i64 = 0;
+            let mut usage_cache_creation: Option<i64> = None;
+            let mut usage_cache_read: Option<i64> = None;
 
             loop {
                 match inner.next().await {
@@ -393,6 +438,8 @@ impl LLMClient for AnthropicClient {
                                 if let Some(usage) = evt.get("usage") {
                                     usage_input = usage.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(usage_input);
                                     usage_output = usage.get("output_tokens").and_then(|t| t.as_i64()).unwrap_or(usage_output);
+                                    usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens").or(usage_cache_creation);
+                                    usage_cache_read = usage_i64(Some(usage), "cache_read_input_tokens").or(usage_cache_read);
                                 }
                             }
                             "message_start" => {
@@ -401,12 +448,20 @@ impl LLMClient for AnthropicClient {
                                     if let Some(usage) = msg.get("usage") {
                                         usage_input = usage.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
                                         usage_output = usage.get("output_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
+                                        usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens");
+                                        usage_cache_read = usage_i64(Some(usage), "cache_read_input_tokens");
                                     }
                                 }
                             }
                             "message_stop" => {
+                                let prompt_total = usage_input
+                                    + usage_cache_creation.unwrap_or(0)
+                                    + usage_cache_read.unwrap_or(0);
                                 if let Ok(mut guard) = last_usage.lock() {
-                                    *guard = Some(TokenUsage::new(usage_input, usage_output, usage_input + usage_output));
+                                    *guard = Some(TokenUsage::new(prompt_total, usage_output, prompt_total + usage_output));
+                                }
+                                if let Ok(mut guard) = last_usage_details.lock() {
+                                    *guard = anthropic_usage_details(usage_cache_creation, usage_cache_read);
                                 }
                                 // Build the final LLMResponse matching Python's message_stop handler.
                                 let final_resp = if !tool_blocks.is_empty() {
@@ -456,6 +511,7 @@ impl LLMClient for AnthropicClient {
 mod tests {
     use super::*;
     use crate::clients::base::LLMResponse;
+    use futures_util::StreamExt;
     use serde_json::json;
 
     fn make_tool_spec(name: &str, desc: &str, props: &[(&str, &str)]) -> ToolSpec {
@@ -717,6 +773,73 @@ mod tests {
         let u = client.get_last_usage().expect("set");
         assert_eq!(u.prompt_tokens, 42);
         assert_eq!(u.total_tokens, 49);
+        assert!(client.get_last_usage_details().is_none());
+    }
+
+    #[test]
+    fn record_usage_includes_cache_tokens() {
+        let client = AnthropicClient::new("claude-3", None);
+        client.record_usage(&json!({
+            "usage": {
+                "input_tokens": 42,
+                "cache_creation_input_tokens": 11,
+                "cache_read_input_tokens": 17,
+                "output_tokens": 7
+            }
+        }));
+        let u = client.get_last_usage().expect("set");
+        assert_eq!(u.prompt_tokens, 70);
+        assert_eq!(u.completion_tokens, 7);
+        assert_eq!(u.total_tokens, 77);
+        let details = client.get_last_usage_details().expect("details");
+        assert_eq!(details.cached_prompt_tokens, Some(17));
+        assert_eq!(details.cache_creation_prompt_tokens, Some(11));
+        assert_eq!(details.cache_read_input_tokens, Some(17));
+        assert_eq!(details.cache_creation_input_tokens, Some(11));
+    }
+
+    #[tokio::test]
+    async fn stream_usage_includes_cache_tokens() {
+        let mut server = mockito::Server::new_async().await;
+        let sse = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":42,\"cache_creation_input_tokens\":11,\"cache_read_input_tokens\":17,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":7}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let mock = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+
+        let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0);
+        let mut stream = client
+            .send_stream_with_options(
+                vec![json!({"role": "user", "content": "hi"})],
+                None,
+                LLMRequestOptions::default(),
+            )
+            .await
+            .expect("stream starts");
+        while let Some(chunk) = stream.next().await {
+            chunk.expect("chunk");
+        }
+
+        let u = client.get_last_usage().expect("usage");
+        assert_eq!(u.prompt_tokens, 70);
+        assert_eq!(u.completion_tokens, 7);
+        assert_eq!(u.total_tokens, 77);
+        let details = client.get_last_usage_details().expect("details");
+        assert_eq!(details.cached_prompt_tokens, Some(17));
+        assert_eq!(details.cache_creation_prompt_tokens, Some(11));
+        mock.assert_async().await;
     }
 
     #[test]

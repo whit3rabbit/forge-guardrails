@@ -6,7 +6,7 @@ use anyllm_proxy::config::{
 };
 use forge_guardrails::{
     handle_chat_completions, AnyLlmProxyClient, AnyLlmRuntimeClient, ChunkType, ContextManager,
-    HandlerResult, LLMClient, LLMResponse, NoCompact, SamplingParams, ToolSpec,
+    HandlerResult, LLMClient, LLMRequestOptions, LLMResponse, NoCompact, SamplingParams, ToolSpec,
 };
 use futures_util::StreamExt;
 use indexmap::IndexMap;
@@ -145,6 +145,81 @@ async fn anyllm_proxy_client_sends_request_and_parses_text() {
 }
 
 #[tokio::test]
+async fn anyllm_proxy_client_preserves_cache_passthrough_and_records_cached_tokens() {
+    let mut server = mockito::Server::new_async().await;
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(mockito::Matcher::Json(json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false,
+            "prompt_cache_key": "tenant-a-tools-v1",
+            "prompt_cache_retention": "24h",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "properties": {"query": {"title": "Query", "type": "string"}},
+                        "required": ["query"],
+                        "title": "SearchParams",
+                        "type": "object",
+                    }
+                }
+            }]
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-cache",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o-mini",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "cached ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 4,
+                    "total_tokens": 104,
+                    "prompt_tokens_details": {"cached_tokens": 64}
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let mut passthrough = serde_json::Map::new();
+    passthrough.insert("prompt_cache_key".to_string(), json!("tenant-a-tools-v1"));
+    passthrough.insert("prompt_cache_retention".to_string(), json!("24h"));
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini").with_base_url(server.url());
+    let response = client
+        .send_with_options(
+            vec![json!({"role": "user", "content": "hello"})],
+            Some(vec![search_spec()]),
+            LLMRequestOptions {
+                passthrough: Some(passthrough),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("request succeeds");
+
+    match response {
+        LLMResponse::Text(text) => assert_eq!(text.content, "cached ok"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    let details = client.last_usage_details().expect("usage details");
+    assert_eq!(details.cached_prompt_tokens, Some(64));
+}
+
+#[tokio::test]
 async fn anyllm_proxy_client_parses_tool_calls() {
     let mut server = mockito::Server::new_async().await;
     let _mock = server
@@ -179,7 +254,13 @@ async fn anyllm_proxy_client_parses_tool_calls() {
                     },
                     "finish_reason": "tool_calls"
                 }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "prompt_cache_hit_tokens": 20,
+                    "prompt_cache_miss_tokens": 3
+                }
             })
             .to_string(),
         )
@@ -217,6 +298,11 @@ async fn anyllm_proxy_client_parses_tool_calls() {
         Some("org_test")
     );
     assert_positive_cost(info.estimated_cost_usd);
+    let details = client.last_usage_details().expect("usage details");
+    assert_eq!(details.cached_prompt_tokens, Some(20));
+    assert_eq!(details.cache_miss_prompt_tokens, Some(3));
+    assert_eq!(details.prompt_cache_hit_tokens, Some(20));
+    assert_eq!(details.prompt_cache_miss_tokens, Some(3));
 }
 
 #[tokio::test]
