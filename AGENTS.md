@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repo is `forge-guardrails`, a Rust clean-room implementation inspired by `antoinezambelli/forge`.
+This repo is `forge-guardrails`, a Rust implementation inspired by [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge), produced via the clean-room-skill workflow and subsequently verified for full behavioral parity with the Python reference.
 
 It provides foundation types and runtime pieces for guarded LLM-agent workflows:
 - workflow and step enforcement
@@ -198,9 +198,6 @@ When changing eval/backend parity:
 
 ## Current status notes
 
-The clean-room run summary reports:
-- 8 of 8 units completed
-- 487 tests passing
-- 0 contamination incidents
+The initial clean-room run produced 8/8 units, 487 passing tests, and 0 contamination incidents. After that exercise, a full parity review was conducted against the Python reference to establish complete behavioral alignment. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full narrative.
 
-Treat that as historical status. Re-run the local test suite after any meaningful change.
+Treat test counts as historical. Re-run the local test suite after any meaningful change.

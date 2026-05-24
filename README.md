@@ -1,19 +1,18 @@
 # forge-guardrails
 
-A Rust clean-room implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge), built as a test of the [`clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill) workflow. See `docs/CLEANROOM.md` for the clean-room run summary.
+A Rust implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge), produced via the [`clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill) workflow and subsequently brought to full behavioral parity with the Python reference. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the clean-room run summary and parity review.
 
 `forge-guardrails` provides foundation types and runtime components for reliable LLM tool-calling workflows. It focuses on structured agent loops, response validation, retry nudges, prerequisite enforcement, context compaction, backend adapters, and an OpenAI-compatible proxy/server surface.
 
-> Status: experimental clean-room port. The implementation was produced from clean behavioral artifacts and should be reviewed before production use.
+> Status: experimental. Behavioral parity with the Python reference has been verified through the parity test suite. Review for production hardening before deployment — see [Known review areas](#known-review-areas-before-release).
 
-## Clean-room provenance
+## Provenance
 
-This repository was produced as a clean-room migration of the original Python Forge project into Rust.
+This repository was produced as a clean-room migration of the original Python Forge project into Rust, then brought to full behavioral parity with that reference implementation.
 
 - Original project: [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge)
-- Clean-room workflow/tooling: [`whit3rabbit/clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill)
-- Local audit summary: `docs/CLEANROOM.md`
-- Reported result: 8 / 8 units complete, 487 tests passing, 0 contamination incidents
+- Clean-room workflow: [`whit3rabbit/clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill)
+- Full audit and parity review: [`docs/CLEANROOM.md`](docs/CLEANROOM.md)
 
 This repository is not affiliated with, endorsed by, or maintained by the original Forge author unless stated elsewhere. Keep attribution to the original project and preserve license notices when redistributing.
 
@@ -53,7 +52,7 @@ description = "Foundation types for an LLM-agent workflow framework"
 
 ```text
 docs/
-  CLEANROOM.md              Clean-room run summary and audit notes
+  CLEANROOM.md              Clean-room run summary, parity review, and attribution
 src/
   backends/                 Anthropic, Llamafile, and Ollama adapters
   guardrails/               Validator, step enforcer, nudges, error tracking
@@ -198,6 +197,61 @@ The HTTP server also accepts Anthropic Messages API requests at
 run through the same guarded OpenAI-compatible handler used by
 `POST /v1/chat/completions`, then translated back to Anthropic responses.
 
+### Docker proxy
+
+The `forge-guardrails-proxy` binary runs Forge as an OpenAI-compatible and
+Anthropic-compatible guardrail proxy. It preserves the inbound request `model`
+for upstream anyllm routing, so the same container can serve plain env-based
+backends or a `PROXY_CONFIG` model router.
+
+Build and run locally:
+
+```bash
+docker build -t forge-guardrails:local .
+docker run --rm -p 3000:3000 \
+  -e OPENAI_API_KEY=sk-... \
+  forge-guardrails:local
+curl http://localhost:3000/health
+```
+
+Route to a local OpenAI-compatible backend such as Ollama:
+
+```bash
+docker run --rm -p 3000:3000 \
+  -e OPENAI_BASE_URL=http://host.docker.internal:11434/v1 \
+  -e OPENAI_API_KEY=dummy \
+  forge-guardrails:local
+```
+
+Useful runtime env vars:
+
+- `FORGE_HOST`, default `0.0.0.0`
+- `FORGE_PORT`, fallback `PORT`, fallback `LISTEN_PORT`, default `3000`
+- `FORGE_MODEL`, fallback `SMALL_MODEL`, default `gpt-4o-mini`
+- `FORGE_CONTEXT_TOKENS`, default `128000`
+- `FORGE_MAX_RETRIES`, default `3`
+- `FORGE_RESCUE_ENABLED`, default `true`
+- `FORGE_SERIALIZE_REQUESTS`, default `false`
+
+Existing anyllm env and config are still honored, including `BACKEND`,
+provider API keys, `OPENAI_BASE_URL`, `PROXY_CONFIG`, `BIG_MODEL`,
+`SMALL_MODEL`, and LiteLLM aliases such as `LITELLM_CONFIG`.
+
+This proxy does not enforce inbound authentication. Do not expose it publicly
+without a reverse proxy, network policy, or another auth layer.
+
+Publish to Docker Hub as `followthewhit3rabbit/forge-guardrails`:
+
+```bash
+docker login -u followthewhit3rabbit
+docker buildx create --use --name forge-guardrails-builder || docker buildx use forge-guardrails-builder
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t followthewhit3rabbit/forge-guardrails:0.1.0 \
+  -t followthewhit3rabbit/forge-guardrails:latest \
+  --push .
+```
+
 ### 4. anyllm runtime and sidecar integration
 
 Use `AnyLlmRuntimeClient` when you want in-process anyllm provider routing
@@ -305,18 +359,20 @@ external client -> Forge `HTTPServer` or `handle_chat_completions` ->
 
 ## Testing scope
 
-The clean-room summary reports:
+Initial clean-room run metrics (see [`docs/CLEANROOM.md`](docs/CLEANROOM.md)):
 
 - 487 passing tests
 - 27 Rust source files
 - 13 Rust test files
 - 0 contamination incidents
 
+After the clean-room phase, a full parity review against the Python reference established behavioral alignment across all major subsystems. The ongoing regression gate is `cargo test --test parity_tests`.
+
 Keep tests deterministic where possible. Backend integration tests should use mock servers unless they intentionally qualify a live backend.
 
 ## Known review areas before release
 
-This clean-room implementation should be reviewed for protocol correctness and production hardening before publication or deployment. In particular, audit:
+The implementation should be reviewed for protocol correctness and production hardening before publication or deployment. Behavioral parity with the Python reference is covered by the parity test suite; the following areas need additional protocol and integration review:
 
 - tool-call ID pairing across assistant tool calls and tool results
 - transcript validity after guardrail-blocked steps
@@ -328,17 +384,20 @@ This clean-room implementation should be reviewed for protocol correctness and p
 
 ## Relationship to upstream Forge
 
-The upstream Forge project is a Python reliability layer for self-hosted LLM tool-calling and multi-step agentic workflows. This repository is a Rust clean-room implementation inspired by that project’s behavior, not a direct source translation.
+The upstream Forge project is a Python reliability layer for self-hosted LLM tool-calling and multi-step agentic workflows. This repository is a Rust implementation inspired by that project's behavior — not a direct source translation — and has been verified for full behavioral parity with the Python reference through the parity test suite.
+
+The Python reference is included as the `forge/` git submodule for use in fixture generation and parity checks.
 
 Use the upstream repository for the original Python implementation, documentation, paper citation, and release history:
 
 - <https://github.com/antoinezambelli/forge>
 
-## Relationship to clean-room-skill
 
-This repository was created to exercise the Clean Room workflow, which separates source-reading roles from clean implementation roles and produces durable behavioral artifacts before implementation.
+The initial Rust implementation was produced using the Clean Room workflow as a deliberate test of that skill. The workflow separates source-reading roles from clean implementation roles and produces durable behavioral artifacts before any code is written. After the clean-room phase concluded, a full parity review was conducted against the Python reference to establish complete alignment.
 
-Use the clean-room skill repository for the workflow, installation instructions, boundary model, and CLI/runtime details:
+See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full clean-room run summary and parity review narrative.
+
+For the workflow itself, installation instructions, boundary model, and CLI/runtime details:
 
 - <https://github.com/whit3rabbit/clean-room-skill>
 
