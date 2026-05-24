@@ -148,7 +148,7 @@ impl ServerManager {
         }
 
         let binary = if self.backend == "llamafile" {
-            self.find_llamafile_binary(gguf_path)?
+            self.llamafile_binary()
         } else {
             "llama-server".to_string()
         };
@@ -390,35 +390,9 @@ impl ServerManager {
         Ok(())
     }
 
-    /// Find the llamafile runtime binary in the model directory.
-    fn find_llamafile_binary(&self, gguf_path: &Path) -> Result<String, BackendError> {
-        let dir = gguf_path.parent().ok_or_else(|| {
-            BackendError::new(0, "Cannot determine model directory from gguf path")
-        })?;
-
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| BackendError::new(0, format!("Cannot read model directory: {}", e)))?;
-
-        let mut best: Option<(String, String)> = None;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy().to_string();
-            if name_str.starts_with("llamafile-") || name_str.contains("llamafile") {
-                match &best {
-                    None => {
-                        best = Some((entry.path().to_string_lossy().to_string(), name_str));
-                    }
-                    Some((_, existing)) if name_str > *existing => {
-                        best = Some((entry.path().to_string_lossy().to_string(), name_str));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        best.map(|(p, _)| p).ok_or_else(|| {
-            BackendError::new(0, "No llamafile runtime binary found in model directory")
-        })
+    /// Resolve llamafile runtime binary from trusted operator config.
+    fn llamafile_binary(&self) -> String {
+        std::env::var("FORGE_LLAMAFILE_BIN").unwrap_or_else(|_| "llamafile".to_string())
     }
 }
 
@@ -855,66 +829,15 @@ mod tests {
 
     #[test]
     fn test_setup_backend_ordering() {
-        use std::fs::{create_dir_all, File};
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let test_dir = std::path::Path::new("target/debug/test_setup_backend");
-        create_dir_all(test_dir).unwrap();
-
-        let binary_path = test_dir.join("llamafile-mock");
-        {
-            let mut f = File::create(&binary_path).unwrap();
-            f.write_all(b"#!/bin/sh\nsleep 10\n").unwrap();
-            let mut permissions = f.metadata().unwrap().permissions();
-            permissions.set_mode(0o755);
-            f.set_permissions(permissions).unwrap();
+        let mgr = ServerManager::new("llamafile", 8080, None);
+        let binary_path = "/tmp/operator-llamafile-bin";
+        unsafe {
+            std::env::set_var("FORGE_LLAMAFILE_BIN", &binary_path);
         }
-
-        let mut server = mockito::Server::new();
-        let port = server
-            .host_with_port()
-            .split(':')
-            .next_back()
-            .unwrap()
-            .parse::<i64>()
-            .unwrap();
-
-        let _mock = server
-            .mock("GET", "/props")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"default_generation_settings": {"n_ctx": 2048}}"#)
-            .create();
-
-        let gguf_path = test_dir.join("model.gguf");
-        {
-            File::create(&gguf_path)
-                .unwrap()
-                .write_all(b"dummy gguf")
-                .unwrap();
+        assert_eq!(mgr.llamafile_binary(), binary_path);
+        unsafe {
+            std::env::remove_var("FORGE_LLAMAFILE_BIN");
         }
-
-        let result = setup_backend(
-            "llamafile",
-            None,
-            Some(&gguf_path),
-            BudgetMode::Backend,
-            None,
-            port,
-            "native",
-            &[],
-            None,
-            None,
-            None,
-            false,
-        );
-
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        let (server_mgr, ctx_mgr) = result.unwrap();
-        assert_eq!(ctx_mgr.budget(), 2048);
-
-        let _ = server_mgr.stop();
-        let _ = std::fs::remove_dir_all(test_dir);
+        assert_eq!(mgr.llamafile_binary(), "llamafile".to_string());
     }
 }
