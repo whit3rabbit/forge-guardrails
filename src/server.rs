@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Mutex;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use crate::context::{detect_hardware, ContextManager, NoCompact};
 use crate::error::{BackendError, BudgetResolutionError};
 
@@ -79,6 +82,7 @@ pub struct ServerManager {
     backend: String,
     port: i64,
     _models_dir: Option<PathBuf>,
+    llamafile_runtime: Option<PathBuf>,
     process: Mutex<Option<Child>>,
     current_config: Mutex<Option<RunConfig>>,
     last_context: Mutex<Option<i64>>,
@@ -90,10 +94,16 @@ impl ServerManager {
             backend: backend.to_string(),
             port,
             _models_dir: models_dir.map(|p| p.to_path_buf()),
+            llamafile_runtime: None,
             process: Mutex::new(None),
             current_config: Mutex::new(None),
             last_context: Mutex::new(None),
         }
+    }
+
+    pub fn with_llamafile_runtime(mut self, path: impl AsRef<Path>) -> Self {
+        self.llamafile_runtime = Some(path.as_ref().to_path_buf());
+        self
     }
 
     /// Start the backend process. No-op for ollama.
@@ -148,9 +158,11 @@ impl ServerManager {
         }
 
         let binary = if self.backend == "llamafile" {
-            self.find_llamafile_binary(gguf_path)?
+            validate_llamafile_runtime_path(self.llamafile_runtime.as_deref().ok_or_else(
+                || BackendError::new(0, "llamafile backend requires llamafile_runtime"),
+            )?)?
         } else {
-            "llama-server".to_string()
+            PathBuf::from("llama-server")
         };
 
         let args = build_backend_args(
@@ -173,7 +185,7 @@ impl ServerManager {
 
         let child = cmd
             .spawn()
-            .map_err(|e| BackendError::new(0, format!("Failed to start {}: {}", binary, e)))?;
+            .map_err(|e| BackendError::new(0, format!("Failed to start {:?}: {}", binary, e)))?;
 
         {
             let mut guard = self
@@ -389,37 +401,38 @@ impl ServerManager {
 
         Ok(())
     }
+}
 
-    /// Find the llamafile runtime binary in the model directory.
-    fn find_llamafile_binary(&self, gguf_path: &Path) -> Result<String, BackendError> {
-        let dir = gguf_path.parent().ok_or_else(|| {
-            BackendError::new(0, "Cannot determine model directory from gguf path")
-        })?;
-
-        let entries = std::fs::read_dir(dir)
-            .map_err(|e| BackendError::new(0, format!("Cannot read model directory: {}", e)))?;
-
-        let mut best: Option<(String, String)> = None;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy().to_string();
-            if name_str.starts_with("llamafile-") || name_str.contains("llamafile") {
-                match &best {
-                    None => {
-                        best = Some((entry.path().to_string_lossy().to_string(), name_str));
-                    }
-                    Some((_, existing)) if name_str > *existing => {
-                        best = Some((entry.path().to_string_lossy().to_string(), name_str));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        best.map(|(p, _)| p).ok_or_else(|| {
-            BackendError::new(0, "No llamafile runtime binary found in model directory")
-        })
+fn validate_llamafile_runtime_path(path: &Path) -> Result<PathBuf, BackendError> {
+    if !path.is_absolute() {
+        return Err(BackendError::new(
+            0,
+            "llamafile_runtime must be an absolute path",
+        ));
     }
+
+    let canonical = std::fs::canonicalize(path).map_err(|e| {
+        BackendError::new(
+            0,
+            format!("llamafile_runtime must resolve to a file: {}", e),
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|e| {
+        BackendError::new(0, format!("llamafile_runtime metadata unavailable: {}", e))
+    })?;
+    if !metadata.is_file() {
+        return Err(BackendError::new(
+            0,
+            "llamafile_runtime must resolve to a regular file",
+        ));
+    }
+
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(BackendError::new(0, "llamafile_runtime must be executable"));
+    }
+
+    Ok(canonical)
 }
 
 /// Convenience factory that creates a ServerManager and ContextManager.
@@ -431,6 +444,7 @@ pub fn setup_backend(
     backend: &str,
     model: Option<&str>,
     gguf_path: Option<&Path>,
+    llamafile_runtime: Option<&Path>,
     budget_mode: BudgetMode,
     manual_tokens: Option<i64>,
     port: i64,
@@ -448,11 +462,14 @@ pub fn setup_backend(
             if gguf_path.is_some() {
                 return Err("ollama does not accept a file path".to_string());
             }
+            if llamafile_runtime.is_some() {
+                return Err("ollama does not accept llamafile_runtime".to_string());
+            }
             if Path::new(m).extension().is_some() || m.contains('/') || m.contains('\\') {
                 return Err("ollama does not accept a file path".to_string());
             }
         }
-        "llamaserver" | "llamafile" => {
+        "llamaserver" => {
             if model.is_some() {
                 return Err(format!(
                     "{} does not accept a model name; use gguf_path",
@@ -462,11 +479,29 @@ pub fn setup_backend(
             if gguf_path.is_none() {
                 return Err(format!("{} requires a file path (gguf_path)", backend));
             }
+            if llamafile_runtime.is_some() {
+                return Err("llamaserver does not accept llamafile_runtime".to_string());
+            }
+        }
+        "llamafile" => {
+            if model.is_some() {
+                return Err("llamafile does not accept a model name; use gguf_path".to_string());
+            }
+            if gguf_path.is_none() {
+                return Err("llamafile requires a file path (gguf_path)".to_string());
+            }
+            if llamafile_runtime.is_none() {
+                return Err("llamafile requires llamafile_runtime".to_string());
+            }
         }
         _ => return Err(format!("Unknown backend: {}", backend)),
     }
 
-    let mgr = ServerManager::new(backend, port, None);
+    let mgr = if let Some(runtime) = llamafile_runtime {
+        ServerManager::new(backend, port, None).with_llamafile_runtime(runtime)
+    } else {
+        ServerManager::new(backend, port, None)
+    };
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -682,6 +717,7 @@ mod tests {
             "ollama",
             None,
             None,
+            None,
             BudgetMode::Backend,
             None,
             8080,
@@ -703,6 +739,7 @@ mod tests {
         let result = setup_backend(
             "ollama",
             Some("/path/to/model.gguf"),
+            None,
             None,
             BudgetMode::Backend,
             None,
@@ -726,6 +763,7 @@ mod tests {
             "llamaserver",
             Some("mymodel"),
             Some(Path::new("t.gguf")),
+            None,
             BudgetMode::Backend,
             None,
             8080,
@@ -748,6 +786,7 @@ mod tests {
             "llamaserver",
             None,
             None,
+            None,
             BudgetMode::Backend,
             None,
             8080,
@@ -760,6 +799,75 @@ mod tests {
         );
         match result {
             Err(e) => assert!(e.contains("requires a file path")),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn setup_backend_llamafile_requires_runtime() {
+        let result = setup_backend(
+            "llamafile",
+            None,
+            Some(Path::new("t.gguf")),
+            None,
+            BudgetMode::Backend,
+            None,
+            8080,
+            "native",
+            &[],
+            None,
+            None,
+            None,
+            false,
+        );
+        match result {
+            Err(e) => assert!(e.contains("requires llamafile_runtime")),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn setup_backend_llamaserver_rejects_llamafile_runtime() {
+        let result = setup_backend(
+            "llamaserver",
+            None,
+            Some(Path::new("t.gguf")),
+            Some(Path::new("/tmp/llamafile")),
+            BudgetMode::Backend,
+            None,
+            8080,
+            "native",
+            &[],
+            None,
+            None,
+            None,
+            false,
+        );
+        match result {
+            Err(e) => assert!(e.contains("does not accept llamafile_runtime")),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn setup_backend_ollama_rejects_llamafile_runtime() {
+        let result = setup_backend(
+            "ollama",
+            Some("llama3"),
+            None,
+            Some(Path::new("/tmp/llamafile")),
+            BudgetMode::Backend,
+            None,
+            8080,
+            "native",
+            &[],
+            None,
+            None,
+            None,
+            false,
+        );
+        match result {
+            Err(e) => assert!(e.contains("does not accept llamafile_runtime")),
             Ok(_) => panic!("expected error"),
         }
     }
@@ -801,6 +909,118 @@ mod tests {
         );
         assert!(!result.unwrap());
         assert!(mgr.process.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn llamafile_requires_explicit_runtime_before_spawn() {
+        use std::fs::{self, File};
+        use std::io::Write;
+
+        let test_dir = Path::new("target/debug/test_llamafile_no_runtime");
+        let _ = fs::remove_dir_all(test_dir);
+        fs::create_dir_all(test_dir).unwrap();
+        let gguf_path = test_dir.join("model.gguf");
+        File::create(&gguf_path).unwrap();
+        let marker = test_dir.join("marker");
+        let attacker = test_dir.join("zz-llamafile");
+        {
+            let mut f = File::create(&attacker).unwrap();
+            writeln!(f, "#!/bin/sh").unwrap();
+            writeln!(f, "echo owned > {}", marker.display()).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&attacker).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&attacker, permissions).unwrap();
+        }
+
+        let mgr = ServerManager::new("llamafile", 8080, None);
+        let result = mgr.start("", &gguf_path, "native", &[], None, None, None, None, false);
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("llamafile_runtime"));
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn llamafile_runtime_rejects_relative_path() {
+        let err = validate_llamafile_runtime_path(Path::new("llamafile")).unwrap_err();
+        assert!(err.to_string().contains("absolute"));
+    }
+
+    #[test]
+    fn llamafile_runtime_rejects_missing_path() {
+        let missing = std::env::current_dir()
+            .unwrap()
+            .join("target/debug/missing-llamafile-runtime");
+        let err = validate_llamafile_runtime_path(&missing).unwrap_err();
+        assert!(err.to_string().contains("resolve"));
+    }
+
+    #[test]
+    fn llamafile_runtime_rejects_non_file_path() {
+        use std::fs;
+
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target/debug/test_llamafile_runtime_dir");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let err = validate_llamafile_runtime_path(&dir).unwrap_err();
+        assert!(err.to_string().contains("regular file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn llamafile_runtime_rejects_non_executable_file() {
+        use std::fs::{self, File};
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("target/debug/test-llamafile-non-exec");
+        let _ = fs::remove_file(&path);
+        File::create(&path).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let err = validate_llamafile_runtime_path(&path).unwrap_err();
+        assert!(err.to_string().contains("executable"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn llamafile_runtime_validation_canonicalizes_path() {
+        use std::fs::{self, File};
+
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("target/debug/test_llamafile_runtime_canonical");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime");
+        File::create(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+
+        let validated = validate_llamafile_runtime_path(
+            &dir.join("../test_llamafile_runtime_canonical/runtime"),
+        )
+        .unwrap();
+        assert_eq!(validated, fs::canonicalize(&path).unwrap());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -859,8 +1079,10 @@ mod tests {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        let test_dir = std::path::Path::new("target/debug/test_setup_backend");
-        create_dir_all(test_dir).unwrap();
+        let test_dir = std::env::current_dir()
+            .unwrap()
+            .join("target/debug/test_setup_backend");
+        create_dir_all(&test_dir).unwrap();
 
         let binary_path = test_dir.join("llamafile-mock");
         {
@@ -899,6 +1121,7 @@ mod tests {
             "llamafile",
             None,
             Some(&gguf_path),
+            Some(&binary_path),
             BudgetMode::Backend,
             None,
             port,
@@ -915,6 +1138,6 @@ mod tests {
         assert_eq!(ctx_mgr.budget(), 2048);
 
         let _ = server_mgr.stop();
-        let _ = std::fs::remove_dir_all(test_dir);
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }

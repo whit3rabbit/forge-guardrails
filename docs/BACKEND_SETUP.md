@@ -43,6 +43,22 @@ llamaserver default: native
 
 Both paths use `LlamafileClient`, but the mode matters for parity.
 
+Managed llamafile startup requires an explicit, trusted runtime binary path.
+Forge does not discover or execute binaries from the GGUF/model directory.
+
+```text
+setup_backend(
+    "llamafile",
+    None,
+    Some(Path::new("path/to/model.gguf")),
+    Some(Path::new("/opt/forge/bin/llamafile")),
+    /* budget and runtime options */
+)
+```
+
+The runtime path must be absolute, resolve to a regular file, and be
+executable on Unix platforms.
+
 ## Ollama
 
 Ollama uses `/api/chat`, not an OpenAI-compatible endpoint. Use
@@ -52,6 +68,8 @@ Rules:
 
 - `setup_backend("ollama")` requires `--model`.
 - `setup_backend("ollama")` rejects GGUF/file paths.
+- `setup_backend("llamafile")` requires `gguf_path` and an explicit
+  `llamafile_runtime`.
 - Resolved budgets should be mirrored into Ollama as `num_ctx` when the client
   is used for evals.
 

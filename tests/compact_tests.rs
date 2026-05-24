@@ -316,9 +316,9 @@ fn tiered_phase2_preserves_text_response() {
     assert_eq!(text_count, 4);
 }
 
-// ts-027: Tiered Phase 2 preserves eligible tool_call skeletons.
+// ts-027: Tiered Phase 2 drops eligible tool_call/tool_result pairs together.
 #[test]
-fn tiered_phase2_preserves_eligible_tool_calls() {
+fn tiered_phase2_drops_eligible_tool_calls_with_results() {
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
     for step in 0..4 {
         msgs.push(tool_call_msg(step, "call"));
@@ -330,7 +330,49 @@ fn tiered_phase2_preserves_eligible_tool_calls() {
         .iter()
         .filter(|m| m.metadata.msg_type == MessageType::ToolCall)
         .count();
-    assert_eq!(call_count, 4);
+    assert_eq!(call_count, 2);
+}
+
+#[test]
+fn tiered_phase1_preserves_truncated_tool_result_pair_metadata() {
+    use forge_guardrails::ToolCallInfo;
+    use indexmap::IndexMap;
+
+    let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
+    for step in 0..2 {
+        let tc_info = ToolCallInfo::new("search", Some(IndexMap::new()), format!("tc_000{step}"));
+        msgs.push(
+            Message::new(
+                MessageRole::Assistant,
+                "",
+                MessageMeta::new(MessageType::ToolCall).with_step_index(step),
+            )
+            .with_tool_calls(vec![tc_info]),
+        );
+        msgs.push(
+            Message::new(
+                MessageRole::Tool,
+                "x".repeat(250),
+                MessageMeta::new(MessageType::ToolResult).with_step_index(step),
+            )
+            .with_tool_name("search")
+            .with_tool_call_id(format!("tc_000{step}")),
+        );
+    }
+
+    let strategy = TieredCompact::new(1).with_phase_thresholds([0.0, 100.0, 100.0]);
+    let (result, phase) = strategy.compact(&msgs, 100, None);
+
+    assert_eq!(phase, 1);
+    let truncated = result
+        .iter()
+        .find(|m| {
+            m.metadata.step_index == Some(0) && m.metadata.msg_type == MessageType::ToolResult
+        })
+        .expect("step 0 tool result");
+    assert!(truncated.content.contains("[Truncated"));
+    assert_eq!(truncated.tool_name.as_deref(), Some("search"));
+    assert_eq!(truncated.tool_call_id.as_deref(), Some("tc_0000"));
 }
 
 // ts-028: Tiered Phase 2 preserves recent window.
@@ -389,9 +431,9 @@ fn tiered_phase3_drops_text_response() {
     assert_eq!(eligible_text.len(), 0);
 }
 
-// ts-031: Tiered Phase 3 keeps tool_call skeletons.
+// ts-031: Tiered Phase 3 drops eligible tool_call/tool_result pairs together.
 #[test]
-fn tiered_phase3_keeps_tool_calls() {
+fn tiered_phase3_drops_eligible_tool_calls_with_results() {
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
     for step in 0..4 {
         msgs.push(tool_call_msg(step, "call"));
@@ -403,7 +445,7 @@ fn tiered_phase3_keeps_tool_calls() {
         .iter()
         .filter(|m| m.metadata.msg_type == MessageType::ToolCall)
         .count();
-    assert_eq!(call_count, 4);
+    assert_eq!(call_count, 2);
 }
 
 // ts-032: Tiered Phase 3 preserves system and user as identical.
@@ -595,7 +637,7 @@ fn per_phase_thresholds_phase3() {
 }
 
 #[test]
-fn test_compaction_preserves_tool_call_skeletons_after_dropping_results() {
+fn test_compaction_drops_tool_calls_and_results_together() {
     use forge_guardrails::ToolCallInfo;
     use indexmap::IndexMap;
 
@@ -640,11 +682,10 @@ fn test_compaction_preserves_tool_call_skeletons_after_dropping_results() {
         }
     }
 
-    assert_eq!(call_ids.len(), 4);
-    assert_eq!(
-        result_ids,
+    let expected: std::collections::HashSet<String> =
         ["tc_0002".to_string(), "tc_0003".to_string()]
             .into_iter()
-            .collect()
-    );
+            .collect();
+    assert_eq!(call_ids, expected);
+    assert_eq!(result_ids, expected);
 }
