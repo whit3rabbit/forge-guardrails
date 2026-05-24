@@ -1,0 +1,35 @@
+mod cli;
+mod client;
+mod config;
+mod response;
+mod routes;
+mod startup;
+mod upstream;
+
+use clap::Parser;
+
+use cli::Cli;
+
+fn main() {
+    let cli = Cli::parse();
+    if let Err(err) = run_main(cli) {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn run_main(cli: Cli) -> Result<(), String> {
+    upstream::apply_litellm_env_aliases();
+    let startup = startup::build_startup(cli)?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("failed to build tokio runtime: {err}"))?;
+
+    runtime.block_on(routes::serve(
+        startup.config,
+        startup.client_factory,
+        startup.managed_server,
+    ))
+}

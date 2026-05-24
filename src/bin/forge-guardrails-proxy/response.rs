@@ -1,0 +1,83 @@
+use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use forge_guardrails::HTTPServer;
+
+pub(crate) fn build_response(status: u16, content_type: &str, body: String) -> Response {
+    let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status_code, body).into_response();
+    if !content_type.is_empty() {
+        if let Ok(value) = HeaderValue::from_str(content_type) {
+            response.headers_mut().insert(header::CONTENT_TYPE, value);
+        }
+    }
+    for (name, value) in HTTPServer::cors_headers() {
+        if let Some(header_name) = cors_header_name(name) {
+            response
+                .headers_mut()
+                .insert(header_name, HeaderValue::from_static(value));
+        }
+    }
+    response
+}
+
+fn cors_header_name(name: &str) -> Option<HeaderName> {
+    match name {
+        "Access-Control-Allow-Origin" => {
+            Some(HeaderName::from_static("access-control-allow-origin"))
+        }
+        "Access-Control-Allow-Methods" => {
+            Some(HeaderName::from_static("access-control-allow-methods"))
+        }
+        "Access-Control-Allow-Headers" => {
+            Some(HeaderName::from_static("access-control-allow-headers"))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header;
+
+    #[test]
+    fn build_response_sets_content_type() {
+        let response = build_response(200, "application/json", "{}".to_string());
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn build_response_omits_empty_content_type() {
+        let response = build_response(204, "", String::new());
+        assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn build_response_sets_cors_headers() {
+        let response = build_response(200, "application/json", "{}".to_string());
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "*"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-methods")
+                .unwrap(),
+            "GET, POST, OPTIONS"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .unwrap(),
+            "Content-Type, Authorization"
+        );
+    }
+}
