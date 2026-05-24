@@ -18,8 +18,24 @@ env:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: ubuntu-latest
+    name: Rust ${{ matrix.suffix }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            suffix: linux-x86_64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            suffix: windows-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            suffix: macos-arm64
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            suffix: macos-x86_64
 
     steps:
       - name: Checkout
@@ -29,20 +45,21 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target ${{ matrix.target }}
           rustup default stable
 
       - name: Check formatting
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo fmt --all --check
 
       - name: Check all targets
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets --locked --target ${{ matrix.target }}
 
       - name: Build all targets
-        run: cargo build --workspace --all-targets --locked
+        run: cargo build --workspace --all-targets --locked --target ${{ matrix.target }}
 
       - name: Lint all targets
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
 
       - name: Test all targets
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets --locked --target ${{ matrix.target }}

@@ -5,7 +5,11 @@
 [![CI](https://github.com/whit3rabbit/forge-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/forge-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A Rust implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge), produced via the [`clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill) workflow and subsequently verified for full behavioral parity with the Python reference. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the clean-room run summary and parity review.
+A Rust implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge). See python version for original.
+
+This was mostly a test of my clean-room-skill repo to see if it could manage to reproduce in rust. It somewhat succeeded, but I made a lot of tweaks to more closely match the original project. 
+
+# Summary
 
 A reliability layer for self-hosted LLM tool-calling. You give forge a set of tools; the model calls whichever it wants in whatever order. Workflow structure is opt-in — `required_steps`, `prerequisites`, and `terminal_tool` let you constrain the loop when you need to, but forge's guardrails (rescue parsing, retry nudges, response validation) apply with zero required steps too.
 

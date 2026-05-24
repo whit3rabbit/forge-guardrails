@@ -63,6 +63,7 @@ cargo test proxy::handler
 cargo test server::tests
 cargo test --bin forge-eval
 python scripts/eval_openai_proxy.py --help
+scripts/run_local_eval.sh --suite smoke --runs 1
 ```
 
 Local managed llama-server proxy launcher:
@@ -160,15 +161,39 @@ compare both normalized JSON and Python-style `json.dumps(...)` strings.
 Use the upstream Python eval scenarios as the live-backend oracle, but do not
 port the Python dashboard/report platform into Rust unless explicitly asked.
 
-Python oracle against a running Rust proxy:
+Standard local smoke run:
 
 ```bash
-python scripts/eval_openai_proxy.py \
+scripts/run_local_eval.sh --suite smoke --runs 1
+```
+
+Standard local release benchmark:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10
+```
+
+`scripts/run_local_eval.sh` starts
+`scripts/start_llamaserver_proxy.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf`
+on proxy port `8081`, waits for `/health`, runs the Rust `forge-eval` smoke
+runner, runs the Python oracle wrapper, writes JSONL/report artifacts under
+`target/local-eval/<timestamp>/`, and stops the proxy on exit or failure.
+
+The release suite runs normal scenarios with an `8192` process budget. It
+restarts the proxy for compaction scenarios that require scenario-specific
+budgets: `compaction_chain_p1=3600`, `compaction_chain_p2=2200`, and
+`compaction_chain_p3=1536`.
+
+Manual Python oracle against a running Rust proxy:
+
+```bash
+uv run --project forge python scripts/eval_openai_proxy.py \
   --base-url http://127.0.0.1:8081/v1 \
   --model test-model \
   --runs 10 \
   --stream \
   --scenario basic_2step sequential_3step error_recovery \
+  --budget-tokens 8192 \
   --output eval_results_rust_proxy.jsonl
 ```
 
@@ -187,6 +212,13 @@ cargo run --bin forge-eval -- \
 The Rust smoke runner supports only the initial small scenario set:
 `basic_2step`, `sequential_3step`, and `error_recovery`. It emits JSONL for
 quick CI/smoke checks and should not grow into a reporting dashboard.
+
+For release benchmarking, Python eval scenarios and Python scoring/reporting
+are the source of truth. Do not require exact live JSONL or generated text
+parity. Compare scenario coverage, success/accuracy, guardrail counters, and
+report output. Latency, token counts, generated IDs, JSON key order outside
+schema tests, provider metadata, and stochastic final wording are not release
+gates.
 
 Proxy parity must cover client-visible behavior: no-tools passthrough, empty
 text for unexpected no-tools tool calls, retry-exhaustion raw text, rescue

@@ -65,19 +65,29 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
 
-  build-macos:
-    name: macOS ${{ matrix.suffix }}
+  build-binary:
+    name: Build ${{ matrix.suffix }} binary
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            suffix: linux-x86_64
+            archive_ext: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            suffix: windows-x86_64
+            archive_ext: zip
           - target: aarch64-apple-darwin
             runner: macos-14
             suffix: macos-arm64
+            archive_ext: zip
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             suffix: macos-x86_64
+            archive_ext: zip
 
     steps:
       - name: Checkout
@@ -91,28 +101,54 @@ jobs:
       - name: Build proxy binary
         run: cargo build --release --locked --bin forge-guardrails-proxy --target ${{ matrix.target }}
 
-      - name: Stage Homebrew archive
+      - name: Stage Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
           SUFFIX: ${{ matrix.suffix }}
           VERSION: ${{ github.ref_name }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           ver="${VERSION#v}"
           mkdir -p dist
           cp "target/${TARGET}/release/forge-guardrails-proxy" dist/forge-guardrails-proxy
           cd dist
-          zip "forge-guardrails-proxy-${ver}-${SUFFIX}.zip" forge-guardrails-proxy
+          archive="forge-guardrails-proxy-${ver}-${SUFFIX}.${ARCHIVE_EXT}"
+          if [[ "${ARCHIVE_EXT}" == "tar.gz" ]]; then
+            tar -czf "${archive}" forge-guardrails-proxy
+          else
+            zip "${archive}" forge-guardrails-proxy
+          fi
+
+      - name: Stage Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.suffix }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          $ver = $env:VERSION.TrimStart("v")
+          New-Item -ItemType Directory -Path dist -Force
+          Copy-Item "target/$env:TARGET/release/forge-guardrails-proxy.exe" "dist/forge-guardrails-proxy.exe"
+          Compress-Archive `
+            -Path "dist/forge-guardrails-proxy.exe" `
+            -DestinationPath "dist/forge-guardrails-proxy-$ver-$env:SUFFIX.zip" `
+            -Force
 
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.suffix }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
 
   release:
     name: Publish GitHub Release
-    needs: [publish, build-macos]
+    needs: [publish, build-binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write

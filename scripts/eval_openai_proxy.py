@@ -46,6 +46,7 @@ def _print_early_help() -> None:
         default="reforged",
     )
     parser.add_argument("--output")
+    parser.add_argument("--budget-tokens", type=int)
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)
@@ -282,6 +283,7 @@ def _result_row(
     model: str,
     stream: bool,
     ablation: str,
+    budget_tokens: int | None,
 ) -> dict[str, Any]:
     messages = result.messages
     stats = analyze_history(messages) if messages is not None else None
@@ -320,6 +322,9 @@ def _result_row(
         "elapsed_s": round(result.elapsed_seconds, 2),
         "error_type": result.error_type,
         "error_message": result.error_message,
+        "budget_tokens": (
+            budget_tokens if budget_tokens is not None else scenario.budget_tokens
+        ),
         "retry_nudges": stats.retry_nudges if stats else None,
         "step_nudges": stats.step_nudges if stats else None,
         "tool_errors": stats.tool_errors if stats else None,
@@ -352,13 +357,22 @@ async def main_async(args: argparse.Namespace) -> None:
         stream=args.stream,
         keep_message_history=not args.no_history,
         verbose=args.verbose,
+        budget_override=args.budget_tokens,
     )
 
     output = Path(args.output) if args.output else None
     for scenario in scenarios:
         for run_idx in range(1, args.runs + 1):
             result = await run_scenario(client, scenario, config, ablation=ablation)
-            row = _result_row(result, scenario, run_idx, args.model, args.stream, args.ablation)
+            row = _result_row(
+                result,
+                scenario,
+                run_idx,
+                args.model,
+                args.stream,
+                args.ablation,
+                args.budget_tokens,
+            )
             line = json.dumps(row, separators=(",", ":"))
             if output:
                 with output.open("a") as handle:
@@ -383,6 +397,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="reforged",
     )
     parser.add_argument("--output")
+    parser.add_argument("--budget-tokens", type=int)
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)
