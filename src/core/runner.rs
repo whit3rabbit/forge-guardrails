@@ -11,9 +11,9 @@ use crate::clients::base::LLMClient;
 use crate::clients::base::{LLMResponse, ToolCall};
 use crate::context::manager::ContextManager;
 use crate::error::{
-    ForgeError, MaxIterationsError, StepEnforcementError, ToolCallError, WorkflowCancelledError,
+    ForgeError, MaxIterationsError, PrerequisiteError, StepEnforcementError, WorkflowCancelledError,
 };
-use crate::guardrails::{GuardAction, Guardrails, RetryNudgeFn, TerminalTool};
+use crate::guardrails::{RetryNudgeFn, StepEnforcer};
 use indexmap::{IndexMap, IndexSet};
 use serde_json::Value;
 use std::sync::Arc;
@@ -117,21 +117,6 @@ impl<C: LLMClient> WorkflowRunner<C> {
         let tool_specs: Vec<ToolSpec> = workflow.tools.values().map(|d| d.spec.clone()).collect();
 
         let terminal_set: IndexSet<String> = workflow.terminal_tools.iter().cloned().collect();
-        let terminal_tool = if terminal_set.len() == 1 {
-            TerminalTool::Single(
-                terminal_set
-                    .first()
-                    .expect("terminal set has one element")
-                    .clone(),
-            )
-        } else {
-            TerminalTool::Multiple(terminal_set)
-        };
-
-        let retry_nudge_for_guardrails: Option<RetryNudgeFn> = self
-            .retry_nudge_fn
-            .clone()
-            .map(|f| Box::new(move |raw: &str| f(raw)) as RetryNudgeFn);
 
         let mut tool_prerequisites = indexmap::IndexMap::new();
         for (name, tool_def) in &workflow.tools {
@@ -155,8 +140,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             }
         }
 
-        // Build guardrails once before the loop — matches Python which constructs
-        // validator, step_enforcer, and error_tracker once outside the while loop.
+        // Match Python: keep validator, step enforcer, and error tracker as
+        // separate stateful components owned by the runner.
         let retry_nudge_for_validator: Option<RetryNudgeFn> = self
             .retry_nudge_fn
             .clone()
@@ -168,16 +153,12 @@ impl<C: LLMClient> WorkflowRunner<C> {
         );
         let mut error_tracker =
             crate::guardrails::ErrorTracker::new(self.max_retries_per_step, self.max_tool_errors);
-        let mut guardrails = Guardrails::new(
-            tool_names.clone(),
-            terminal_tool,
-            Some(workflow.required_steps.clone()),
+        let mut step_enforcer = StepEnforcer::new(
+            workflow.required_steps.clone(),
+            terminal_set,
             Some(tool_prerequisites),
-            self.max_retries_per_step,
-            self.max_tool_errors,
-            self.rescue_enabled,
             3, // max premature attempts
-            retry_nudge_for_guardrails,
+            2, // max prerequisite violations
         );
 
         let mut messages: Vec<Message> = Vec::new();
@@ -214,7 +195,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
             // Check cancellation.
             if let Some(ref rx) = cancel {
                 if *rx.borrow() {
-                    let completed = guardrails.completed_steps();
+                    let completed = step_enforcer.completed_steps();
                     let msgs: Vec<String> = messages.iter().map(|m| m.content.clone()).collect();
                     return Err(ForgeError::WorkflowCancelled(WorkflowCancelledError::new(
                         msgs,
@@ -227,7 +208,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
             // Remaining inference budget: how many LLM calls can still be made.
             // Python: max_attempts = self.max_iterations - iteration
             let remaining = self.max_iterations - iteration;
-            let step_hint = guardrails.step_enforcer.summary_hint();
+            let step_hint = step_enforcer.summary_hint();
 
             let mut ctx = self.context_manager.lock().await;
 
@@ -278,89 +259,137 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 continue;
             }
 
-            // Guardrails check.
-            let check = guardrails.check(&result.response);
-            match check.action {
-                GuardAction::Execute => {
-                    let calls = check.tool_calls.expect("execute requires tool_calls");
-                    let calls = self.emit_assistant_tool_calls(
-                        calls,
-                        &mut messages,
-                        &mut tool_call_counter,
-                        iteration as i64,
-                    );
-                    let result_val = self
-                        .execute_tool_batch(
-                            &calls,
-                            &mut messages,
-                            workflow,
-                            &mut guardrails,
-                            &mut error_tracker,
-                            &mut tool_call_counter,
-                            iteration,
-                        )
-                        .await?;
-                    if let Some(val) = result_val {
-                        return Ok(val);
-                    }
-                    // No terminal result yet; continue loop.
-                }
-                GuardAction::Retry => {
-                    continue;
-                }
-                GuardAction::StepBlocked => {
-                    let nudge = check.nudge.expect("step_blocked requires nudge");
+            let tool_calls = match result.response {
+                LLMResponse::ToolCalls(calls) => calls,
+                LLMResponse::Text(_) => unreachable!("text response handled above"),
+            };
 
-                    if let LLMResponse::ToolCalls(ref calls) = result.response {
-                        let calls = self.emit_assistant_tool_calls(
-                            calls.clone(),
-                            &mut messages,
-                            &mut tool_call_counter,
-                            iteration as i64,
-                        );
-                        for tc in &calls {
-                            let call_id = tc.id.clone().unwrap_or_default();
-                            let prefix = if nudge.kind == "prerequisite" {
-                                "[PrerequisiteError]"
-                            } else {
-                                "[StepEnforcementError]"
-                            };
-                            let msg_type = if nudge.kind == "prerequisite" {
-                                MessageType::PrerequisiteNudge
-                            } else {
-                                MessageType::StepNudge
-                            };
-                            let error_content = format!("{} {}", prefix, nudge.content);
-                            let result_msg = Message::new(
-                                MessageRole::Tool,
-                                &error_content,
-                                MessageMeta::new(MessageType::ToolResult)
-                                    .with_original_type(msg_type)
-                                    .with_step_index(iteration as i64),
-                            )
-                            .with_tool_name(&tc.tool)
-                            .with_tool_call_id(&call_id);
-                            self.fire_message(&result_msg);
-                            messages.push(result_msg);
+            let step_check = step_enforcer.check(&tool_calls);
+            if step_check.needs_nudge {
+                if step_enforcer.premature_exhausted() {
+                    let attempted = tool_calls
+                        .iter()
+                        .find(|tc| workflow.terminal_tools.contains(&tc.tool))
+                        .map(|tc| tc.tool.clone())
+                        .unwrap_or_default();
+                    return Err(ForgeError::StepEnforcement(StepEnforcementError::new(
+                        attempted,
+                        step_enforcer.premature_attempts() as i64,
+                        step_enforcer.pending(),
+                    )));
+                }
+                let nudge = step_check.nudge.expect("step nudge required");
+                let calls = self.emit_assistant_tool_calls(
+                    tool_calls,
+                    &mut messages,
+                    &mut tool_call_counter,
+                    iteration as i64,
+                );
+                for tc in &calls {
+                    let call_id = tc.id.clone().unwrap_or_default();
+                    let error_content = format!("[StepEnforcementError] {}", nudge.content);
+                    let result_msg = Message::new(
+                        MessageRole::Tool,
+                        &error_content,
+                        MessageMeta::new(MessageType::StepNudge).with_step_index(iteration as i64),
+                    )
+                    .with_tool_name(&tc.tool)
+                    .with_tool_call_id(&call_id);
+                    self.fire_message(&result_msg);
+                    messages.push(result_msg);
+                }
+                continue;
+            }
+
+            let prereq_check = step_enforcer.check_prerequisites(&tool_calls);
+            if prereq_check.needs_nudge {
+                if step_enforcer.prereq_exhausted() {
+                    for tc in &tool_calls {
+                        if let Some(prereqs) = step_enforcer.tool_prerequisites.get(&tc.tool) {
+                            let rust_prereqs: Vec<super::steps::Prerequisite> = prereqs
+                                .iter()
+                                .map(|p| match p {
+                                    crate::guardrails::StepPrerequisite::NameOnly(n) => {
+                                        super::steps::Prerequisite::NameOnly(n.clone())
+                                    }
+                                    crate::guardrails::StepPrerequisite::ArgMatched {
+                                        tool,
+                                        match_arg,
+                                    } => super::steps::Prerequisite::ArgMatched {
+                                        tool: tool.clone(),
+                                        match_arg: match_arg.clone(),
+                                    },
+                                })
+                                .collect();
+                            let check_res = step_enforcer.tracker.check_prerequisites(
+                                &tc.tool,
+                                &tc.args,
+                                &rust_prereqs,
+                            );
+                            if !check_res.satisfied {
+                                return Err(ForgeError::Prerequisite(PrerequisiteError::new(
+                                    tc.tool.clone(),
+                                    step_enforcer.prereq_violations() as i64,
+                                    check_res.missing,
+                                )));
+                            }
                         }
                     }
+                    return Err(ForgeError::Prerequisite(PrerequisiteError::new(
+                        "",
+                        step_enforcer.prereq_violations() as i64,
+                        Vec::new(),
+                    )));
+                }
+                let nudge = prereq_check.nudge.expect("prerequisite nudge required");
+                let calls = self.emit_assistant_tool_calls(
+                    tool_calls,
+                    &mut messages,
+                    &mut tool_call_counter,
+                    iteration as i64,
+                );
+                for tc in &calls {
+                    let call_id = tc.id.clone().unwrap_or_default();
+                    let error_content = format!("[PrerequisiteError] {}", nudge.content);
+                    let result_msg = Message::new(
+                        MessageRole::Tool,
+                        &error_content,
+                        MessageMeta::new(MessageType::PrerequisiteNudge)
+                            .with_step_index(iteration as i64),
+                    )
+                    .with_tool_name(&tc.tool)
+                    .with_tool_call_id(&call_id);
+                    self.fire_message(&result_msg);
+                    messages.push(result_msg);
+                }
+                continue;
+            }
 
-                    continue;
-                }
-                GuardAction::Fatal => {
-                    let reason = check.reason.unwrap_or_default();
-                    return Err(self.fatal_to_error_with_guardrails(
-                        &reason,
-                        workflow,
-                        &guardrails,
-                    ));
-                }
+            let calls = self.emit_assistant_tool_calls(
+                tool_calls,
+                &mut messages,
+                &mut tool_call_counter,
+                iteration as i64,
+            );
+            let result_val = self
+                .execute_tool_batch(
+                    &calls,
+                    &mut messages,
+                    workflow,
+                    &mut step_enforcer,
+                    &mut error_tracker,
+                    &mut tool_call_counter,
+                    iteration,
+                )
+                .await?;
+            if let Some(val) = result_val {
+                return Ok(val);
             }
         }
 
         // Step 4 — Max iterations exceeded (loop exited)
-        let completed = guardrails.completed_steps();
-        let pending = workflow.required_steps.clone();
+        let completed = step_enforcer.completed_steps();
+        let pending = step_enforcer.pending();
         Err(ForgeError::MaxIterations(MaxIterationsError::new(
             self.max_iterations as i64,
             completed,
@@ -375,7 +404,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
         calls: &[crate::clients::base::ToolCall],
         messages: &mut Vec<Message>,
         workflow: &Workflow,
-        guardrails: &mut Guardrails,
+        step_enforcer: &mut StepEnforcer,
         error_tracker: &mut crate::guardrails::ErrorTracker,
         tool_call_counter: &mut i64,
         iteration: i32,
@@ -406,7 +435,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
 
             match callable(tc.args.clone()).await {
                 Ok(output) => {
-                    guardrails.step_enforcer.record(&tc.tool, Some(&tc.args));
+                    step_enforcer.record(&tc.tool, Some(&tc.args));
 
                     let is_terminal = workflow.terminal_tools.contains(&tc.tool);
                     if is_terminal {
@@ -474,8 +503,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             }
         } else {
             error_tracker.reset_errors();
-            guardrails.step_enforcer.reset_premature();
-            guardrails.step_enforcer.reset_prereq_violations();
+            step_enforcer.reset_premature();
+            step_enforcer.reset_prereq_violations();
         }
 
         // Check for terminal result.
@@ -506,11 +535,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
 
         let mut infos = Vec::new();
         for tc in &mut calls {
-            let call_id = tc.id.clone().unwrap_or_else(|| {
-                let id = inference::format_tool_call_id(*tool_call_counter);
-                *tool_call_counter += 1;
-                id
-            });
+            let call_id = inference::format_tool_call_id(*tool_call_counter);
+            *tool_call_counter += 1;
             tc.id = Some(call_id.clone());
             infos.push(crate::core::message::ToolCallInfo::new(
                 &tc.tool,
@@ -534,65 +560,6 @@ impl<C: LLMClient> WorkflowRunner<C> {
     fn fire_message(&self, msg: &Message) {
         if let Some(ref cb) = self.on_message {
             cb(msg);
-        }
-    }
-
-    fn fatal_to_error_with_guardrails(
-        &self,
-        reason: &str,
-        workflow: &Workflow,
-        guardrails: &Guardrails,
-    ) -> ForgeError {
-        if reason.contains("Too many bad responses") {
-            ForgeError::ToolCall(ToolCallError::new(reason))
-        } else if reason.contains("Too many skipped required steps") {
-            let pending = workflow.required_steps.clone();
-            let terminal_name = workflow
-                .terminal_tools
-                .iter()
-                .next()
-                .cloned()
-                .unwrap_or_default();
-            ForgeError::StepEnforcement(StepEnforcementError::new(terminal_name, 4, pending))
-        } else if reason.contains("Too many prerequisite violations") {
-            let mut tool_name = String::new();
-            let mut missing = Vec::new();
-            for (tname, def) in &workflow.tools {
-                if !def.prerequisites.is_empty() {
-                    let sps: Vec<super::steps::Prerequisite> = def
-                        .prerequisites
-                        .iter()
-                        .map(|p| match p {
-                            super::workflow::PrerequisiteSpec::NameOnly(n) => {
-                                super::steps::Prerequisite::NameOnly(n.clone())
-                            }
-                            super::workflow::PrerequisiteSpec::ArgMatched { tool, match_arg } => {
-                                super::steps::Prerequisite::ArgMatched {
-                                    tool: tool.clone(),
-                                    match_arg: match_arg.clone(),
-                                }
-                            }
-                        })
-                        .collect();
-                    let check_res = guardrails.step_enforcer.tracker.check_prerequisites(
-                        tname,
-                        &IndexMap::new(),
-                        &sps,
-                    );
-                    if !check_res.satisfied {
-                        tool_name = tname.clone();
-                        missing = check_res.missing;
-                        break;
-                    }
-                }
-            }
-            ForgeError::Prerequisite(crate::error::PrerequisiteError::new(
-                tool_name,
-                guardrails.step_enforcer.prereq_violations() as i64,
-                missing,
-            ))
-        } else {
-            ForgeError::ToolCall(ToolCallError::new(reason))
         }
     }
 }

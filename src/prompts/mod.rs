@@ -9,7 +9,7 @@ pub mod nudges;
 mod parse_strategies;
 
 use crate::clients::base::ToolCall;
-use crate::core::tool_spec::{ParamModel, ToolSpec};
+use crate::core::tool_spec::ToolSpec;
 use indexmap::IndexMap;
 pub use nudges::{prerequisite_nudge, retry_nudge, step_nudge, unknown_tool_nudge};
 use serde_json::Value;
@@ -17,134 +17,95 @@ use serde_json::Value;
 /// Build a structured prompt describing available tools and the expected
 /// JSON call format.
 pub fn build_tool_prompt(tools: &[ToolSpec]) -> String {
-    let mut parts = Vec::new();
-    parts.push("# Available Tools\n".to_string());
+    let mut lines = vec![
+        "You have access to the following tools:".to_string(),
+        String::new(),
+    ];
     for tool in tools {
-        parts.push(format!("## {}\n", tool.name));
-        parts.push(format!("{}\n", tool.description));
-        parts.push("Parameters:\n".to_string());
-        render_parameters(&tool.parameters, &mut parts);
-        parts.push(String::new());
+        let schema = tool.get_json_schema();
+        let properties = schema.get("properties").and_then(Value::as_object);
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        lines.push(format!("## {}", tool.name));
+        lines.push(format!("Description: {}", tool.description));
+        if let Some(properties) = properties.filter(|props| !props.is_empty()) {
+            lines.push("Parameters:".to_string());
+            for (name, prop) in properties {
+                let req = if required.contains(name.as_str()) {
+                    " (required)"
+                } else {
+                    " (optional)"
+                };
+                let ptype = prop.get("type").and_then(Value::as_str).unwrap_or("any");
+                let desc = prop
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                lines.push(format!("  - {} ({}{}): {}", name, ptype, req, desc));
+                if let Some(enum_values) = prop.get("enum").and_then(Value::as_array) {
+                    let allowed = enum_values
+                        .iter()
+                        .map(|v| match v.as_str() {
+                            Some(s) => s.to_string(),
+                            None => v.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    lines.push(format!("    Allowed values: {}", allowed));
+                }
+            }
+        }
+        lines.push(String::new());
     }
-    let example_args = build_example_args(tools);
-    parts.push(format!(
-        "Respond with a JSON tool call in this format:\n\
-         {{\"tool\": \"<tool_name>\", \"args\": {{<arguments>}}}}\n\
-         Example: {{\"tool\": \"<tool_name>\", \"args\": {{{}}}}}\n\
-         Respond with only the JSON tool call.",
-        example_args
-    ));
-    parts.join("\n")
+    lines.push("To call a tool, respond with ONLY a JSON object in this exact format:".to_string());
+    lines.push("{\"tool\": \"<tool_name>\", \"args\": {<arguments>}}".to_string());
+    lines.push(String::new());
+    lines.push("Example:".to_string());
+    if let Some(example_tool) = tools.first() {
+        lines.push(example_tool_call(example_tool));
+    }
+    lines.push(String::new());
+    lines.push("Respond with ONLY the JSON tool call. Do not include any other text.".to_string());
+
+    lines.join("\n")
 }
 
-fn render_parameters(param: &ParamModel, parts: &mut Vec<String>) {
-    let properties = match param {
-        ParamModel::Object { properties, .. } => properties,
-        _ => return,
-    };
-    for (name, model) in properties {
-        let (type_str, required_str, desc, enum_vals) = model_info(model);
-        let mut line = format!("- {} ({}): {}", name, type_str, required_str);
-        if let Some(d) = desc {
-            line.push_str(&format!(". {}", d));
-        }
-        parts.push(line);
-        if let Some(evs) = enum_vals {
-            parts.push(format!("  Allowed values: {}", evs.join(", ")));
-        }
-    }
+fn example_tool_call(tool: &ToolSpec) -> String {
+    let schema = tool.get_json_schema();
+    let args = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| {
+            properties
+                .keys()
+                .map(|name| {
+                    format!(
+                        "{}: {}",
+                        json_string(name),
+                        json_string(&format!("<{}>", name))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    format!(
+        "{{\"tool\": {}, \"args\": {{{}}}}}",
+        json_string(&tool.name),
+        args
+    )
 }
 
-fn model_info(
-    model: &ParamModel,
-) -> (
-    &'static str,
-    &'static str,
-    Option<&str>,
-    Option<Vec<String>>,
-) {
-    match model {
-        ParamModel::String {
-            description,
-            required,
-            enum_values,
-            ..
-        } => (
-            "string",
-            if *required { "required" } else { "optional" },
-            description.as_deref(),
-            enum_values.clone(),
-        ),
-        ParamModel::Number {
-            description,
-            required,
-            ..
-        } => (
-            "number",
-            if *required { "required" } else { "optional" },
-            description.as_deref(),
-            None,
-        ),
-        ParamModel::Boolean {
-            description,
-            required,
-            ..
-        } => (
-            "boolean",
-            if *required { "required" } else { "optional" },
-            description.as_deref(),
-            None,
-        ),
-        ParamModel::Integer {
-            description,
-            required,
-            ..
-        } => (
-            "integer",
-            if *required { "required" } else { "optional" },
-            description.as_deref(),
-            None,
-        ),
-        ParamModel::Object {
-            description,
-            required,
-            ..
-        } => (
-            "object",
-            if *required { "required" } else { "optional" },
-            description.as_deref(),
-            None,
-        ),
-        ParamModel::Array {
-            description,
-            required,
-            ..
-        } => (
-            "array",
-            if *required { "required" } else { "optional" },
-            description.as_deref(),
-            None,
-        ),
-        ParamModel::Unsupported { type_name } => {
-            let leaked: &'static str = Box::leak(type_name.clone().into_boxed_str());
-            (leaked, "optional", None, None)
-        }
-    }
-}
-
-fn build_example_args(tools: &[ToolSpec]) -> String {
-    let first = match tools.first() {
-        Some(t) => t,
-        None => return String::new(),
-    };
-    match &first.parameters {
-        ParamModel::Object { properties, .. } => properties
-            .keys()
-            .map(|k| format!("\"{}\": ...", k))
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => String::new(),
-    }
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("string serialization cannot fail")
 }
 
 /// Extract tool calls from model output text.

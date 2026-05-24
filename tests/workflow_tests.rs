@@ -271,8 +271,41 @@ fn toolspec_from_json_schema_array() {
 #[test]
 fn toolspec_from_json_schema_missing_properties() {
     let schema = serde_json::json!({});
-    let result = ToolSpec::from_json_schema("tool", "test", &schema);
-    assert!(result.is_err());
+    let spec = ToolSpec::from_json_schema("tool", "test", &schema).expect("ok");
+    assert_eq!(spec.get_json_schema()["properties"], serde_json::json!({}));
+}
+
+#[test]
+fn toolspec_get_json_schema_matches_pydantic_optional_shape() {
+    let schema = serde_json::json!({
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "count": {"type": "integer", "description": "Count", "default": 3}
+        },
+        "required": ["query"]
+    });
+    let spec = ToolSpec::from_json_schema("search_tool", "search tool", &schema).expect("ok");
+    assert_eq!(
+        spec.get_json_schema(),
+        serde_json::json!({
+            "properties": {
+                "query": {
+                    "description": "Search query",
+                    "title": "Query",
+                    "type": "string"
+                },
+                "count": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "default": 3,
+                    "description": "Count",
+                    "title": "Count"
+                }
+            },
+            "required": ["query"],
+            "title": "SearchToolParams",
+            "type": "object"
+        })
+    );
 }
 
 #[test]

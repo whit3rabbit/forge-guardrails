@@ -8,8 +8,8 @@ pub mod sampling;
 pub use anthropic::AnthropicClient;
 pub use anyllm_proxy::{AnyLlmProxyClient, AnyLlmRuntimeClient};
 pub use base::{
-    format_tool, ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams,
-    StreamChunk, TextResponse, TokenUsage, ToolCall,
+    format_tool, ApiFormat, ChunkStream, ChunkType, LLMCallInfo, LLMClient, LLMRateLimitInfo,
+    LLMResponse, SamplingParams, StreamChunk, TextResponse, TokenUsage, ToolCall,
 };
 pub use llamafile::LlamafileClient;
 pub use ollama::OllamaClient;

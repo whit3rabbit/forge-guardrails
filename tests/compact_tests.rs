@@ -196,7 +196,7 @@ fn tiered_phase1_truncates_long_tool_results() {
                 assert_eq!(msg.content.len(), long_content.len());
             } else {
                 // Eligible zone: should have truncation marker.
-                assert!(msg.content.contains("characters removed"));
+                assert!(msg.content.contains("chars removed"));
                 assert!(msg.content.len() < long_content.len());
                 assert!(msg.content.starts_with(&"x".repeat(200)));
             }
@@ -251,7 +251,7 @@ fn tiered_phase1_no_truncation_short_results() {
         if msg.metadata.msg_type == MessageType::ToolResult
             && msg.metadata.step_index.unwrap_or(-1) < 2
         {
-            assert!(!msg.content.contains("characters removed"));
+            assert!(!msg.content.contains("chars removed"));
         }
     }
 }
@@ -316,9 +316,9 @@ fn tiered_phase2_preserves_text_response() {
     assert_eq!(text_count, 4);
 }
 
-// ts-027: Tiered Phase 2 drops eligible tool_call messages.
+// ts-027: Tiered Phase 2 preserves eligible tool_call skeletons.
 #[test]
-fn tiered_phase2_drops_eligible_tool_calls() {
+fn tiered_phase2_preserves_eligible_tool_calls() {
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
     for step in 0..4 {
         msgs.push(tool_call_msg(step, "call"));
@@ -330,7 +330,7 @@ fn tiered_phase2_drops_eligible_tool_calls() {
         .iter()
         .filter(|m| m.metadata.msg_type == MessageType::ToolCall)
         .count();
-    assert_eq!(call_count, 2);
+    assert_eq!(call_count, 4);
 }
 
 // ts-028: Tiered Phase 2 preserves recent window.
@@ -389,9 +389,9 @@ fn tiered_phase3_drops_text_response() {
     assert_eq!(eligible_text.len(), 0);
 }
 
-// ts-031: Tiered Phase 3 keeps protected tool_call skeleton.
+// ts-031: Tiered Phase 3 keeps tool_call skeletons.
 #[test]
-fn tiered_phase3_keeps_protected_tool_calls() {
+fn tiered_phase3_keeps_tool_calls() {
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
     for step in 0..4 {
         msgs.push(tool_call_msg(step, "call"));
@@ -403,7 +403,7 @@ fn tiered_phase3_keeps_protected_tool_calls() {
         .iter()
         .filter(|m| m.metadata.msg_type == MessageType::ToolCall)
         .count();
-    assert_eq!(call_count, 2);
+    assert_eq!(call_count, 4);
 }
 
 // ts-032: Tiered Phase 3 preserves system and user as identical.
@@ -595,8 +595,8 @@ fn per_phase_thresholds_phase3() {
 }
 
 #[test]
-fn test_compaction_openai_pairing_invariant() {
-    use forge_guardrails::{fold_and_serialize, ToolCallInfo};
+fn test_compaction_preserves_tool_call_skeletons_after_dropping_results() {
+    use forge_guardrails::ToolCallInfo;
     use indexmap::IndexMap;
 
     let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
@@ -624,25 +624,27 @@ fn test_compaction_openai_pairing_invariant() {
     let (compacted_msgs, phase) = strategy.compact(&msgs, 100, None);
     assert!(phase >= 2);
 
-    let wire_msgs = fold_and_serialize(&compacted_msgs, "openai");
-
     let mut call_ids = std::collections::HashSet::new();
     let mut result_ids = std::collections::HashSet::new();
 
-    for m in &wire_msgs {
-        if let Some(tcs) = m.get("tool_calls").and_then(|t| t.as_array()) {
+    for m in &compacted_msgs {
+        if let Some(tcs) = &m.tool_calls {
             for tc in tcs {
-                if let Some(id) = tc.get("id").and_then(|id| id.as_str()) {
-                    call_ids.insert(id.to_string());
-                }
+                call_ids.insert(tc.call_id.clone());
             }
         }
-        if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
-            if let Some(id) = m.get("tool_call_id").and_then(|id| id.as_str()) {
+        if m.metadata.msg_type == MessageType::ToolResult {
+            if let Some(id) = &m.tool_call_id {
                 result_ids.insert(id.to_string());
             }
         }
     }
 
-    assert_eq!(call_ids, result_ids);
+    assert_eq!(call_ids.len(), 4);
+    assert_eq!(
+        result_ids,
+        ["tc_0002".to_string(), "tc_0003".to_string()]
+            .into_iter()
+            .collect()
+    );
 }

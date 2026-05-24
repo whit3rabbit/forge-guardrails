@@ -42,42 +42,41 @@ pub fn format_tool_call_id(counter: i64) -> String {
 /// tool-call) is emitted as a standalone assistant message.
 pub fn fold_and_serialize(messages: &[Message], api_format: &str) -> Vec<Value> {
     let mut result = Vec::new();
-    let mut i = 0;
-    while i < messages.len() {
-        let msg = &messages[i];
+    let mut pending_reasoning: Option<String> = None;
+
+    for msg in messages {
         if msg.metadata.msg_type == MessageType::Reasoning {
-            // Check if next message is a tool call.
-            let next_is_tool_call = messages
-                .get(i + 1)
-                .map(|m| m.metadata.msg_type == MessageType::ToolCall)
-                .unwrap_or(false);
-            if next_is_tool_call {
-                // Fold: merge reasoning content into the next message.
-                let reasoning_content = msg.content.clone();
-                let tool_msg = &messages[i + 1];
-                let mut merged = tool_msg.clone();
-                merged.content = if tool_msg.content.is_empty() {
-                    reasoning_content
-                } else {
-                    format!("{}\n{}", reasoning_content, tool_msg.content)
-                };
+            pending_reasoning = Some(msg.content.clone());
+            continue;
+        }
+
+        if let Some(reasoning_content) = pending_reasoning.take() {
+            if msg.metadata.msg_type == MessageType::ToolCall {
+                let mut merged = msg.clone();
+                merged.content = reasoning_content;
                 result.push(merged.serialize(api_format));
-                i += 2;
-                continue;
             } else {
-                // Orphaned reasoning: emit as standalone assistant message.
                 let orphan = Message::new(
                     MessageRole::Assistant,
-                    &msg.content,
+                    &reasoning_content,
                     MessageMeta::new(MessageType::Reasoning),
                 );
                 result.push(orphan.serialize(api_format));
-                i += 1;
-                continue;
+                result.push(msg.serialize(api_format));
             }
+            continue;
         }
+
         result.push(msg.serialize(api_format));
-        i += 1;
+    }
+
+    if let Some(reasoning_content) = pending_reasoning {
+        let orphan = Message::new(
+            MessageRole::Assistant,
+            &reasoning_content,
+            MessageMeta::new(MessageType::Reasoning),
+        );
+        result.push(orphan.serialize(api_format));
     }
     result
 }
@@ -212,7 +211,7 @@ pub async fn run_inference<C: LLMClient>(
                     let assistant_msg = Message::new(
                         MessageRole::Assistant,
                         &text.content,
-                        MessageMeta::new(MessageType::TextResponse),
+                        MessageMeta::new(MessageType::TextResponse).with_step_index(step_index),
                     );
                     messages.push(assistant_msg.clone());
                     new_messages.push(assistant_msg);
@@ -220,7 +219,7 @@ pub async fn run_inference<C: LLMClient>(
                     let nudge_msg = Message::new(
                         MessageRole::User,
                         &nudge_content,
-                        MessageMeta::new(MessageType::RetryNudge),
+                        MessageMeta::new(MessageType::RetryNudge).with_step_index(step_index),
                     );
                     messages.push(nudge_msg.clone());
                     new_messages.push(nudge_msg);
@@ -233,23 +232,21 @@ pub async fn run_inference<C: LLMClient>(
                             let reasoning_msg = Message::new(
                                 MessageRole::Assistant,
                                 reasoning.as_str(),
-                                MessageMeta::new(MessageType::Reasoning),
+                                MessageMeta::new(MessageType::Reasoning)
+                                    .with_step_index(step_index),
                             );
                             messages.push(reasoning_msg.clone());
                             new_messages.push(reasoning_msg);
                         }
-                        let call_id = tc.id.clone().unwrap_or_else(|| {
-                            let id = format_tool_call_id(*tool_call_counter);
-                            *tool_call_counter += 1;
-                            id
-                        });
+                        let call_id = format_tool_call_id(*tool_call_counter);
+                        *tool_call_counter += 1;
                         let info = ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), &call_id);
                         tool_call_infos.push(info);
                     }
                     let tool_call_msg = Message::new(
                         MessageRole::Assistant,
                         "",
-                        MessageMeta::new(MessageType::ToolCall),
+                        MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
                     )
                     .with_tool_calls(tool_call_infos.clone());
                     messages.push(tool_call_msg.clone());
@@ -261,7 +258,7 @@ pub async fn run_inference<C: LLMClient>(
                         let result_msg = Message::new(
                             MessageRole::Tool,
                             &error_content,
-                            MessageMeta::new(MessageType::ToolResult),
+                            MessageMeta::new(MessageType::RetryNudge).with_step_index(step_index),
                         )
                         .with_tool_name(&info.name)
                         .with_tool_call_id(&info.call_id);
@@ -275,7 +272,10 @@ pub async fn run_inference<C: LLMClient>(
 
         // Valid response — reset retry budget (Python parity: error_tracker.reset_retries()).
         error_tracker.reset_retries();
-        let tool_calls = validation.tool_calls.unwrap_or_default();
+        let mut tool_calls = validation.tool_calls.unwrap_or_default();
+        for call in &mut tool_calls {
+            call.id = None;
+        }
 
         return Ok(Some(InferenceResult {
             response: LLMResponse::ToolCalls(tool_calls),
@@ -434,7 +434,7 @@ mod tests {
         )]);
         let result = fold_and_serialize(&[reasoning, tool_call], "openai");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0]["content"], "let me think\nexisting content");
+        assert_eq!(result[0]["content"], "let me think");
     }
 
     #[test]

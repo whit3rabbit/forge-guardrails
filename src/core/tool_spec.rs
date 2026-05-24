@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 /// Describes the schema for a single tool parameter field.
@@ -61,6 +61,7 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub parameters: ParamModel,
+    pub json_schema: Option<Value>,
 }
 
 impl ToolSpec {
@@ -76,10 +77,9 @@ impl ToolSpec {
     ) -> Result<Self, String> {
         let name = name.into();
         let description = description.into();
-        let properties = schema
-            .get("properties")
-            .ok_or_else(|| "schema must contain 'properties'".to_string())?;
-        let required_fields: HashSet<String> = schema
+        let empty_properties = Value::Object(Map::new());
+        let properties = schema.get("properties").unwrap_or(&empty_properties);
+        let required_order: Vec<String> = schema
             .get("required")
             .and_then(|r| r.as_array())
             .map(|arr| {
@@ -88,12 +88,15 @@ impl ToolSpec {
                     .collect()
             })
             .unwrap_or_default();
+        let required_fields: HashSet<String> = required_order.iter().cloned().collect();
 
         let param = Self::parse_object_param(properties, &required_fields)?;
+        let json_schema = Self::build_pydantic_json_schema(&name, schema)?;
         Ok(Self {
             name,
             description,
             parameters: param,
+            json_schema: Some(json_schema),
         })
     }
 
@@ -189,10 +192,12 @@ impl ToolSpec {
                 })
             }
             "array" => {
-                let items_schema = schema
-                    .get("items")
-                    .ok_or_else(|| "array type must have 'items'".to_string())?;
-                let items = Self::parse_single_param(items_schema, true)?;
+                let items = match schema.get("items") {
+                    Some(items_schema) => Self::parse_single_param(items_schema, true)?,
+                    None => ParamModel::Unsupported {
+                        type_name: "any".to_string(),
+                    },
+                };
                 Ok(ParamModel::Array {
                     description,
                     required,
@@ -207,6 +212,13 @@ impl ToolSpec {
 
     /// Emit the JSON Schema for this tool spec's parameters.
     pub fn get_json_schema(&self) -> Value {
+        if let Some(schema) = &self.json_schema {
+            return schema.clone();
+        }
+        self.reconstruct_json_schema()
+    }
+
+    fn reconstruct_json_schema(&self) -> Value {
         let mut schema = Map::new();
         schema.insert("type".into(), Value::String("object".into()));
         let (properties, required) = self.param_to_schema(&self.parameters);
@@ -218,6 +230,270 @@ impl ToolSpec {
             );
         }
         Value::Object(schema)
+    }
+
+    fn build_pydantic_json_schema(name: &str, schema: &Value) -> Result<Value, String> {
+        let empty_properties = Map::new();
+        let properties = match schema.get("properties") {
+            Some(Value::Object(obj)) => obj,
+            Some(_) => return Err("properties must be an object".to_string()),
+            None => &empty_properties,
+        };
+        let required_order: Vec<String> = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let model_name = Self::to_pascal_params(name);
+        let mut defs = Map::new();
+        let mut root =
+            Self::build_pydantic_model_schema(&model_name, properties, &required_order, &mut defs)?;
+        if !defs.is_empty() {
+            if let Value::Object(root_obj) = root {
+                let mut ordered_root = Map::new();
+                ordered_root.insert("$defs".to_string(), Value::Object(defs));
+                for (key, value) in root_obj {
+                    ordered_root.insert(key, value);
+                }
+                root = Value::Object(ordered_root);
+            }
+        }
+        Ok(root)
+    }
+
+    fn build_pydantic_model_schema(
+        model_name: &str,
+        properties: &Map<String, Value>,
+        required_order: &[String],
+        defs: &mut Map<String, Value>,
+    ) -> Result<Value, String> {
+        let mut prop_schemas = Map::new();
+        let required_fields: HashSet<&str> = required_order.iter().map(String::as_str).collect();
+
+        for (field_name, prop) in properties {
+            let is_required = required_fields.contains(field_name.as_str());
+            let schema =
+                Self::pydantic_property_schema(prop, field_name, model_name, is_required, defs)?;
+            prop_schemas.insert(field_name.clone(), schema);
+        }
+
+        let mut model = Map::new();
+        model.insert("properties".to_string(), Value::Object(prop_schemas));
+        let required = required_order
+            .iter()
+            .filter(|name| properties.contains_key(*name))
+            .cloned()
+            .map(Value::String)
+            .collect::<Vec<_>>();
+        if !required.is_empty() {
+            model.insert("required".to_string(), Value::Array(required));
+        }
+        model.insert("title".to_string(), Value::String(model_name.to_string()));
+        model.insert("type".to_string(), Value::String("object".to_string()));
+        Ok(Value::Object(model))
+    }
+
+    fn pydantic_property_schema(
+        prop: &Value,
+        field_name: &str,
+        model_name_prefix: &str,
+        required: bool,
+        defs: &mut Map<String, Value>,
+    ) -> Result<Value, String> {
+        let base = Self::pydantic_type_schema(prop, field_name, model_name_prefix, defs)?;
+        let description = prop
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let title = Self::field_title(field_name);
+
+        if required {
+            if let Value::Object(base_obj) = base {
+                if base_obj.contains_key("$ref") {
+                    let mut result = base_obj;
+                    if let Some(desc) = description {
+                        result.insert("description".to_string(), Value::String(desc));
+                    }
+                    return Ok(Value::Object(result));
+                }
+
+                let mut result = Map::new();
+                let prop_type = prop.get("type").and_then(Value::as_str).unwrap_or("string");
+                if prop.get("enum").is_some() {
+                    if let Some(desc) = description {
+                        result.insert("description".to_string(), Value::String(desc));
+                    }
+                    Self::insert_schema_key(&mut result, &base_obj, "const");
+                    Self::insert_schema_key(&mut result, &base_obj, "enum");
+                    result.insert("title".to_string(), Value::String(title));
+                    Self::insert_schema_key(&mut result, &base_obj, "type");
+                } else if prop_type == "array" {
+                    if let Some(desc) = description {
+                        result.insert("description".to_string(), Value::String(desc));
+                    }
+                    Self::insert_schema_key(&mut result, &base_obj, "items");
+                    result.insert("title".to_string(), Value::String(title));
+                    Self::insert_schema_key(&mut result, &base_obj, "type");
+                } else if prop_type == "object" {
+                    Self::insert_schema_key(&mut result, &base_obj, "additionalProperties");
+                    if let Some(desc) = description {
+                        result.insert("description".to_string(), Value::String(desc));
+                    }
+                    result.insert("title".to_string(), Value::String(title));
+                    Self::insert_schema_key(&mut result, &base_obj, "type");
+                } else {
+                    if let Some(desc) = description {
+                        result.insert("description".to_string(), Value::String(desc));
+                    }
+                    result.insert("title".to_string(), Value::String(title));
+                    for (key, value) in &base_obj {
+                        result.insert(key.clone(), value.clone());
+                    }
+                }
+                Self::append_remaining_schema_keys(&mut result, &base_obj);
+                return Ok(Value::Object(result));
+            }
+            return Ok(base);
+        }
+
+        let is_ref = matches!(&base, Value::Object(obj) if obj.contains_key("$ref"));
+        let mut result = Map::new();
+        result.insert(
+            "anyOf".to_string(),
+            Value::Array(vec![base, json!({"type": "null"})]),
+        );
+        result.insert(
+            "default".to_string(),
+            prop.get("default").cloned().unwrap_or(Value::Null),
+        );
+        if let Some(desc) = description {
+            result.insert("description".to_string(), Value::String(desc));
+        }
+        if !is_ref {
+            result.insert("title".to_string(), Value::String(title));
+        }
+        Ok(Value::Object(result))
+    }
+
+    fn pydantic_type_schema(
+        prop: &Value,
+        field_name: &str,
+        model_name_prefix: &str,
+        defs: &mut Map<String, Value>,
+    ) -> Result<Value, String> {
+        if let Some(enum_values) = prop.get("enum").and_then(Value::as_array) {
+            let mut obj = Map::new();
+            if enum_values.len() == 1 {
+                obj.insert("const".to_string(), enum_values[0].clone());
+            } else {
+                obj.insert("enum".to_string(), Value::Array(enum_values.clone()));
+            }
+            obj.insert(
+                "type".to_string(),
+                Value::String(
+                    prop.get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("string")
+                        .to_string(),
+                ),
+            );
+            return Ok(Value::Object(obj));
+        }
+
+        match prop.get("type").and_then(Value::as_str).unwrap_or("string") {
+            "string" | "integer" | "number" | "boolean" => Ok(json!({
+                "type": prop.get("type").and_then(Value::as_str).unwrap_or("string")
+            })),
+            "object" => {
+                let sub_props = prop.get("properties").and_then(Value::as_object);
+                if let Some(sub_props) = sub_props.filter(|props| !props.is_empty()) {
+                    let sub_required: Vec<String> = prop
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let model_name = format!(
+                        "{}_{}",
+                        model_name_prefix,
+                        Self::capitalize_for_model(field_name)
+                    );
+                    let model = Self::build_pydantic_model_schema(
+                        &model_name,
+                        sub_props,
+                        &sub_required,
+                        defs,
+                    )?;
+                    defs.insert(model_name.clone(), model);
+                    Ok(json!({"$ref": format!("#/$defs/{}", model_name)}))
+                } else {
+                    Ok(json!({"additionalProperties": true, "type": "object"}))
+                }
+            }
+            "array" => {
+                let item_schema = match prop.get("items") {
+                    Some(items) => Self::pydantic_type_schema(
+                        items,
+                        &format!("{}Item", field_name),
+                        model_name_prefix,
+                        defs,
+                    )?,
+                    None => Value::Object(Map::new()),
+                };
+                Ok(json!({"items": item_schema, "type": "array"}))
+            }
+            _ => Ok(Value::Object(Map::new())),
+        }
+    }
+
+    fn insert_schema_key(target: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
+        if let Some(value) = source.get(key) {
+            target.insert(key.to_string(), value.clone());
+        }
+    }
+
+    fn append_remaining_schema_keys(target: &mut Map<String, Value>, source: &Map<String, Value>) {
+        for (key, value) in source {
+            if !target.contains_key(key) {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    fn to_pascal_params(name: &str) -> String {
+        format!(
+            "{}Params",
+            name.split('_')
+                .map(Self::capitalize_for_model)
+                .collect::<String>()
+        )
+    }
+
+    fn capitalize_for_model(s: &str) -> String {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(first) => {
+                let head = first.to_uppercase().collect::<String>();
+                let tail = chars.as_str().to_lowercase();
+                format!("{}{}", head, tail)
+            }
+            None => String::new(),
+        }
+    }
+
+    fn field_title(name: &str) -> String {
+        name.split('_')
+            .map(Self::capitalize_for_model)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn param_to_schema(&self, param: &ParamModel) -> (Map<String, Value>, Vec<String>) {
@@ -246,11 +522,15 @@ impl ToolSpec {
         let mut map = Map::new();
         match param {
             ParamModel::String {
+                description,
                 enum_values,
                 default,
                 ..
             } => {
                 map.insert("type".into(), Value::String("string".into()));
+                if let Some(desc) = description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
                 if let Some(enums) = enum_values {
                     map.insert(
                         "enum".into(),
@@ -261,26 +541,54 @@ impl ToolSpec {
                     map.insert("default".into(), d.clone());
                 }
             }
-            ParamModel::Number { default, .. } => {
+            ParamModel::Number {
+                description,
+                default,
+                ..
+            } => {
                 map.insert("type".into(), Value::String("number".into()));
+                if let Some(desc) = description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
                 if let Some(d) = default {
                     map.insert("default".into(), d.clone());
                 }
             }
-            ParamModel::Boolean { default, .. } => {
+            ParamModel::Boolean {
+                description,
+                default,
+                ..
+            } => {
                 map.insert("type".into(), Value::String("boolean".into()));
+                if let Some(desc) = description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
                 if let Some(d) = default {
                     map.insert("default".into(), d.clone());
                 }
             }
-            ParamModel::Integer { default, .. } => {
+            ParamModel::Integer {
+                description,
+                default,
+                ..
+            } => {
                 map.insert("type".into(), Value::String("integer".into()));
+                if let Some(desc) = description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
                 if let Some(d) = default {
                     map.insert("default".into(), d.clone());
                 }
             }
-            ParamModel::Object { properties, .. } => {
+            ParamModel::Object {
+                description,
+                properties,
+                ..
+            } => {
                 map.insert("type".into(), Value::String("object".into()));
+                if let Some(desc) = description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
                 let (nested_props, nested_req) = self.collect_object_schema(properties);
                 map.insert("properties".into(), Value::Object(nested_props));
                 if !nested_req.is_empty() {
@@ -290,8 +598,13 @@ impl ToolSpec {
                     );
                 }
             }
-            ParamModel::Array { items, .. } => {
+            ParamModel::Array {
+                description, items, ..
+            } => {
                 map.insert("type".into(), Value::String("array".into()));
+                if let Some(desc) = description {
+                    map.insert("description".into(), Value::String(desc.clone()));
+                }
                 let (item_schema, _) = self.single_param_to_schema(items);
                 map.insert("items".into(), Value::Object(item_schema));
             }

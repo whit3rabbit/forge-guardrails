@@ -1170,7 +1170,7 @@ async fn test_step_blocked_transcript() {
                     }
                 }
             }
-        } else if msg.metadata.msg_type == MessageType::ToolResult {
+        } else if msg.metadata.msg_type == MessageType::StepNudge {
             if let Some(ref name) = msg.tool_name {
                 if name == "respond" && msg.content.contains("[StepEnforcementError]") {
                     step_blocked_tool_result_ids.push(msg.tool_call_id.clone().unwrap_or_default());

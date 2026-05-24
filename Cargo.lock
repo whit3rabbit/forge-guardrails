@@ -40,9 +40,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "anyllm_batch_engine"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0dd44edc7d94f6ed66feb57a33da86ea26ba4dbb0d8f1e738a29b9b3377253c"
+checksum = "8b5fe734caf59665f04be6b32393aa895e63b102001908c27f08e51dd6509545"
 dependencies = [
  "anyllm_translate",
  "async-trait",
@@ -63,9 +63,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_client"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27c7d6a473f6326fa4d7b4c9e1a18dd2070a7c090767c77da9f99e874bcc17e3"
+checksum = "08c3a192fb19dc8bf5d53b2ee81cdfaaffdb400298081504c8f7cc65661304c6"
 dependencies = [
  "anyllm_translate",
  "bytes",
@@ -83,18 +83,18 @@ dependencies = [
 
 [[package]]
 name = "anyllm_providers"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "077d045f3087d23eeb0cc6887f2c5658fdbab016100ba303b5fd30fc38a76d1b"
+checksum = "8cfc511a0f7f3b2466254dab7011766d3a729dc444b912f10cf6f4a1bf3e1389"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "anyllm_proxy"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dda0431715b69f10cfc4240f98c7a201e027c688d34c1e28a2b9b5f637126748"
+checksum = "a3fcf2f9e49212d03131217725043dbb874d9aeade72ae4402e24f7d8eefc657"
 dependencies = [
  "anyllm_batch_engine",
  "anyllm_client",
@@ -139,9 +139,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_translate"
-version = "0.9.4"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c5c48f4fcbf9d4468e330b46bfcdebadbbca98f2c8a161d5657d3e80301f752"
+checksum = "5ba32aaaa9cc9bbda55279a8173606d62b959f06a0eb165d31e4355caa89d6ea"
 dependencies = [
  "serde",
  "serde_json",
@@ -2202,6 +2202,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

@@ -6,14 +6,16 @@
 
 use std::sync::{Arc, Mutex};
 
+use anyllm_proxy::backend::RateLimitHeaders as AnyLlmRateLimitHeaders;
 use anyllm_proxy::runtime::{ChatCompletionRuntime, ChatCompletionService};
 use futures_util::StreamExt;
 use indexmap::IndexMap;
+use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 
 use crate::clients::base::{
-    format_tool, ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams,
-    StreamChunk, TextResponse, TokenUsage, ToolCall,
+    format_tool, ApiFormat, ChunkStream, ChunkType, LLMCallInfo, LLMClient, LLMRateLimitInfo,
+    LLMResponse, SamplingParams, StreamChunk, TextResponse, TokenUsage, ToolCall,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -29,6 +31,7 @@ pub struct AnyLlmProxyClient {
     timeout_secs: f64,
     context_length: Option<i64>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
 }
 
 impl AnyLlmProxyClient {
@@ -40,6 +43,7 @@ impl AnyLlmProxyClient {
             timeout_secs: 300.0,
             context_length: None,
             last_usage: Arc::new(Mutex::new(None)),
+            last_call_info: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -101,6 +105,10 @@ impl AnyLlmProxyClient {
         record_usage_cell(&self.last_usage, usage);
     }
 
+    fn record_call_info(&self, info: LLMCallInfo) {
+        record_call_info_cell(&self.last_call_info, info);
+    }
+
     fn parse_response(
         &self,
         response: anyllm_translate::openai::ChatCompletionResponse,
@@ -119,6 +127,13 @@ impl LLMClient for AnyLlmProxyClient {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
     }
 
+    fn last_call_info(&self) -> Option<LLMCallInfo> {
+        self.last_call_info
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     async fn send(
         &self,
         messages: Vec<Value>,
@@ -128,10 +143,17 @@ impl LLMClient for AnyLlmProxyClient {
         let body = self.build_request_body(messages, tools, sampling, false);
         let resp = self.send_request(body).await?;
         let status = resp.status().as_u16() as i64;
+        let headers = resp.headers().clone();
         let response_json = resp
             .json::<anyllm_translate::openai::ChatCompletionResponse>()
             .await
             .map_err(|e| BackendError::new(status, e.to_string()))?;
+        self.record_call_info(sidecar_call_info(
+            &self.model,
+            &headers,
+            Some(response_json.model.clone()),
+            response_json.usage.as_ref(),
+        ));
         Ok(self.parse_response(response_json))
     }
 
@@ -146,7 +168,13 @@ impl LLMClient for AnyLlmProxyClient {
             .send_request(body)
             .await
             .map_err(|e| StreamError::new(e.to_string()))?;
-        Ok(Box::pin(parse_openai_sse(resp, self.last_usage.clone())))
+        self.record_call_info(sidecar_call_info(&self.model, resp.headers(), None, None));
+        Ok(Box::pin(parse_openai_sse(
+            resp,
+            self.last_usage.clone(),
+            self.last_call_info.clone(),
+            Some(self.model.clone()),
+        )))
     }
 
     async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
@@ -161,6 +189,7 @@ pub struct AnyLlmRuntimeClient {
     service: Arc<dyn ChatCompletionService>,
     context_length: Option<i64>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
 }
 
 impl AnyLlmRuntimeClient {
@@ -170,6 +199,7 @@ impl AnyLlmRuntimeClient {
             service,
             context_length: None,
             last_usage: Arc::new(Mutex::new(None)),
+            last_call_info: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -214,6 +244,13 @@ impl LLMClient for AnyLlmRuntimeClient {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
     }
 
+    fn last_call_info(&self) -> Option<LLMCallInfo> {
+        self.last_call_info
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     async fn send(
         &self,
         messages: Vec<Value>,
@@ -228,6 +265,16 @@ impl LLMClient for AnyLlmRuntimeClient {
             .map_err(runtime_error_to_backend_error)?;
         let usage = result.usage.as_ref().or(result.response.usage.as_ref());
         record_usage_cell(&self.last_usage, usage);
+        record_call_info_cell(
+            &self.last_call_info,
+            runtime_call_info(
+                &result.metadata,
+                &result.rate_limits,
+                &result.warnings,
+                Some(result.response.model.clone()),
+                usage,
+            ),
+        );
         Ok(parse_openai_response(result.response))
     }
 
@@ -245,9 +292,22 @@ impl LLMClient for AnyLlmRuntimeClient {
             .complete_stream(req)
             .await
             .map_err(|e| StreamError::new(runtime_error_to_backend_error(e).to_string()))?;
+        let cost_model = result.metadata.mapped_model.clone();
+        record_call_info_cell(
+            &self.last_call_info,
+            runtime_call_info(
+                &result.metadata,
+                &result.rate_limits,
+                &result.warnings,
+                None,
+                None,
+            ),
+        );
         Ok(Box::pin(parse_openai_chunks(
             result.chunks,
             self.last_usage.clone(),
+            self.last_call_info.clone(),
+            Some(cost_model),
         )))
     }
 
@@ -304,6 +364,123 @@ fn record_usage_cell(
         .unwrap_or_else(TokenUsage::empty);
     if let Ok(mut guard) = cell.lock() {
         *guard = Some(token_usage);
+    }
+}
+
+fn record_call_info_cell(cell: &Arc<Mutex<Option<LLMCallInfo>>>, info: LLMCallInfo) {
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some(info);
+    }
+}
+
+fn runtime_call_info(
+    metadata: &anyllm_proxy::runtime::ChatCompletionMetadata,
+    rate_limits: &AnyLlmRateLimitHeaders,
+    warnings: &anyllm_translate::TranslationWarnings,
+    response_model: Option<String>,
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) -> LLMCallInfo {
+    LLMCallInfo {
+        requested_model: Some(metadata.requested_model.clone()),
+        response_model,
+        selected_backend: Some(metadata.selected_backend.clone()),
+        mapped_model: Some(metadata.mapped_model.clone()),
+        backend_kind: Some(format!("{:?}", metadata.backend_kind)),
+        provider_id: metadata.provider_id.clone(),
+        used_responses_api: metadata.used_responses_api,
+        degradation_warnings: warnings.as_header_value(),
+        cache_status: None,
+        rate_limits: rate_limit_info_from_anyllm(rate_limits),
+        estimated_cost_usd: estimate_cost_usd(Some(&metadata.mapped_model), usage),
+    }
+}
+
+fn sidecar_call_info(
+    requested_model: &str,
+    headers: &HeaderMap,
+    response_model: Option<String>,
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) -> LLMCallInfo {
+    let header_cost =
+        header_value(headers, "x-anyllm-cost-usd").and_then(|v| v.parse::<f64>().ok());
+    let cost_model = response_model.as_deref().or(Some(requested_model));
+    let estimated_cost_usd = header_cost.or_else(|| estimate_cost_usd(cost_model, usage));
+    LLMCallInfo {
+        requested_model: Some(requested_model.to_string()),
+        response_model,
+        selected_backend: None,
+        mapped_model: None,
+        backend_kind: None,
+        provider_id: None,
+        used_responses_api: false,
+        degradation_warnings: header_value(headers, "x-anyllm-degradation"),
+        cache_status: header_value(headers, "x-anyllm-cache"),
+        rate_limits: rate_limit_info_from_sidecar(headers),
+        estimated_cost_usd,
+    }
+}
+
+fn rate_limit_info_from_anyllm(rate_limits: &AnyLlmRateLimitHeaders) -> LLMRateLimitInfo {
+    LLMRateLimitInfo {
+        requests_limit: rate_limits.requests_limit.clone(),
+        requests_remaining: rate_limits.requests_remaining.clone(),
+        requests_reset: rate_limits.requests_reset.clone(),
+        tokens_limit: rate_limits.tokens_limit.clone(),
+        tokens_remaining: rate_limits.tokens_remaining.clone(),
+        tokens_reset: rate_limits.tokens_reset.clone(),
+        retry_after: rate_limits.retry_after.clone(),
+        organization_id: rate_limits.organization_id.clone(),
+    }
+}
+
+fn rate_limit_info_from_sidecar(headers: &HeaderMap) -> LLMRateLimitInfo {
+    LLMRateLimitInfo {
+        requests_limit: header_value(headers, "anthropic-ratelimit-requests-limit"),
+        requests_remaining: header_value(headers, "anthropic-ratelimit-requests-remaining"),
+        requests_reset: header_value(headers, "anthropic-ratelimit-requests-reset"),
+        tokens_limit: header_value(headers, "anthropic-ratelimit-tokens-limit"),
+        tokens_remaining: header_value(headers, "anthropic-ratelimit-tokens-remaining"),
+        tokens_reset: header_value(headers, "anthropic-ratelimit-tokens-reset"),
+        retry_after: header_value(headers, "retry-after"),
+        organization_id: header_value(headers, "anthropic-organization-id"),
+    }
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn estimate_cost_usd(
+    model: Option<&str>,
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) -> Option<f64> {
+    let model = model?;
+    let usage = usage?;
+    let (input_cost, output_cost) = anyllm_proxy::cost::pricing().price_for_model(model)?;
+    Some(
+        input_cost * f64::from(usage.prompt_tokens)
+            + output_cost * f64::from(usage.completion_tokens),
+    )
+}
+
+fn observe_stream_call_info(
+    cell: &Arc<Mutex<Option<LLMCallInfo>>>,
+    response_model: &str,
+    cost_model: &str,
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) {
+    if let Ok(mut guard) = cell.lock() {
+        let info = guard.get_or_insert_with(LLMCallInfo::default);
+        if info.response_model.is_none() {
+            info.response_model = Some(response_model.to_string());
+        }
+        if info.estimated_cost_usd.is_none() {
+            info.estimated_cost_usd = estimate_cost_usd(Some(cost_model), usage);
+        }
     }
 }
 
@@ -376,6 +553,8 @@ fn parse_args_string(args: &str) -> IndexMap<String, Value> {
 fn parse_openai_sse(
     resp: reqwest::Response,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
+    default_cost_model: Option<String>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     let byte_stream = resp.bytes_stream();
     async_stream::stream! {
@@ -418,6 +597,13 @@ fn parse_openai_sse(
                 };
 
                 record_usage_cell(&last_usage, evt.usage.as_ref());
+                let cost_model = default_cost_model.as_deref().unwrap_or(&evt.model);
+                observe_stream_call_info(
+                    &last_call_info,
+                    &evt.model,
+                    cost_model,
+                    evt.usage.as_ref(),
+                );
 
                 for choice in evt.choices {
                     if let Some(reasoning) = choice.delta.reasoning_content {
@@ -466,6 +652,8 @@ fn parse_openai_sse(
 fn parse_openai_chunks(
     chunks: anyllm_proxy::runtime::ChatCompletionChunkStream,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
+    last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
+    cost_model: Option<String>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     async_stream::stream! {
         let mut inner = chunks;
@@ -483,6 +671,13 @@ fn parse_openai_chunks(
             };
 
             record_usage_cell(&last_usage, evt.usage.as_ref());
+            let pricing_model = cost_model.as_deref().unwrap_or(&evt.model);
+            observe_stream_call_info(
+                &last_call_info,
+                &evt.model,
+                pricing_model,
+                evt.usage.as_ref(),
+            );
 
             for choice in evt.choices {
                 if let Some(reasoning) = choice.delta.reasoning_content {

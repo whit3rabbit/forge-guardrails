@@ -273,24 +273,40 @@ impl OllamaClient {
     }
 
     fn parse_send_response(&self, response: &Value, think: bool) -> LLMResponse {
-        if let Some(calls) = self.parse_tool_calls(response, think) {
-            return LLMResponse::ToolCalls(calls);
-        }
         let content = response
             .get("message")
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
             .unwrap_or("");
+        match self.parse_tool_calls(response, think) {
+            Ok(Some(calls)) => return LLMResponse::ToolCalls(calls),
+            Ok(None) => {}
+            Err(raw_args) => {
+                let text = if content.is_empty() {
+                    raw_args
+                } else {
+                    content.to_string()
+                };
+                return LLMResponse::Text(TextResponse::new(text));
+            }
+        }
         LLMResponse::Text(TextResponse::new(content))
     }
 
-    fn parse_tool_calls(&self, response: &Value, think: bool) -> Option<Vec<ToolCall>> {
-        let tcs = response
+    fn parse_tool_calls(
+        &self,
+        response: &Value,
+        think: bool,
+    ) -> Result<Option<Vec<ToolCall>>, String> {
+        let Some(tcs) = response
             .get("message")
             .and_then(|m| m.get("tool_calls"))
-            .and_then(|tc| tc.as_array())?;
+            .and_then(|tc| tc.as_array())
+        else {
+            return Ok(None);
+        };
         if tcs.is_empty() {
-            return None;
+            return Ok(None);
         }
         let reasoning = Self::resolve_reasoning(think, response);
         let mut calls = Vec::new();
@@ -301,17 +317,7 @@ impl OllamaClient {
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let args_val = tc.get("function").and_then(|f| f.get("arguments"));
-            let args = match args_val {
-                Some(Value::Object(obj)) => {
-                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                }
-                Some(Value::String(s)) => serde_json::from_str::<Value>(s)
-                    .ok()
-                    .and_then(|v| v.as_object().cloned())
-                    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-                    .unwrap_or_default(),
-                _ => IndexMap::new(),
-            };
+            let args = parse_tool_args_value(args_val)?;
             let mut call = ToolCall::new(name, args);
             if i == 0 {
                 if let Some(r) = reasoning.as_ref() {
@@ -320,7 +326,18 @@ impl OllamaClient {
             }
             calls.push(call);
         }
-        Some(calls)
+        Ok(Some(calls))
+    }
+}
+
+fn parse_tool_args_value(args_val: Option<&Value>) -> Result<IndexMap<String, Value>, String> {
+    match args_val {
+        Some(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            _ => Err(s.clone()),
+        },
+        _ => Ok(IndexMap::new()),
     }
 }
 
@@ -600,22 +617,31 @@ fn parse_ollama_ndjson(
                     let reasoning = OllamaClient::resolve_reasoning(think, &response_val);
                     let final_resp = if let Some(tcs) = pending_tc.take() {
                         let mut calls = Vec::new();
+                        let mut bad_args = None;
                         for (i, tc) in tcs.iter().enumerate() {
                             let name = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or("");
                             let args_val = tc.get("function").and_then(|f| f.get("arguments"));
-                            let args = match args_val {
-                                Some(Value::Object(obj)) => obj.iter().map(|(k,v)|(k.clone(),v.clone())).collect(),
-                                Some(Value::String(s)) => serde_json::from_str::<Value>(s).ok()
-                                    .and_then(|v| v.as_object().cloned())
-                                    .map(|obj| obj.iter().map(|(k,v)|(k.clone(),v.clone())).collect())
-                                    .unwrap_or_default(),
-                                _ => IndexMap::new(),
+                            let args = match parse_tool_args_value(args_val) {
+                                Ok(args) => args,
+                                Err(raw_args) => {
+                                    bad_args = Some(raw_args);
+                                    break;
+                                }
                             };
                             let mut call = ToolCall::new(name, args);
                             if i == 0 { if let Some(r) = &reasoning { call = call.with_reasoning(r); } }
                             calls.push(call);
                         }
-                        LLMResponse::ToolCalls(calls)
+                        if let Some(raw_args) = bad_args {
+                            let content = acc_content.trim().to_string();
+                            LLMResponse::Text(TextResponse::new(if content.is_empty() {
+                                raw_args
+                            } else {
+                                content
+                            }))
+                        } else {
+                            LLMResponse::ToolCalls(calls)
+                        }
                     } else {
                         let content = acc_content.trim().to_string();
                         LLMResponse::Text(TextResponse::new(content))

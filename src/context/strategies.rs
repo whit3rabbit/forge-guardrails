@@ -230,11 +230,15 @@ fn apply_phase1(
             }
             // Truncate long tool results.
             MessageType::ToolResult => {
-                if msg.content.len() > TRUNCATION_LIMIT {
+                let content_len = msg.content.chars().count();
+                if content_len > TRUNCATION_LIMIT {
                     let truncated: String = msg.content.chars().take(TRUNCATION_LIMIT).collect();
-                    let removed = msg.content.len() - TRUNCATION_LIMIT;
-                    let mut new_msg = msg.clone();
-                    new_msg.content = format!("{}...[{} characters removed]", truncated, removed);
+                    let removed = content_len - TRUNCATION_LIMIT;
+                    let new_msg = crate::core::message::Message::new(
+                        msg.role,
+                        format!("{}\n[Truncated — {} chars removed]", truncated, removed),
+                        msg.metadata.clone(),
+                    );
                     result.push(new_msg);
                 } else {
                     result.push(msg.clone());
@@ -247,7 +251,7 @@ fn apply_phase1(
     result
 }
 
-/// Phase 2: Phase 1 + drop all tool_result and tool_call messages from eligible zone.
+/// Phase 2: Phase 1 + drop all tool_result messages from eligible zone.
 fn apply_phase2(
     messages: &[crate::core::message::Message],
     keep_recent: i64,
@@ -268,7 +272,6 @@ fn apply_phase2(
             MessageType::StepNudge
             | MessageType::PrerequisiteNudge
             | MessageType::RetryNudge
-            | MessageType::ToolCall
             | MessageType::ToolResult => continue,
             _ => result.push(msg.clone()),
         }

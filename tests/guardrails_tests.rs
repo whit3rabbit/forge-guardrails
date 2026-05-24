@@ -141,6 +141,21 @@ fn validator_unknown_tool_rejected() {
     assert!(nudge.content.contains("bogus_tool"));
 }
 
+#[test]
+fn validator_unknown_tool_lists_available_tools_in_order() {
+    let validator = ResponseValidator::new(
+        vec!["zebra".into(), "alpha".into(), "middle".into()],
+        true,
+        None,
+    );
+    let response = LLMResponse::ToolCalls(vec![make_tool_call("bogus")]);
+    let result = validator.validate(&response);
+    let nudge = result.nudge.expect("nudge");
+    assert!(nudge
+        .content
+        .contains("Available tools: zebra, alpha, middle."));
+}
+
 // ob-008
 #[test]
 fn validator_empty_tool_calls_valid() {

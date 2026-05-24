@@ -221,6 +221,15 @@ sidecar. Clients can call forge-guardrails through either OpenAI
 `/v1/chat/completions` or Anthropic `/v1/messages`; forge still performs the
 guarded interception before any request reaches the sidecar.
 
+Both anyllm clients expose provider observability through
+`LLMClient::last_call_info()`. The runtime client reports selected backend,
+mapped model, backend kind, provider id, degradation warnings, rate limits, and
+estimated cost from anyllm pricing when usage is available. The sidecar client
+captures response headers such as `x-anyllm-degradation`, `x-anyllm-cache`,
+Anthropic rate-limit headers, and optional `x-anyllm-cost-usd`; otherwise it
+uses response usage and anyllm pricing for a best-effort cost estimate. Token
+counts remain available separately through `last_usage()`.
+
 Do not embed anyllm's HTTP router for guarded traffic. That path owns request
 handling and can bypass Forge guardrails. The runtime client uses anyllm's
 OpenAI-native Chat Completions runtime, so provider-specific OpenAI-compatible

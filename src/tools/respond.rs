@@ -41,6 +41,7 @@ pub fn respond_spec() -> ToolSpec {
                 props
             },
         },
+        json_schema: None,
     }
 }
 

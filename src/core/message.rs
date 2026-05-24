@@ -135,6 +135,46 @@ impl ToolCallInfo {
     }
 }
 
+fn json_dumps_default_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(v) => v.to_string(),
+        Value::Number(v) => v.to_string(),
+        Value::String(v) => serde_json::to_string(v).unwrap_or_else(|_| "\"\"".to_string()),
+        Value::Array(values) => {
+            let inner = values
+                .iter()
+                .map(json_dumps_default_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", inner)
+        }
+        Value::Object(values) => {
+            let inner = values
+                .iter()
+                .map(|(key, val)| {
+                    let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+                    format!("{}: {}", key, json_dumps_default_value(val))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{}}}", inner)
+        }
+    }
+}
+
+fn json_dumps_default_object(values: &IndexMap<String, Value>) -> String {
+    let inner = values
+        .iter()
+        .map(|(key, val)| {
+            let key = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+            format!("{}: {}", key, json_dumps_default_value(val))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{}}}", inner)
+}
+
 /// A conversation message with dual serialization format support.
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -238,8 +278,7 @@ impl Message {
                     entry.insert("type".to_string(), Value::String("function".to_string()));
                     let mut func = serde_json::Map::new();
                     func.insert("name".to_string(), Value::String(tc.name.clone()));
-                    let args_str = serde_json::to_string(tc.effective_args())
-                        .unwrap_or_else(|_| "{}".to_string());
+                    let args_str = json_dumps_default_object(tc.effective_args());
                     func.insert("arguments".to_string(), Value::String(args_str));
                     entry.insert("function".to_string(), Value::Object(func));
                     Value::Object(entry)

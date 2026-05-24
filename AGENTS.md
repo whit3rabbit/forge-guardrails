@@ -75,6 +75,8 @@ Preserve these invariants:
 - Use `AnyLlmRuntimeClient` for in-process anyllm routing when possible. It must use `anyllm_proxy::runtime::ChatCompletionService`, not the axum router.
 - Use `AnyLlmProxyClient` for a separate sidecar process when admin UI, cache, metrics, batch, or standalone provider config is needed.
 - Keep anyllm server-side tool execution out of Forge's guarded path. Forge must inspect tool calls before anything executes them.
+- Keep `TokenUsage` token-only. Surface anyllm provider metadata, rate limits, warnings, cache state, and estimated cost through `LLMClient::last_call_info()`.
+- Treat anyllm pricing-derived cost as observability, not billing authority.
 
 When changing workflow execution:
 1. Add or update tests first.

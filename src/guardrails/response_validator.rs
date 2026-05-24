@@ -2,7 +2,7 @@ use super::nudge::Nudge;
 use crate::clients::base::{LLMResponse, TextResponse, ToolCall};
 use crate::prompts;
 use crate::prompts::nudges;
-use std::collections::HashSet;
+use indexmap::IndexSet;
 
 /// Function type for generating custom retry nudge content.
 pub type RetryNudgeFn = Box<dyn Fn(&str) -> String + Send + Sync>;
@@ -39,7 +39,7 @@ impl ValidationResult {
 /// the allowed tool set, attempts rescue parsing from text content, and
 /// produces retry nudges for invalid responses.
 pub struct ResponseValidator {
-    tool_names: HashSet<String>,
+    tool_names: IndexSet<String>,
     rescue_enabled: bool,
     retry_nudge_fn: Option<RetryNudgeFn>,
 }

@@ -1,310 +1,1393 @@
 {
+  "metadata": {
+    "source": "forge Python reference submodule",
+    "generator": "tests/parity/generate_fixtures.py",
+    "command": "uv run --project forge python tests/parity/generate_fixtures.py"
+  },
   "cases": {
-    "anthropic_conversion_fallback_id": {
+    "anthropic_conversion_unpaired": {
+      "input": [
+        {
+          "role": "system",
+          "content": "Sys"
+        },
+        {
+          "role": "user",
+          "content": "First"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "abc",
+              "function": {
+                "name": "run",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": "next"
+        }
+      ],
       "expected": {
+        "system": "Sys",
         "messages": [
           {
-            "content": [
-              {
-                "id": "toolu_0",
-                "input": {},
-                "name": "run",
-                "type": "tool_use"
-              }
-            ],
-            "role": "assistant"
+            "role": "user",
+            "content": "First"
           },
           {
+            "role": "assistant",
             "content": [
               {
+                "type": "tool_use",
+                "id": "abc",
+                "name": "run",
+                "input": {}
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "abc",
                 "content": "Not executed.",
-                "is_error": true,
-                "tool_use_id": "toolu_0",
-                "type": "tool_result"
+                "is_error": true
               },
               {
-                "text": "next",
-                "type": "text"
+                "type": "text",
+                "text": "next"
               }
-            ],
-            "role": "user"
+            ]
           }
         ]
-      },
+      }
+    },
+    "anthropic_conversion_fallback_id": {
       "input": [
         {
-          "content": "",
           "role": "assistant",
+          "content": "",
           "tool_calls": [
             {
               "function": {
-                "arguments": "{}",
-                "name": "run"
+                "name": "run",
+                "arguments": "{}"
               }
             }
           ]
         },
         {
-          "content": "next",
-          "role": "user"
+          "role": "user",
+          "content": "next"
         }
-      ]
-    },
-    "anthropic_conversion_unpaired": {
+      ],
       "expected": {
         "messages": [
           {
-            "content": "First",
-            "role": "user"
-          },
-          {
+            "role": "assistant",
             "content": [
               {
-                "id": "abc",
-                "input": {},
+                "type": "tool_use",
+                "id": "toolu_0",
                 "name": "run",
-                "type": "tool_use"
+                "input": {}
               }
-            ],
-            "role": "assistant"
+            ]
           },
           {
+            "role": "user",
             "content": [
               {
+                "type": "tool_result",
+                "tool_use_id": "toolu_0",
                 "content": "Not executed.",
-                "is_error": true,
-                "tool_use_id": "abc",
-                "type": "tool_result"
+                "is_error": true
               },
               {
-                "text": "next",
-                "type": "text"
+                "type": "text",
+                "text": "next"
               }
-            ],
-            "role": "user"
+            ]
           }
-        ],
-        "system": "Sys"
-      },
-      "input": [
-        {
-          "content": "Sys",
-          "role": "system"
-        },
-        {
-          "content": "First",
-          "role": "user"
-        },
-        {
-          "content": "",
-          "role": "assistant",
-          "tool_calls": [
-            {
-              "function": {
-                "arguments": "{}",
-                "name": "run"
-              },
-              "id": "abc"
-            }
-          ]
-        },
-        {
-          "content": "next",
-          "role": "user"
-        }
-      ]
-    },
-    "backend_error_propagation": {
-      "expected": {
-        "attempts": 1,
-        "error_type": "BackendError",
-        "message": "Backend returned 503: backend down"
-      },
-      "input": {
-        "body": "backend down",
-        "status_code": 503
+        ]
       }
     },
     "inference_retry_budget": {
+      "input": {
+        "max_retries": 2,
+        "max_attempts": 10
+      },
       "expected": {
-        "attempts": 3,
         "error_type": "ToolCallError",
+        "attempts": 3,
+        "raw_response": "bad 3",
         "messages": [
           {
-            "content": "start",
             "role": "user",
+            "content": "start",
             "type": "user_input"
           },
           {
+            "role": "assistant",
             "content": "bad 1",
-            "role": "assistant",
-            "type": "text_response"
+            "type": "text_response",
+            "step_index": 0
           },
           {
-            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
             "role": "user",
-            "type": "retry_nudge"
+            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
+            "type": "retry_nudge",
+            "step_index": 0
           },
           {
+            "role": "assistant",
             "content": "bad 2",
-            "role": "assistant",
-            "type": "text_response"
+            "type": "text_response",
+            "step_index": 0
           },
           {
-            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
             "role": "user",
-            "type": "retry_nudge"
+            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
+            "type": "retry_nudge",
+            "step_index": 0
           }
-        ],
-        "raw_response": "bad 3"
-      },
+        ]
+      }
+    },
+    "backend_error_propagation": {
       "input": {
-        "max_attempts": 10,
-        "max_retries": 2
+        "status_code": 503,
+        "body": "backend down"
+      },
+      "expected": {
+        "error_type": "BackendError",
+        "attempts": 1,
+        "message": "Backend returned 503: backend down"
+      }
+    },
+    "streaming_without_final": {
+      "input": {
+        "chunks": [
+          "partial"
+        ]
+      },
+      "expected": {
+        "error_type": "StreamError",
+        "attempts": 1,
+        "message": "Stream ended without FINAL chunk \u2014 the client adapter may be malformed or the connection was interrupted"
       }
     },
     "llamafile_reasoning_extraction": {
-      "expected": {
-        "cleaned": "{\"tool\":\"run\",\"args\":{}}",
-        "tool_calls": [
-          {
-            "args": {},
-            "reasoning": "reason",
-            "tool": "run"
-          }
-        ]
-      },
       "input": {
         "content": "<think>reason</think>{\"tool\":\"run\",\"args\":{}}",
         "tools": [
           "run"
         ]
-      }
-    },
-    "ollama_thinking": {
+      },
       "expected": {
+        "cleaned": "{\"tool\":\"run\",\"args\":{}}",
         "tool_calls": [
           {
-            "args": {
-              "x": 1
-            },
-            "reasoning": "reason",
-            "tool": "run"
+            "tool": "run",
+            "args": {},
+            "reasoning": "reason"
+          }
+        ]
+      }
+    },
+    "llamafile_malformed_args": {
+      "input": {
+        "choices": [
+          {
+            "message": {
+              "content": "",
+              "tool_calls": [
+                {
+                  "function": {
+                    "name": "run",
+                    "arguments": "{broken"
+                  }
+                }
+              ]
+            }
           }
         ]
       },
+      "expected": {
+        "content": ""
+      }
+    },
+    "ollama_thinking": {
       "input": {
         "message": {
-          "content": "visible",
           "thinking": "reason",
+          "content": "visible",
           "tool_calls": [
             {
               "function": {
+                "name": "run",
                 "arguments": {
                   "x": 1
-                },
-                "name": "run"
+                }
               }
             }
           ]
         }
-      }
-    },
-    "proxy_respond_stripping": {
-      "expected": {
-        "content": "done",
-        "finish_reason": "stop"
       },
-      "input": {
-        "messages": [
+      "expected": {
+        "tool_calls": [
           {
-            "content": "hi",
-            "role": "user"
-          }
-        ],
-        "model": "test-model",
-        "stream": false,
-        "tools": [
-          {
-            "function": {
-              "description": "Search",
-              "name": "search",
-              "parameters": {
-                "properties": {
-                  "query": {
-                    "type": "string"
-                  }
-                },
-                "type": "object"
-              }
+            "tool": "run",
+            "args": {
+              "x": 1
             },
-            "type": "function"
+            "reasoning": "reason"
           }
-        ]
-      }
-    },
-    "proxy_sampling_fields": {
-      "expected": {
-        "chat_template_kwargs": {
-          "enable_thinking": true
-        },
-        "min_p": 0.05,
-        "presence_penalty": 0.3,
-        "repeat_penalty": 1.1,
-        "seed": 42,
-        "temperature": 0.2,
-        "top_k": 40,
-        "top_p": 0.9
-      },
-      "input": {
-        "chat_template_kwargs": {
-          "enable_thinking": true
-        },
-        "frequency_penalty": 1.0,
-        "min_p": 0.05,
-        "presence_penalty": 0.3,
-        "repeat_penalty": 1.1,
-        "response_format": {
-          "type": "json_object"
-        },
-        "seed": 42,
-        "temperature": 0.2,
-        "top_k": 40,
-        "top_p": 0.9
-      }
-    },
-    "streaming_without_final": {
-      "expected": {
-        "attempts": 1,
-        "error_type": "StreamError",
-        "message": "Stream ended without FINAL chunk \u2014 the client adapter may be malformed or the connection was interrupted"
-      },
-      "input": {
-        "chunks": [
-          "partial"
         ]
       }
     },
     "tool_call_id_generation": {
-      "expected": {
-        "call_ids": [
-          "call_000000000",
-          "call_000000001"
-        ],
-        "next_counter": 2
-      },
       "input": {
         "starting_counter": 0,
         "tools": [
           "first",
           "second"
         ]
+      },
+      "expected": {
+        "call_ids": [
+          "call_000000000",
+          "call_000000001"
+        ],
+        "next_counter": 2
+      }
+    },
+    "toolspec_schema_output": {
+      "input": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query",
+            "default": "rust"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "deep"
+            ],
+            "description": "Mode"
+          },
+          "cfg": {
+            "type": "object",
+            "description": "Config",
+            "properties": {
+              "limit": {
+                "type": "integer",
+                "description": "Limit",
+                "default": 5
+              }
+            },
+            "required": [
+              "limit"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "description": "Tags",
+            "items": {
+              "type": "string",
+              "description": "Tag"
+            }
+          }
+        },
+        "required": [
+          "query",
+          "cfg"
+        ]
+      },
+      "expected": {
+        "schema": {
+          "$defs": {
+            "SearchToolParams_Cfg": {
+              "properties": {
+                "limit": {
+                  "description": "Limit",
+                  "title": "Limit",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "limit"
+              ],
+              "title": "SearchToolParams_Cfg",
+              "type": "object"
+            }
+          },
+          "properties": {
+            "query": {
+              "description": "Search query",
+              "title": "Query",
+              "type": "string"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fast",
+                    "deep"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Mode",
+              "title": "Mode"
+            },
+            "cfg": {
+              "$ref": "#/$defs/SearchToolParams_Cfg",
+              "description": "Config"
+            },
+            "tags": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Tags",
+              "title": "Tags"
+            }
+          },
+          "required": [
+            "query",
+            "cfg"
+          ],
+          "title": "SearchToolParams",
+          "type": "object"
+        },
+        "schema_json": "{\"$defs\": {\"SearchToolParams_Cfg\": {\"properties\": {\"limit\": {\"description\": \"Limit\", \"title\": \"Limit\", \"type\": \"integer\"}}, \"required\": [\"limit\"], \"title\": \"SearchToolParams_Cfg\", \"type\": \"object\"}}, \"properties\": {\"query\": {\"description\": \"Search query\", \"title\": \"Query\", \"type\": \"string\"}, \"mode\": {\"anyOf\": [{\"enum\": [\"fast\", \"deep\"], \"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"description\": \"Mode\", \"title\": \"Mode\"}, \"cfg\": {\"$ref\": \"#/$defs/SearchToolParams_Cfg\", \"description\": \"Config\"}, \"tags\": {\"anyOf\": [{\"items\": {\"type\": \"string\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"description\": \"Tags\", \"title\": \"Tags\"}}, \"required\": [\"query\", \"cfg\"], \"title\": \"SearchToolParams\", \"type\": \"object\"}"
+      }
+    },
+    "format_tool_output": {
+      "input": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query",
+            "default": "rust"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "deep"
+            ],
+            "description": "Mode"
+          },
+          "cfg": {
+            "type": "object",
+            "description": "Config",
+            "properties": {
+              "limit": {
+                "type": "integer",
+                "description": "Limit",
+                "default": 5
+              }
+            },
+            "required": [
+              "limit"
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "description": "Tags",
+            "items": {
+              "type": "string",
+              "description": "Tag"
+            }
+          }
+        },
+        "required": [
+          "query",
+          "cfg"
+        ]
+      },
+      "expected": {
+        "tool": {
+          "type": "function",
+          "function": {
+            "name": "search_tool",
+            "description": "Search",
+            "parameters": {
+              "$defs": {
+                "SearchToolParams_Cfg": {
+                  "properties": {
+                    "limit": {
+                      "description": "Limit",
+                      "title": "Limit",
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "limit"
+                  ],
+                  "title": "SearchToolParams_Cfg",
+                  "type": "object"
+                }
+              },
+              "properties": {
+                "query": {
+                  "description": "Search query",
+                  "title": "Query",
+                  "type": "string"
+                },
+                "mode": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "fast",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Mode",
+                  "title": "Mode"
+                },
+                "cfg": {
+                  "$ref": "#/$defs/SearchToolParams_Cfg",
+                  "description": "Config"
+                },
+                "tags": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Tags",
+                  "title": "Tags"
+                }
+              },
+              "required": [
+                "query",
+                "cfg"
+              ],
+              "title": "SearchToolParams",
+              "type": "object"
+            }
+          }
+        },
+        "tool_json": "{\"type\": \"function\", \"function\": {\"name\": \"search_tool\", \"description\": \"Search\", \"parameters\": {\"$defs\": {\"SearchToolParams_Cfg\": {\"properties\": {\"limit\": {\"description\": \"Limit\", \"title\": \"Limit\", \"type\": \"integer\"}}, \"required\": [\"limit\"], \"title\": \"SearchToolParams_Cfg\", \"type\": \"object\"}}, \"properties\": {\"query\": {\"description\": \"Search query\", \"title\": \"Query\", \"type\": \"string\"}, \"mode\": {\"anyOf\": [{\"enum\": [\"fast\", \"deep\"], \"type\": \"string\"}, {\"type\": \"null\"}], \"default\": null, \"description\": \"Mode\", \"title\": \"Mode\"}, \"cfg\": {\"$ref\": \"#/$defs/SearchToolParams_Cfg\", \"description\": \"Config\"}, \"tags\": {\"anyOf\": [{\"items\": {\"type\": \"string\"}, \"type\": \"array\"}, {\"type\": \"null\"}], \"default\": null, \"description\": \"Tags\", \"title\": \"Tags\"}}, \"required\": [\"query\", \"cfg\"], \"title\": \"SearchToolParams\", \"type\": \"object\"}}}"
+      }
+    },
+    "tool_prompt_text": {
+      "input": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "deep"
+            ],
+            "description": "Mode"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "expected": "You have access to the following tools:\n\n## search\nDescription: Search docs\nParameters:\n  - mode (string (required)): Mode\n    Allowed values: fast, deep\n\nTo call a tool, respond with ONLY a JSON object in this exact format:\n{\"tool\": \"<tool_name>\", \"args\": {<arguments>}}\n\nExample:\n{\"tool\": \"search\", \"args\": {\"mode\": \"<mode>\"}}\n\nRespond with ONLY the JSON tool call. Do not include any other text."
+    },
+    "unknown_tool_order": {
+      "input": {
+        "called_tool": "bogus",
+        "available_tools": [
+          "zebra",
+          "alpha",
+          "middle"
+        ]
+      },
+      "expected": "Tool 'bogus' does not exist. Available tools: zebra, alpha, middle. Call one of them."
+    },
+    "text_retry_history": {
+      "input": {
+        "responses": [
+          "text",
+          "run"
+        ]
+      },
+      "expected": {
+        "attempts": 2,
+        "next_counter": 0,
+        "messages": [
+          {
+            "role": "user",
+            "content": "start",
+            "type": "user_input"
+          },
+          {
+            "role": "assistant",
+            "content": "plain answer",
+            "type": "text_response",
+            "step_index": 0
+          },
+          {
+            "role": "user",
+            "content": "Your previous response was not a valid tool call. You must respond with a tool call, not free text. Please try again with a valid tool call.",
+            "type": "retry_nudge",
+            "step_index": 0
+          }
+        ],
+        "response": [
+          {
+            "tool": "run",
+            "args": {
+              "x": 1
+            },
+            "reasoning": null
+          }
+        ]
+      }
+    },
+    "unknown_tool_history": {
+      "input": {
+        "responses": [
+          "bogus",
+          "run"
+        ]
+      },
+      "expected": {
+        "attempts": 2,
+        "next_counter": 1,
+        "messages": [
+          {
+            "role": "user",
+            "content": "start",
+            "type": "user_input"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 0,
+            "tool_calls": [
+              {
+                "name": "bogus",
+                "args": {},
+                "call_id": "call_000000000"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "[UnknownTool] Tool 'bogus' does not exist. Available tools: run. Call one of them.",
+            "type": "retry_nudge",
+            "step_index": 0,
+            "tool_name": "bogus",
+            "tool_call_id": "call_000000000"
+          }
+        ],
+        "response": [
+          {
+            "tool": "run",
+            "args": {
+              "x": 1
+            },
+            "reasoning": null
+          }
+        ]
+      }
+    },
+    "step_nudge_history": {
+      "input": {
+        "required_steps": [
+          "lookup"
+        ]
+      },
+      "expected": {
+        "result": "lookup complete",
+        "attempts": 3,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 1,
+            "tool_calls": [
+              {
+                "name": "respond",
+                "args": {
+                  "message": "too soon"
+                },
+                "call_id": "call_000000000"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "[StepEnforcementError] You cannot call respond yet. You must first complete these required steps: lookup. Call one of them now.",
+            "type": "step_nudge",
+            "step_index": 1,
+            "tool_name": "respond",
+            "tool_call_id": "call_000000000"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 2,
+            "tool_calls": [
+              {
+                "name": "lookup",
+                "args": {},
+                "call_id": "call_000000001"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "lookup ok",
+            "type": "tool_result",
+            "step_index": 2,
+            "tool_name": "lookup",
+            "tool_call_id": "call_000000001"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 3,
+            "tool_calls": [
+              {
+                "name": "respond",
+                "args": {
+                  "message": "lookup complete"
+                },
+                "call_id": "call_000000002"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "lookup complete",
+            "type": "tool_result",
+            "step_index": 3,
+            "tool_name": "respond",
+            "tool_call_id": "call_000000002"
+          }
+        ]
+      }
+    },
+    "prerequisite_nudge_history": {
+      "input": {
+        "prerequisite": "lookup -> analyze"
+      },
+      "expected": {
+        "result": "analysis complete",
+        "attempts": 4,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 1,
+            "tool_calls": [
+              {
+                "name": "analyze",
+                "args": {},
+                "call_id": "call_000000000"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "[PrerequisiteError] You cannot call analyze yet. You must first call: lookup. Call the prerequisite tool now.",
+            "type": "prerequisite_nudge",
+            "step_index": 1,
+            "tool_name": "analyze",
+            "tool_call_id": "call_000000000"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 2,
+            "tool_calls": [
+              {
+                "name": "lookup",
+                "args": {},
+                "call_id": "call_000000001"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "lookup ok",
+            "type": "tool_result",
+            "step_index": 2,
+            "tool_name": "lookup",
+            "tool_call_id": "call_000000001"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 3,
+            "tool_calls": [
+              {
+                "name": "analyze",
+                "args": {},
+                "call_id": "call_000000002"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "analyze ok",
+            "type": "tool_result",
+            "step_index": 3,
+            "tool_name": "analyze",
+            "tool_call_id": "call_000000002"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 4,
+            "tool_calls": [
+              {
+                "name": "respond",
+                "args": {
+                  "message": "analysis complete"
+                },
+                "call_id": "call_000000003"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "analysis complete",
+            "type": "tool_result",
+            "step_index": 4,
+            "tool_name": "respond",
+            "tool_call_id": "call_000000003"
+          }
+        ]
+      }
+    },
+    "tool_resolution_soft_error_budget": {
+      "input": {
+        "max_tool_errors": 0
+      },
+      "expected": {
+        "result": "soft resolution recovered",
+        "attempts": 2,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 1,
+            "tool_calls": [
+              {
+                "name": "lookup",
+                "args": {},
+                "call_id": "call_000000000"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "[ToolResolutionError] try again",
+            "type": "tool_result",
+            "step_index": 1,
+            "tool_name": "lookup",
+            "tool_call_id": "call_000000000"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 2,
+            "tool_calls": [
+              {
+                "name": "respond",
+                "args": {
+                  "message": "soft resolution recovered"
+                },
+                "call_id": "call_000000001"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "soft resolution recovered",
+            "type": "tool_result",
+            "step_index": 2,
+            "tool_name": "respond",
+            "tool_call_id": "call_000000001"
+          }
+        ]
+      }
+    },
+    "hard_tool_execution_error_budget": {
+      "input": {
+        "max_tool_errors": 0
+      },
+      "expected": {
+        "error_type": "ToolExecutionError",
+        "tool_name": "explode",
+        "cause": "boom",
+        "attempts": 1,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 1,
+            "tool_calls": [
+              {
+                "name": "explode",
+                "args": {},
+                "call_id": "call_000000000"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "[ToolError] ToolExecutionError: boom",
+            "type": "tool_result",
+            "step_index": 1,
+            "tool_name": "explode",
+            "tool_call_id": "call_000000000"
+          }
+        ]
+      }
+    },
+    "compaction_phases": {
+      "input": {
+        "keep_recent": 1
+      },
+      "expected": {
+        "phase1": {
+          "phase": 1,
+          "messages": [
+            {
+              "role": "system",
+              "content": "sys",
+              "type": "system_prompt"
+            },
+            {
+              "role": "user",
+              "content": "usr",
+              "type": "user_input"
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 0
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 0,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 0
+                  },
+                  "call_id": "call_0"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[Truncated \u2014 50 chars removed]",
+              "type": "tool_result",
+              "step_index": 0
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 0
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 1
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 1,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 1
+                  },
+                  "call_id": "call_1"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[Truncated \u2014 50 chars removed]",
+              "type": "tool_result",
+              "step_index": 1
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 1
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 2
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 2,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 2
+                  },
+                  "call_id": "call_2"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "type": "tool_result",
+              "step_index": 2,
+              "tool_name": "run",
+              "tool_call_id": "call_2"
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 2
+            },
+            {
+              "role": "user",
+              "content": "retry",
+              "type": "retry_nudge",
+              "step_index": 2
+            }
+          ]
+        },
+        "phase2": {
+          "phase": 2,
+          "messages": [
+            {
+              "role": "system",
+              "content": "sys",
+              "type": "system_prompt"
+            },
+            {
+              "role": "user",
+              "content": "usr",
+              "type": "user_input"
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 0
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 0,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 0
+                  },
+                  "call_id": "call_0"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 0
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 1
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 1,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 1
+                  },
+                  "call_id": "call_1"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 1
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 2
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 2,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 2
+                  },
+                  "call_id": "call_2"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "type": "tool_result",
+              "step_index": 2,
+              "tool_name": "run",
+              "tool_call_id": "call_2"
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 2
+            },
+            {
+              "role": "user",
+              "content": "retry",
+              "type": "retry_nudge",
+              "step_index": 2
+            }
+          ]
+        },
+        "phase3": {
+          "phase": 3,
+          "messages": [
+            {
+              "role": "system",
+              "content": "sys",
+              "type": "system_prompt"
+            },
+            {
+              "role": "user",
+              "content": "usr",
+              "type": "user_input"
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 0,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 0
+                  },
+                  "call_id": "call_0"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 1,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 1
+                  },
+                  "call_id": "call_1"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "thinking",
+              "type": "reasoning",
+              "step_index": 2
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "type": "tool_call",
+              "step_index": 2,
+              "tool_calls": [
+                {
+                  "name": "run",
+                  "args": {
+                    "x": 2
+                  },
+                  "call_id": "call_2"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "type": "tool_result",
+              "step_index": 2,
+              "tool_name": "run",
+              "tool_call_id": "call_2"
+            },
+            {
+              "role": "assistant",
+              "content": "text",
+              "type": "text_response",
+              "step_index": 2
+            },
+            {
+              "role": "user",
+              "content": "retry",
+              "type": "retry_nudge",
+              "step_index": 2
+            }
+          ]
+        }
+      }
+    },
+    "fold_and_serialize_reasoning": {
+      "input": {
+        "api_format": "openai"
+      },
+      "expected": {
+        "before_tool_call": [
+          {
+            "role": "assistant",
+            "content": "think first",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "run",
+                  "arguments": "{\"x\": 1}"
+                },
+                "type": "function",
+                "id": "call_000000000"
+              }
+            ]
+          }
+        ],
+        "orphan_before_user": [
+          {
+            "role": "assistant",
+            "content": "orphan"
+          },
+          {
+            "role": "user",
+            "content": "next"
+          }
+        ],
+        "consecutive_before_tool_call": [
+          {
+            "role": "assistant",
+            "content": "second",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "run",
+                  "arguments": "{\"x\": 2}"
+                },
+                "type": "function",
+                "id": "call_000000001"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "max_iterations_pending_error": {
+      "input": {
+        "required_steps": [
+          "lookup",
+          "analyze"
+        ],
+        "max_iterations": 1
+      },
+      "expected": {
+        "error_type": "MaxIterationsError",
+        "completed": [
+          "lookup"
+        ],
+        "pending": [
+          "analyze"
+        ],
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "",
+            "type": "tool_call",
+            "step_index": 1,
+            "tool_calls": [
+              {
+                "name": "lookup",
+                "args": {},
+                "call_id": "call_000000000"
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "content": "lookup ok",
+            "type": "tool_result",
+            "step_index": 1,
+            "tool_name": "lookup",
+            "tool_call_id": "call_000000000"
+          }
+        ]
+      }
+    },
+    "pending_steps_only": {
+      "input": {
+        "required_steps": [
+          "lookup",
+          "analyze"
+        ],
+        "completed": [
+          "lookup"
+        ]
+      },
+      "expected": {
+        "pending": [
+          "analyze"
+        ]
+      }
+    },
+    "proxy_sampling_fields": {
+      "input": {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "top_k": 40,
+        "min_p": 0.05,
+        "repeat_penalty": 1.1,
+        "presence_penalty": 0.3,
+        "seed": 42,
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        },
+        "frequency_penalty": 1.0,
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "expected": {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "top_k": 40,
+        "min_p": 0.05,
+        "repeat_penalty": 1.1,
+        "presence_penalty": 0.3,
+        "seed": 42,
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        }
+      }
+    },
+    "proxy_respond_stripping": {
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "model": "test-model",
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "search",
+              "description": "Search",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "content": "done",
+        "finish_reason": "stop"
       }
     }
-  },
-  "metadata": {
-    "command": "uv run --project forge python tests/parity/generate_fixtures.py",
-    "generator": "tests/parity/generate_fixtures.py",
-    "source": "forge Python reference submodule"
   }
 }

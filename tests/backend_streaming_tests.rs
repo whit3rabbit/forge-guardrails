@@ -113,6 +113,92 @@ async fn test_ollama_streaming_request() {
 }
 
 #[tokio::test]
+async fn test_ollama_native_malformed_args_returns_text() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let _mock = server
+        .mock("POST", "/api/chat")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "run", "arguments": "{broken"}}
+                    ]
+                },
+                "prompt_eval_count": 1,
+                "eval_count": 1
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let client = OllamaClient::new("llama3")
+        .with_base_url(url)
+        .with_timeout(5.0);
+    let response = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("ollama response parsed");
+
+    match response {
+        forge_guardrails::LLMResponse::Text(text) => assert_eq!(text.content, "{broken"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_ollama_streaming_malformed_args_returns_text() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let _mock = server
+        .mock("POST", "/api/chat")
+        .with_status(200)
+        .with_header("content-type", "application/x-ndjson")
+        .with_body(concat!(
+            "{\"message\": {\"tool_calls\": [{\"function\": {\"name\": \"run\", \"arguments\": \"{broken\"}}]}, \"done\": false}\n",
+            "{\"message\": {\"content\": \"\"}, \"done\": true, \"prompt_eval_count\": 1, \"eval_count\": 1}\n",
+        ))
+        .create_async()
+        .await;
+
+    let client = OllamaClient::new("llama3")
+        .with_base_url(url)
+        .with_timeout(5.0);
+    let stream_res = client
+        .send_stream(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("ollama stream opened");
+
+    let mut final_response = None;
+    let mut stream = stream_res;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("stream chunk");
+        if chunk.chunk_type == ChunkType::Final {
+            final_response = chunk.response;
+        }
+    }
+
+    match final_response.expect("final response") {
+        forge_guardrails::LLMResponse::Text(text) => assert_eq!(text.content, "{broken"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_llamafile_streaming_records_usage_after_finish() {
     let mut server = mockito::Server::new_async().await;
     let url = server.url();
@@ -166,4 +252,48 @@ async fn test_llamafile_streaming_records_usage_after_finish() {
     assert_eq!(usage.prompt_tokens, 7);
     assert_eq!(usage.completion_tokens, 3);
     assert_eq!(usage.total_tokens, 10);
+}
+
+#[tokio::test]
+async fn test_llamafile_native_malformed_args_returns_text() {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "run", "arguments": "{broken"}}
+                        ]
+                    }
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let client = LlamafileClient::new(Path::new("t.gguf"))
+        .with_base_url(format!("{}/v1", url))
+        .with_timeout(5.0);
+    let response = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("llamafile response parsed");
+
+    match response {
+        forge_guardrails::LLMResponse::Text(text) => assert_eq!(text.content, ""),
+        other => panic!("expected text response, got {other:?}"),
+    }
 }

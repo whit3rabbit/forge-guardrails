@@ -190,6 +190,9 @@ impl LlamafileClient {
         let choice = response.get("choices").and_then(|c| c.get(0));
         let message = choice.and_then(|c| c.get("message"));
         let reasoning = helpers::resolve_reasoning(self.think, response);
+        let content = message
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str());
 
         if let Some(tcs) = message
             .and_then(|m| m.get("tool_calls"))
@@ -205,7 +208,13 @@ impl LlamafileClient {
                         .unwrap_or("");
                     let id = tc.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
                     let args_raw = tc.get("function").and_then(|f| f.get("arguments"));
-                    let args = parse_args(args_raw);
+                    let args = match parse_args(args_raw) {
+                        Ok(args) => args,
+                        Err(raw_args) => {
+                            let text = content.map(str::to_string).unwrap_or(raw_args);
+                            return LLMResponse::Text(TextResponse::new(text));
+                        }
+                    };
                     let mut call = ToolCall::new(name, args);
                     if let Some(id_val) = id {
                         call = call.with_id(id_val);
@@ -221,14 +230,10 @@ impl LlamafileClient {
             }
         }
 
-        let content = message
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
         let cleaned = if self.think {
-            helpers::strip_reasoning_tags(content)
+            helpers::strip_reasoning_tags(content.unwrap_or(""))
         } else {
-            content.to_string()
+            content.unwrap_or("").to_string()
         };
         LLMResponse::Text(TextResponse::new(cleaned))
     }
@@ -385,14 +390,14 @@ impl LlamafileClient {
     }
 }
 
-fn parse_args(args_raw: Option<&Value>) -> IndexMap<String, Value> {
+fn parse_args(args_raw: Option<&Value>) -> Result<IndexMap<String, Value>, String> {
     match args_raw {
         Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
-            Ok(Value::Object(obj)) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            _ => IndexMap::new(),
+            Ok(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            _ => Err(s.clone()),
         },
-        Some(Value::Object(obj)) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        _ => IndexMap::new(),
+        Some(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        _ => Ok(IndexMap::new()),
     }
 }
 

@@ -143,6 +143,35 @@ impl TokenUsage {
     }
 }
 
+/// Rate-limit details observed from the last LLM call.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LLMRateLimitInfo {
+    pub requests_limit: Option<String>,
+    pub requests_remaining: Option<String>,
+    pub requests_reset: Option<String>,
+    pub tokens_limit: Option<String>,
+    pub tokens_remaining: Option<String>,
+    pub tokens_reset: Option<String>,
+    pub retry_after: Option<String>,
+    pub organization_id: Option<String>,
+}
+
+/// Provider-routing and accounting metadata observed from the last LLM call.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LLMCallInfo {
+    pub requested_model: Option<String>,
+    pub response_model: Option<String>,
+    pub selected_backend: Option<String>,
+    pub mapped_model: Option<String>,
+    pub backend_kind: Option<String>,
+    pub provider_id: Option<String>,
+    pub used_responses_api: bool,
+    pub degradation_warnings: Option<String>,
+    pub cache_status: Option<String>,
+    pub rate_limits: LLMRateLimitInfo,
+    pub estimated_cost_usd: Option<f64>,
+}
+
 /// Sampling parameters passed to an LLM call.
 ///
 /// Values are optional; when `None`, the backend or client instance defaults
@@ -181,6 +210,11 @@ pub trait LLMClient: Send + Sync {
 
     /// Get the token usage of the last request.
     fn last_usage(&self) -> Option<TokenUsage> {
+        None
+    }
+
+    /// Get provider-routing and accounting metadata from the last request.
+    fn last_call_info(&self) -> Option<LLMCallInfo> {
         None
     }
 

@@ -27,6 +27,7 @@ fn make_tool_spec(name: &str, desc: &str, params: Vec<(&str, &str, bool)>) -> To
             required: true,
             properties,
         },
+        json_schema: None,
     }
 }
 
@@ -43,6 +44,31 @@ fn build_tool_prompt_single_tool() {
     assert!(result.contains("required"));
     assert!(result.contains("\"tool\""));
     assert!(result.contains("\"args\""));
+}
+
+#[test]
+fn build_tool_prompt_matches_python_template() {
+    let spec = make_tool_spec("search", "Search the web", vec![("query", "string", true)]);
+    let result = build_tool_prompt(&[spec]);
+    assert_eq!(
+        result,
+        concat!(
+            "You have access to the following tools:\n",
+            "\n",
+            "## search\n",
+            "Description: Search the web\n",
+            "Parameters:\n",
+            "  - query (string (required)): The query parameter\n",
+            "\n",
+            "To call a tool, respond with ONLY a JSON object in this exact format:\n",
+            "{\"tool\": \"<tool_name>\", \"args\": {<arguments>}}\n",
+            "\n",
+            "Example:\n",
+            "{\"tool\": \"search\", \"args\": {\"query\": \"<query>\"}}\n",
+            "\n",
+            "Respond with ONLY the JSON tool call. Do not include any other text."
+        )
+    );
 }
 
 #[test]
@@ -83,6 +109,7 @@ fn build_tool_prompt_enum_param() {
             required: true,
             properties,
         },
+        json_schema: None,
     };
     let result = build_tool_prompt(&[spec]);
     assert!(result.contains("fast"));
