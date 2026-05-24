@@ -561,6 +561,8 @@ fn parse_args_string(args: &str) -> IndexMap<String, Value> {
     }
 }
 
+const MAX_STREAM_TOOL_CALLS: usize = 128;
+
 fn parse_openai_sse(
     resp: reqwest::Response,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
@@ -626,8 +628,25 @@ fn parse_openai_sse(
                     }
                     if let Some(tool_calls) = choice.delta.tool_calls {
                         for tc in tool_calls {
-                            let index = tc.index as usize;
-                            while accumulated_tools.len() <= index {
+                            let Ok(index) = usize::try_from(tc.index) else {
+                                yield Err(StreamError::new("invalid negative tool call index in stream chunk"));
+                                return;
+                            };
+                            if index >= MAX_STREAM_TOOL_CALLS {
+                                yield Err(StreamError::new(format!(
+                                    "tool call index {} exceeds limit {}",
+                                    index, MAX_STREAM_TOOL_CALLS
+                                )));
+                                return;
+                            }
+                            if index > accumulated_tools.len() {
+                                yield Err(StreamError::new(format!(
+                                    "non-contiguous tool call index {} in stream chunk",
+                                    index
+                                )));
+                                return;
+                            }
+                            if index == accumulated_tools.len() {
                                 accumulated_tools.push((String::new(), String::new(), String::new()));
                             }
                             if let Some(id) = tc.id {
@@ -700,8 +719,25 @@ fn parse_openai_chunks(
                 }
                 if let Some(tool_calls) = choice.delta.tool_calls {
                     for tc in tool_calls {
-                        let index = tc.index as usize;
-                        while accumulated_tools.len() <= index {
+                        let Ok(index) = usize::try_from(tc.index) else {
+                            yield Err(StreamError::new("invalid negative tool call index in stream chunk"));
+                            return;
+                        };
+                        if index >= MAX_STREAM_TOOL_CALLS {
+                            yield Err(StreamError::new(format!(
+                                "tool call index {} exceeds limit {}",
+                                index, MAX_STREAM_TOOL_CALLS
+                            )));
+                            return;
+                        }
+                        if index > accumulated_tools.len() {
+                            yield Err(StreamError::new(format!(
+                                "non-contiguous tool call index {} in stream chunk",
+                                index
+                            )));
+                            return;
+                        }
+                        if index == accumulated_tools.len() {
                             accumulated_tools.push((String::new(), String::new(), String::new()));
                         }
                         if let Some(id) = tc.id {
