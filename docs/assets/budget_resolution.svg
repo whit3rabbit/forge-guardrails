@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 780" width="100%" height="auto">
+  <defs>
+    <!-- Drop Shadow Filter -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#020617" flood-opacity="0.5"/>
+    </filter>
+    
+    <!-- Linear Gradients -->
+    <linearGradient id="header-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <linearGradient id="entry-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0369a1"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+
+    <linearGradient id="logic-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2e1065"/>
+      <stop offset="100%" stop-color="#4c1d95"/>
+    </linearGradient>
+
+    <linearGradient id="path-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+
+    <linearGradient id="wire-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#064e3b"/>
+      <stop offset="100%" stop-color="#065f46"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .title { font-family: system-ui, -apple-system, sans-serif; font-size: 24px; font-weight: 800; fill: #f8fafc; text-anchor: middle; }
+    .subtitle { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; fill: #94a3b8; text-anchor: middle; }
+    .node-text { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 700; fill: #f8fafc; text-anchor: middle; }
+    .node-desc { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; fill: #cbd5e1; }
+    .node-header { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 800; fill: #38bdf8; text-anchor: middle; }
+    .arrow { stroke: #475569; stroke-width: 2; fill: none; }
+    .arrowhead { fill: #475569; }
+    .mode-label { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; font-weight: bold; fill: #818cf8; text-anchor: middle; }
+  </style>
+
+  <!-- Background Card -->
+  <rect width="950" height="780" rx="16" fill="#0b0f19" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Title Section -->
+  <rect x="0" y="0" width="950" height="90" fill="url(#header-grad)" rx="16" clip-path="inset(0 0 690 0)" opacity="0.15" />
+  <text x="475" y="45" class="title">BUDGET RESOLUTION</text>
+  <text x="475" y="70" class="subtitle">Context Budget Auto-discovery, Server Lifecycle Tuning, and Memory Sizing</text>
+
+  <!-- setup_backend Entry -->
+  <g filter="url(#shadow)">
+    <rect x="375" y="110" width="200" height="60" rx="8" fill="url(#entry-grad)" stroke="#0284c7" stroke-width="1.5" />
+    <text x="475" y="138" class="node-text">setup_backend()</text>
+    <text x="475" y="154" class="node-desc" text-anchor="middle">Server lifecycle start</text>
+  </g>
+
+  <!-- BudgetMode Decision -->
+  <polygon points="475,200 580,240 475,280 370,240" fill="url(#logic-grad)" stroke="#6d28d9" stroke-width="1.5" />
+  <text x="475" y="244" class="node-text" font-size="12">BudgetMode?</text>
+
+  <!-- ==================== PATH 1: BACKEND ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="330" width="180" height="100" rx="8" fill="url(#path-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="130" y="355" class="node-header">BACKEND</text>
+    <text x="55" y="380" class="node-desc">- Trust backend defaults</text>
+    <text x="55" y="398" class="node-desc">- No client override sent</text>
+    <text x="55" y="415" class="node-desc">- Uses model standard limit</text>
+  </g>
+
+  <!-- ==================== PATH 2: MANUAL ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="330" width="180" height="100" rx="8" fill="url(#path-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="340" y="355" class="node-header">MANUAL</text>
+    <text x="265" y="380" class="node-desc">- User-specified limit</text>
+    <text x="265" y="398" class="node-desc">- Bypasses auto-tuning</text>
+    <text x="265" y="415" class="node-desc">- Static tokens value</text>
+  </g>
+
+  <!-- ==================== PATH 3: FORGE_FULL ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="460" y="330" width="220" height="180" rx="8" fill="url(#path-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="570" y="355" class="node-header">FORGE_FULL</text>
+    <rect x="470" y="370" width="200" height="60" rx="4" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+    <text x="480" y="390" class="node-desc" font-weight="bold" fill="#818cf8">Ollama VRAM Tier Sizing:</text>
+    <text x="480" y="405" class="node-desc" fill="#cbd5e1">&lt;24GB: 4K | 24-48GB: 32K | &gt;48GB: 262K</text>
+    
+    <rect x="470" y="440" width="200" height="60" rx="4" fill="#0f172a" stroke="#1e293b" stroke-width="1" />
+    <text x="480" y="460" class="node-desc" font-weight="bold" fill="#818cf8">llama-server /props:</text>
+    <text x="480" y="475" class="node-desc" fill="#cbd5e1">Queries endpoint for native n_ctx</text>
+  </g>
+
+  <!-- ==================== PATH 4: FORGE_FAST ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="710" y="330" width="200" height="180" rx="8" fill="url(#path-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="810" y="355" class="node-header">FORGE_FAST</text>
+    <rect x="720" y="370" width="180" height="130" rx="4" fill="#431407" stroke="#9a3412" stroke-width="1" />
+    <text x="730" y="390" class="node-desc" font-weight="bold" fill="#ff7e39">Saves VRAM / Speed:</text>
+    <text x="730" y="410" class="node-desc" fill="#ffedd5">- FORGE_FULL ÷ 2</text>
+    <text x="730" y="430" class="node-desc" fill="#ffedd5">- Restarts server with</text>
+    <text x="740" y="445" class="node-desc" fill="#ffedd5">tuned n_ctx limit</text>
+    <text x="730" y="470" class="node-desc" fill="#ffedd5">- Speeds up processing</text>
+  </g>
+
+  <!-- ==================== WIRING SECTION ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="250" y="580" width="450" height="110" rx="12" fill="url(#wire-grad)" stroke="#059669" stroke-width="2" />
+    <text x="475" y="610" class="node-text">Budget Wiring to Context Manager</text>
+    <rect x="270" y="625" width="410" height="50" rx="6" fill="#022c22" fill-opacity="0.6" />
+    <text x="285" y="643" class="node-desc">- OllamaClient::set_num_ctx(resolved_budget)</text>
+    <text x="285" y="660" class="node-desc">- ContextManager::new(resolved_budget, TieredCompact::new())</text>
+  </g>
+
+  <!-- ==================== CONNECTIONS ==================== -->
+  <g>
+    <!-- Arrowhead marker definition -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead" />
+    </marker>
+
+    <!-- setup_backend -> Decision -->
+    <path d="M 475,170 L 475,200" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Decision -> Path 1 (BACKEND) -->
+    <path d="M 370,240 L 130,240 L 130,330" class="arrow" marker-end="url(#arrow)" />
+    <text x="200" y="232" class="mode-label">backend</text>
+
+    <!-- Decision -> Path 2 (MANUAL) -->
+    <path d="M 400,260 L 340,260 L 340,330" class="arrow" marker-end="url(#arrow)" />
+    <text x="320" y="280" class="mode-label">manual</text>
+
+    <!-- Decision -> Path 3 (FORGE_FULL) -->
+    <path d="M 550,260 L 570,260 L 570,330" class="arrow" marker-end="url(#arrow)" />
+    <text x="590" y="280" class="mode-label">forge-full</text>
+
+    <!-- Decision -> Path 4 (FORGE_FAST) -->
+    <path d="M 580,240 L 810,240 L 810,330" class="arrow" marker-end="url(#arrow)" />
+    <text x="730" y="232" class="mode-label">forge-fast</text>
+
+    <!-- Path 1 -> Wiring -->
+    <path d="M 130,430 L 130,540 L 475,540 L 475,580" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Path 2 -> Wiring -->
+    <path d="M 340,430 L 340,580" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Path 3 -> Wiring -->
+    <path d="M 570,510 L 570,580" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Path 4 -> Wiring -->
+    <path d="M 810,510 L 810,540 L 475,540" class="arrow" />
+  </g>
+
+</svg>

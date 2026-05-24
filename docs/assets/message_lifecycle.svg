@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 980" width="100%" height="auto">
+  <defs>
+    <!-- Drop Shadow Filter -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#020617" flood-opacity="0.5"/>
+    </filter>
+    
+    <!-- Linear Gradients -->
+    <linearGradient id="header-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <linearGradient id="part-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+
+    <linearGradient id="note-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7c2d12"/>
+      <stop offset="100%" stop-color="#9a3412"/>
+    </linearGradient>
+
+    <linearGradient id="alt-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .title { font-family: system-ui, -apple-system, sans-serif; font-size: 24px; font-weight: 800; fill: #f8fafc; text-anchor: middle; }
+    .subtitle { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; fill: #94a3b8; text-anchor: middle; }
+    .participant-text { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 700; fill: #f8fafc; text-anchor: middle; }
+    .msg-text { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; fill: #cbd5e1; }
+    .note-text { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; fill: #f8fafc; }
+    .note-bold { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; font-weight: bold; fill: #fde047; }
+    .lifeline { stroke: #334155; stroke-dasharray: 4 4; stroke-width: 2; }
+    .arrow { stroke: #818cf8; stroke-width: 1.5; fill: none; }
+    .arrow-reply { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+    .arrowhead { fill: #818cf8; }
+    .arrowhead-reply { fill: #94a3b8; }
+    .alt-box { fill: url(#alt-grad); stroke: #475569; stroke-width: 1.5; }
+    .alt-title { font-family: system-ui, -apple-system, sans-serif; font-size: 12px; font-weight: 800; fill: #f43f5e; }
+  </style>
+
+  <!-- Background Card -->
+  <rect width="900" height="980" rx="16" fill="#0b0f19" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Title Section -->
+  <rect x="0" y="0" width="900" height="90" fill="url(#header-grad)" rx="16" clip-path="inset(0 0 700 0)" opacity="0.15" />
+  <text x="450" y="45" class="title">MESSAGE LIFECYCLE</text>
+  <text x="450" y="70" class="subtitle">Creation, API Serialization, Reasoning Folding, and Compaction Flow</text>
+
+  <!-- Lifelines -->
+  <line x1="120" y1="180" x2="120" y2="940" class="lifeline" />
+  <line x1="280" y1="180" x2="280" y2="940" class="lifeline" />
+  <line x1="460" y1="180" x2="460" y2="940" class="lifeline" />
+  <line x1="640" y1="180" x2="640" y2="940" class="lifeline" />
+  <line x1="800" y1="180" x2="800" y2="940" class="lifeline" />
+
+  <!-- Arrowhead marker definitions -->
+  <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead" />
+  </marker>
+  <marker id="arrow-reply" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead-reply" />
+  </marker>
+
+  <!-- Participants -->
+  <g filter="url(#shadow)">
+    <!-- WorkflowRunner -->
+    <rect x="30" y="120" width="180" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="120" y="150" class="participant-text">WorkflowRunner</text>
+
+    <!-- Message -->
+    <rect x="200" y="120" width="160" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="280" y="150" class="participant-text">Message</text>
+
+    <!-- LLMClient -->
+    <rect x="380" y="120" width="160" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="460" y="150" class="participant-text">LLMClient</text>
+
+    <!-- LLM Backend -->
+    <rect x="560" y="120" width="160" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="640" y="150" class="participant-text">LLM Backend</text>
+
+    <!-- ContextManager -->
+    <rect x="710" y="120" width="180" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="800" y="150" class="participant-text">ContextManager</text>
+  </g>
+
+  <!-- Step 1: Create Message -->
+  <path d="M 120,210 L 280,210" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="202" class="msg-text">1. Create Message(role, content, metadata)</text>
+
+  <!-- Note: Metadata details -->
+  <g filter="url(#shadow)">
+    <rect x="200" y="235" width="160" height="65" rx="6" fill="url(#note-grad)" stroke="#ea580c" stroke-width="1.5" />
+    <text x="210" y="253" class="note-bold">Message Metadata:</text>
+    <text x="210" y="270" class="note-text">- type: MessageType</text>
+    <text x="210" y="285" class="note-text">- token_estimate: usize</text>
+  </g>
+
+  <!-- Step 2: Reasoning folding -->
+  <path d="M 120,320 C 170,320 170,350 120,350" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="315" class="msg-text">2. Reasoning Folding: Merge reasoning</text>
+  <text x="135" y="332" class="msg-text">messages into next tool call content</text>
+
+  <!-- Step 3: to_api_dict -->
+  <path d="M 120,390 L 280,390" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="382" class="msg-text">3. to_api_dict(format)</text>
+
+  <!-- Note: metadata stripped -->
+  <g filter="url(#shadow)">
+    <rect x="200" y="410" width="160" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="210" y="426" class="note-text">Strips metadata.</text>
+    <text x="210" y="440" class="note-text">format="openai" | "ollama"</text>
+  </g>
+
+  <!-- Step 4: msg to client -->
+  <path d="M 120,480 L 460,480" class="arrow" marker-end="url(#arrow)" />
+  <text x="290" y="472" class="msg-text">4. send(messages, tools)</text>
+
+  <!-- Step 5: client to backend -->
+  <path d="M 460,520 L 640,520" class="arrow" marker-end="url(#arrow)" />
+  <text x="475" y="512" class="msg-text">5. HTTP POST Request</text>
+
+  <!-- Step 6: Backend response -->
+  <path d="M 640,570 L 460,570" class="arrow-reply" marker-end="url(#arrow-reply)" />
+  <text x="475" y="562" class="msg-text" fill="#94a3b8">6. JSON Response (stream or chunk)</text>
+
+  <!-- Step 7: Parsed response -->
+  <path d="M 460,620 L 120,620" class="arrow-reply" marker-end="url(#arrow-reply)" />
+  <text x="135" y="612" class="msg-text" fill="#94a3b8">7. Return LLMResponse</text>
+
+  <!-- Step 8: Append to history -->
+  <path d="M 120,660 C 170,660 170,690 120,690" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="655" class="msg-text">8. Append assistant response to history</text>
+
+  <!-- Step 9: maybe compact -->
+  <path d="M 120,730 L 800,730" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="722" class="msg-text">9. maybe_compact(messages)</text>
+  <text x="135" y="740" class="msg-text" fill="#94a3b8">(Checks token estimate &gt; budget * 0.75)</text>
+
+  <!-- Alt block representing compaction decision -->
+  <rect x="60" y="770" width="780" height="150" rx="8" class="alt-box" />
+  <text x="75" y="792" class="alt-title">ALT: COMPACTION DECISION</text>
+  <line x1="60" y1="845" x2="840" y2="845" stroke="#475569" stroke-width="1" stroke-dasharray="4 2" />
+
+  <!-- Over threshold path -->
+  <text x="80" y="815" class="msg-text" font-weight="bold" fill="#f43f5e">[Over Threshold]</text>
+  <path d="M 800,810 L 800,830 C 800,840 780,830 780,820" class="arrow" />
+  <text x="640" y="820" class="msg-text">CompactStrategy::compact()</text>
+  <path d="M 800,835 L 120,835" class="arrow-reply" marker-end="url(#arrow-reply)" />
+  <text x="135" y="830" class="msg-text" fill="#94a3b8">Returns Compacted Messages + CompactEvent</text>
+
+  <!-- Under threshold path -->
+  <text x="80" y="875" class="msg-text" font-weight="bold" fill="#10b981">[Under Threshold]</text>
+  <path d="M 800,895 L 120,895" class="arrow-reply" marker-end="url(#arrow-reply)" />
+  <text x="135" y="890" class="msg-text" fill="#94a3b8">Returns original messages unchanged</text>
+
+  <!-- Participants at the bottom -->
+  <g filter="url(#shadow)">
+    <!-- WorkflowRunner bottom -->
+    <rect x="30" y="940" width="180" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="120" y="957" class="participant-text" font-size="11">WorkflowRunner</text>
+
+    <!-- Message bottom -->
+    <rect x="200" y="940" width="160" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="280" y="957" class="participant-text" font-size="11">Message</text>
+
+    <!-- LLMClient bottom -->
+    <rect x="380" y="940" width="160" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="460" y="957" class="participant-text" font-size="11">LLMClient</text>
+
+    <!-- LLM Backend bottom -->
+    <rect x="560" y="940" width="160" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="640" y="957" class="participant-text" font-size="11">LLM Backend</text>
+
+    <!-- ContextManager bottom -->
+    <rect x="710" y="940" width="180" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="800" y="957" class="participant-text" font-size="11">ContextManager</text>
+  </g>
+
+</svg>

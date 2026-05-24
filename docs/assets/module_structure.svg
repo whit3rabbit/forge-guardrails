@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 950" width="100%" height="auto">
+  <defs>
+    <!-- Drop Shadow Filter -->
+    <filter id="shadow" x="-3%" y="-3%" width="106%" height="106%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#020617" flood-opacity="0.4"/>
+    </filter>
+    
+    <!-- Linear Gradients -->
+    <linearGradient id="header-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <linearGradient id="core-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#312e81"/>
+    </linearGradient>
+
+    <linearGradient id="sub-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+
+    <linearGradient id="down-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0369a1"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+
+    <linearGradient id="bin-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .title { font-family: system-ui, -apple-system, sans-serif; font-size: 24px; font-weight: 800; fill: #f8fafc; text-anchor: middle; }
+    .subtitle { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; fill: #94a3b8; text-anchor: middle; }
+    .group-title { font-family: system-ui, -apple-system, sans-serif; font-size: 14px; font-weight: 800; fill: #818cf8; }
+    .group-bg { fill: #090d16; stroke: #1e293b; stroke-width: 2; }
+    .node-title { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 700; fill: #f8fafc; }
+    .node-text { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; fill: #cbd5e1; }
+    .arrow { stroke: #475569; stroke-width: 1.5; fill: none; }
+    .arrowhead { fill: #475569; }
+  </style>
+
+  <!-- Background Card -->
+  <rect width="1000" height="950" rx="16" fill="#0b0f19" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Title Section -->
+  <rect x="0" y="0" width="1000" height="90" fill="url(#header-grad)" rx="16" clip-path="inset(0 0 860 0)" opacity="0.15" />
+  <text x="500" y="45" class="title">MODULE STRUCTURE</text>
+  <text x="500" y="70" class="subtitle">Rust Crate Organization, Module Hierarchy, and Code Dependencies</text>
+
+  <!-- ==================== DOWNSTREAM PROJECT ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="375" y="110" width="250" height="60" rx="8" fill="url(#down-grad)" stroke="#0284c7" stroke-width="1.5" />
+    <text x="500" y="135" class="node-title" text-anchor="middle">Downstream Project</text>
+    <text x="500" y="152" class="node-text" text-anchor="middle">Defines tools, prompts, workflows &amp; loops</text>
+  </g>
+
+  <!-- src/ Boundary Box -->
+  <rect x="30" y="190" width="940" height="470" rx="12" class="group-bg" />
+  <text x="50" y="215" class="group-title">crate forge_guardrails (src/)</text>
+
+  <!-- src/core/ -->
+  <g filter="url(#shadow)">
+    <rect x="350" y="230" width="300" height="170" rx="8" fill="url(#core-grad)" stroke="#4f46e5" stroke-width="1.5" />
+    <text x="365" y="255" class="node-title">src/core/</text>
+    <text x="365" y="280" class="node-text">- runner.rs (WorkflowRunner engine)</text>
+    <text x="365" y="298" class="node-text">- inference.rs (run_inference front-half)</text>
+    <text x="365" y="316" class="node-text">- workflow.rs (Workflow, ToolSpec, ToolCall)</text>
+    <text x="365" y="334" class="node-text">- message.rs (Message, MessageType, Meta)</text>
+    <text x="365" y="352" class="node-text">- steps.rs (StepTracker state)</text>
+    <text x="365" y="370" class="node-text">- slot_worker.rs (Concurrency slots)</text>
+  </g>
+
+  <!-- src/guardrails/ -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="230" width="270" height="130" rx="8" fill="url(#sub-grad)" stroke="#475569" stroke-width="1.2" />
+    <text x="65" y="255" class="node-title">src/guardrails/</text>
+    <text x="65" y="280" class="node-text">- guardrails.rs (Middleware orchestrator)</text>
+    <text x="65" y="298" class="node-text">- response_validator.rs (Rescue / retry)</text>
+    <text x="65" y="316" class="node-text">- step_enforcer.rs (Sequence check)</text>
+    <text x="65" y="334" class="node-text">- error_tracker.rs (Consecutive errors)</text>
+  </g>
+
+  <!-- src/context/ -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="380" width="270" height="110" rx="8" fill="url(#sub-grad)" stroke="#475569" stroke-width="1.2" />
+    <text x="65" y="405" class="node-title">src/context/</text>
+    <text x="65" y="430" class="node-text">- manager.rs (ContextManager token tracker)</text>
+    <text x="65" y="448" class="node-text">- strategies.rs (TieredCompact, Sliding)</text>
+    <text x="65" y="466" class="node-text">- hardware.rs (Auto-discovery profiling)</text>
+  </g>
+
+  <!-- src/clients/ -->
+  <g filter="url(#shadow)">
+    <rect x="350" y="430" width="300" height="140" rx="8" fill="url(#sub-grad)" stroke="#475569" stroke-width="1.2" />
+    <text x="365" y="455" class="node-title">src/clients/</text>
+    <text x="365" y="480" class="node-text">- base.rs (LLMClient, Streaming types)</text>
+    <text x="365" y="498" class="node-text">- ollama/ (OllamaClient &amp; requests)</text>
+    <text x="365" y="516" class="node-text">- llamafile/ (LlamafileClient &amp; requests)</text>
+    <text x="365" y="534" class="node-text">- anthropic/ (AnthropicClient converter)</text>
+    <text x="365" y="552" class="node-text">- anyllm_proxy.rs (Sidecar &amp; runtime client)</text>
+  </g>
+
+  <!-- src/prompts/ -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="230" width="270" height="110" rx="8" fill="url(#sub-grad)" stroke="#475569" stroke-width="1.2" />
+    <text x="695" y="255" class="node-title">src/prompts/</text>
+    <text x="695" y="280" class="node-text">- mod.rs (build_tool_prompt injection)</text>
+    <text x="695" y="298" class="node-text">- nudges.rs (Step, retry &amp; prereq templates)</text>
+    <text x="695" y="316" class="node-text">- parse_strategies.rs (Rescue regexes)</text>
+  </g>
+
+  <!-- src/server/ -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="360" width="270" height="110" rx="8" fill="url(#sub-grad)" stroke="#475569" stroke-width="1.2" />
+    <text x="695" y="385" class="node-title">src/server/</text>
+    <text x="695" y="410" class="node-text">- manager.rs (ServerManager lifecycle)</text>
+    <text x="695" y="428" class="node-text">- budget.rs (BudgetMode resolution)</text>
+    <text x="695" y="446" class="node-text">- setup.rs (In-process backend wiring)</text>
+  </g>
+
+  <!-- src/proxy/ & src/tools/ & errors -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="490" width="270" height="130" rx="8" fill="url(#sub-grad)" stroke="#475569" stroke-width="1.2" />
+    <text x="695" y="515" class="node-title">src/proxy/ , src/tools/ , errors</text>
+    <text x="695" y="540" class="node-text">- proxy/ (Axum OpenAI-compatible gateway)</text>
+    <text x="695" y="558" class="node-text">- tools/respond.rs (Terminal synthetic respond)</text>
+    <text x="695" y="576" class="node-text">- error.rs (ForgeError standard hierarchy)</text>
+    <text x="695" y="594" class="node-text">- lib.rs (Clean re-exports &amp; modules)</text>
+  </g>
+
+  <!-- ==================== BINARIES / EVALS ==================== -->
+  <!-- src/bin/forge-eval -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="680" width="420" height="230" rx="10" fill="url(#bin-grad)" stroke="#1e293b" stroke-width="1.5" />
+    <text x="70" y="710" class="node-title" fill="#818cf8">src/bin/forge-eval/ (Eval Smoke Runner)</text>
+    <rect x="65" y="730" width="390" height="160" rx="6" fill="#0f172a" fill-opacity="0.8" />
+    <text x="80" y="755" class="node-text" font-weight="bold" fill="#38bdf8">Internal Modules:</text>
+    <text x="80" y="775" class="node-text">- main.rs / cli.rs (Command parsing &amp; configs)</text>
+    <text x="80" y="793" class="node-text">- runner.rs (Scenario iteration runner)</text>
+    <text x="80" y="811" class="node-text">- scenarios.rs (Pre-coded test scenarios: 2step, recovery...)</text>
+    <text x="80" y="829" class="node-text">- report.rs (Emits clean eval summary JSONL)</text>
+    <text x="80" y="847" class="node-text">- startup.rs (Resolves ports and starts proxy)</text>
+    <text x="80" y="865" class="node-text">- ablation.rs (Configures guardrail settings per run)</text>
+  </g>
+
+  <!-- src/bin/forge-guardrails-proxy -->
+  <g filter="url(#shadow)">
+    <rect x="530" y="680" width="420" height="230" rx="10" fill="url(#bin-grad)" stroke="#1e293b" stroke-width="1.5" />
+    <text x="550" y="710" class="node-title" fill="#818cf8">src/bin/forge-guardrails-proxy/ (Proxy server)</text>
+    <rect x="545" y="730" width="390" height="160" rx="6" fill="#0f172a" fill-opacity="0.8" />
+    <text x="560" y="755" class="node-text" font-weight="bold" fill="#38bdf8">Internal Modules:</text>
+    <text x="560" y="775" class="node-text">- main.rs / cli.rs (Proxy daemon configuration)</text>
+    <text x="560" y="793" class="node-text">- startup.rs (HTTP server bootstrapper &amp; router)</text>
+    <text x="560" y="811" class="node-text">- routes.rs (Axum HTTP endpoints routing)</text>
+    <text x="560" y="829" class="node-text">- config.rs (JSON/YAML environment config parser)</text>
+    <text x="560" y="847" class="node-text">- upstream.rs (Resolves target LLM provider routing)</text>
+    <text x="560" y="865" class="node-text">- client.rs (Internal sidecar http client handler)</text>
+  </g>
+
+  <!-- ==================== CONNECTIONS ==================== -->
+  <g>
+    <!-- Arrowhead marker definition -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead" />
+    </marker>
+
+    <!-- Downstream -> Core -->
+    <path d="M 500,170 L 500,230" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Core -> Guardrails -->
+    <path d="M 350,300 L 320,300" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Core -> Clients -->
+    <path d="M 500,400 L 500,430" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Core -> Prompts -->
+    <path d="M 650,285 L 680,285" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Guardrails -> Context -->
+    <path d="M 185,360 L 185,380" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Server -> Context -->
+    <path d="M 680,415 L 320,415" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Eval runner -> Core & Startup -->
+    <path d="M 260,680 L 260,640" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Proxy binary -> core proxy handler -->
+    <path d="M 740,680 L 740,620" class="arrow" marker-end="url(#arrow)" />
+  </g>
+
+</svg>

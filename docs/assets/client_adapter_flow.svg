@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 580" width="100%" height="auto">
+  <defs>
+    <!-- Drop Shadow Filter -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#020617" flood-opacity="0.5"/>
+    </filter>
+    
+    <!-- Linear Gradients -->
+    <linearGradient id="header-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <linearGradient id="client-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#312e81"/>
+    </linearGradient>
+
+    <linearGradient id="back-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+
+    <linearGradient id="runner-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0369a1"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .title { font-family: system-ui, -apple-system, sans-serif; font-size: 24px; font-weight: 800; fill: #f8fafc; text-anchor: middle; }
+    .subtitle { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; fill: #94a3b8; text-anchor: middle; }
+    .header-text { font-family: system-ui, -apple-system, sans-serif; font-size: 15px; font-weight: 800; fill: #f8fafc; text-anchor: middle; }
+    .node-text { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 700; fill: #f8fafc; }
+    .node-desc { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; fill: #cbd5e1; }
+    .node-title-sub { font-family: system-ui, -apple-system, sans-serif; font-size: 10px; font-weight: bold; fill: #a5b4fc; }
+    .arrow { stroke: #475569; stroke-width: 2; fill: none; }
+    .arrowhead { fill: #475569; }
+    .group-border { stroke: #1e293b; stroke-width: 1.5; fill: none; stroke-dasharray: 4,4; }
+  </style>
+
+  <!-- Background Card -->
+  <rect width="950" height="580" rx="16" fill="#0b0f19" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Title Section -->
+  <rect x="0" y="0" width="950" height="90" fill="url(#header-grad)" rx="16" clip-path="inset(0 0 490 0)" opacity="0.15" />
+  <text x="475" y="45" class="title">CLIENT ADAPTER FLOW</text>
+  <text x="475" y="70" class="subtitle">How the LLMClient Trait Abstracts Backends and Resolves Wire Parity</text>
+
+  <!-- Column Headers -->
+  <text x="140" y="125" class="header-text" fill="#0284c7">1. Request Origin</text>
+  <text x="450" y="125" class="header-text" fill="#818cf8">2. LLMClient Adapters</text>
+  <text x="780" y="125" class="header-text" fill="#94a3b8">3. Upstream Services</text>
+
+  <!-- ==================== WORKFLOW RUNNER ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="150" width="200" height="350" rx="12" fill="url(#runner-grad)" stroke="#0284c7" stroke-width="2"/>
+    <text x="140" y="180" class="header-text">WorkflowRunner</text>
+    <rect x="55" y="210" width="170" height="260" rx="6" fill="#0c4a6e" fill-opacity="0.6" />
+    <text x="70" y="240" class="node-desc" font-weight="bold" fill="#38bdf8">Methods Called:</text>
+    <text x="70" y="270" class="node-desc">1. send()</text>
+    <text x="85" y="290" class="node-desc" fill="#e0f2fe">- Non-streaming response</text>
+    <text x="70" y="320" class="node-desc">2. send_stream()</text>
+    <text x="85" y="340" class="node-desc" fill="#e0f2fe">- Yields ChunkStream</text>
+    <text x="70" y="375" class="node-desc">3. get_context_length()</text>
+    <text x="85" y="395" class="node-desc" fill="#e0f2fe">- For budget resolution</text>
+    <text x="70" y="430" class="node-desc">4. last_call_info()</text>
+    <text x="85" y="450" class="node-desc" fill="#e0f2fe">- Provider metadata</text>
+  </g>
+
+  <!-- ==================== CLIENT ADAPTERS ==================== -->
+  <!-- OllamaClient -->
+  <g filter="url(#shadow)">
+    <rect x="310" y="150" width="280" height="85" rx="8" fill="url(#client-grad)" stroke="#4f46e5" stroke-width="1.5" />
+    <text x="325" y="172" class="node-text">OllamaClient</text>
+    <text x="500" y="171" class="node-title-sub">API FORMAT: "ollama"</text>
+    <text x="325" y="195" class="node-desc">- Native function-calling via /api/chat</text>
+    <text x="325" y="212" class="node-desc">- Sets num_ctx dynamically per request</text>
+  </g>
+
+  <!-- LlamafileClient -->
+  <g filter="url(#shadow)">
+    <rect x="310" y="250" width="280" height="110" rx="8" fill="url(#client-grad)" stroke="#4f46e5" stroke-width="1.5" />
+    <text x="325" y="272" class="node-text">LlamafileClient</text>
+    <text x="500" y="271" class="node-title-sub">API FORMAT: "openai"</text>
+    <text x="325" y="295" class="node-desc">- Native FC (--jinja template required)</text>
+    <text x="325" y="312" class="node-desc">- Prompt FC (prompt-injected JSON rescue)</text>
+    <text x="325" y="329" class="node-desc">- Downgrades consecutive user/system calls</text>
+  </g>
+
+  <!-- AnthropicClient -->
+  <g filter="url(#shadow)">
+    <rect x="310" y="375" width="280" height="85" rx="8" fill="url(#client-grad)" stroke="#4f46e5" stroke-width="1.5" />
+    <text x="325" y="397" class="node-text">AnthropicClient</text>
+    <text x="500" y="396" class="node-title-sub">API FORMAT: "openai"</text>
+    <text x="325" y="420" class="node-desc">- Converts OpenAI format to Anthropic messages</text>
+    <text x="325" y="437" class="node-desc">- Uses anyllm_translate translation layers</text>
+  </g>
+
+  <!-- AnyLlmProxyClient / AnyLlmRuntimeClient -->
+  <g filter="url(#shadow)">
+    <rect x="310" y="475" width="280" height="75" rx="8" fill="url(#client-grad)" stroke="#4f46e5" stroke-width="1.5" />
+    <text x="325" y="495" class="node-text">AnyLlm Clients</text>
+    <text x="500" y="494" class="node-title-sub">API FORMAT: "anyllm"</text>
+    <text x="325" y="515" class="node-desc">- Proxy: connects to sidecar server</text>
+    <text x="325" y="530" class="node-desc">- Runtime: direct in-process service routing</text>
+  </g>
+
+  <!-- ==================== BACKENDS ==================== -->
+  <!-- Ollama Backend -->
+  <g filter="url(#shadow)">
+    <rect x="660" y="157" width="240" height="70" rx="8" fill="url(#back-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="675" y="182" class="node-text">Ollama Service</text>
+    <text x="675" y="202" class="node-desc">localhost:11434 (REST API)</text>
+  </g>
+
+  <!-- llama-server Backend -->
+  <g filter="url(#shadow)">
+    <rect x="660" y="270" width="240" height="70" rx="8" fill="url(#back-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="675" y="295" class="node-text">llamafile / llama-server</text>
+    <text x="675" y="315" class="node-desc">localhost:8080 (OpenAI endpoint)</text>
+  </g>
+
+  <!-- Anthropic Backend -->
+  <g filter="url(#shadow)">
+    <rect x="660" y="382" width="240" height="70" rx="8" fill="url(#back-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="675" y="407" class="node-text">Anthropic API</text>
+    <text x="675" y="427" class="node-desc">api.anthropic.com (HTTP / Messages)</text>
+  </g>
+
+  <!-- AnyLLM Backend -->
+  <g filter="url(#shadow)">
+    <rect x="660" y="477" width="240" height="70" rx="8" fill="url(#back-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="675" y="502" class="node-text">AnyLLM Sidecar / Router</text>
+    <text x="675" y="522" class="node-desc">Provider router &amp; translation service</text>
+  </g>
+
+  <!-- ==================== CONNECTIONS ==================== -->
+  <g>
+    <!-- Arrowhead marker definition -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead" />
+    </marker>
+
+    <!-- Runner -> Clients -->
+    <path d="M 240,192 L 310,192" class="arrow" marker-end="url(#arrow)" />
+    <path d="M 240,305 L 310,305" class="arrow" marker-end="url(#arrow)" />
+    <path d="M 240,417 L 310,417" class="arrow" marker-end="url(#arrow)" />
+    <path d="M 240,512 L 310,512" class="arrow" marker-end="url(#arrow)" />
+
+    <!-- Clients -> Backends -->
+    <path d="M 590,192 L 660,192" class="arrow" marker-end="url(#arrow)" />
+    <path d="M 590,305 L 660,305" class="arrow" marker-end="url(#arrow)" />
+    <path d="M 590,417 L 660,417" class="arrow" marker-end="url(#arrow)" />
+    <path d="M 590,512 L 660,512" class="arrow" marker-end="url(#arrow)" />
+  </g>
+
+</svg>

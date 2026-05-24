@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 960" width="100%" height="auto">
+  <defs>
+    <!-- Drop Shadow Filter -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#020617" flood-opacity="0.5"/>
+    </filter>
+    
+    <!-- Linear Gradients -->
+    <linearGradient id="header-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+
+    <linearGradient id="part-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#334155"/>
+    </linearGradient>
+
+    <linearGradient id="alt-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .title { font-family: system-ui, -apple-system, sans-serif; font-size: 24px; font-weight: 800; fill: #f8fafc; text-anchor: middle; }
+    .subtitle { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; fill: #94a3b8; text-anchor: middle; }
+    .participant-text { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 700; fill: #f8fafc; text-anchor: middle; }
+    .msg-text { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; fill: #cbd5e1; }
+    .lifeline { stroke: #334155; stroke-dasharray: 4 4; stroke-width: 2; }
+    .arrow { stroke: #818cf8; stroke-width: 1.5; fill: none; }
+    .arrow-reply { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+    .arrowhead { fill: #818cf8; }
+    .arrowhead-reply { fill: #94a3b8; }
+    .loop-box { fill: none; stroke: #818cf8; stroke-width: 1.5; stroke-dasharray: 8 4; }
+    .loop-title { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; font-weight: 800; fill: #818cf8; }
+    .alt-box { fill: url(#alt-grad); stroke: #e11d48; stroke-width: 1.5; }
+    .alt-title { font-family: system-ui, -apple-system, sans-serif; font-size: 12px; font-weight: 800; fill: #e11d48; }
+  </style>
+
+  <!-- Background Card -->
+  <rect width="900" height="960" rx="16" fill="#0b0f19" stroke="#1e293b" stroke-width="2"/>
+
+  <!-- Title Section -->
+  <rect x="0" y="0" width="900" height="90" fill="url(#header-grad)" rx="16" clip-path="inset(0 0 680 0)" opacity="0.15" />
+  <text x="450" y="45" class="title">STREAMING FLOW</text>
+  <text x="450" y="70" class="subtitle">Asynchronous Token Streaming, Dynamic Parsing, and Stream Recovery</text>
+
+  <!-- Lifelines -->
+  <line x1="120" y1="180" x2="120" y2="920" class="lifeline" />
+  <line x1="360" y1="180" x2="360" y2="920" class="lifeline" />
+  <line x1="600" y1="180" x2="600" y2="920" class="lifeline" />
+  <line x1="800" y1="180" x2="800" y2="920" class="lifeline" />
+
+  <!-- Arrowhead marker definitions -->
+  <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead" />
+  </marker>
+  <marker id="arrow-reply" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M 0 1.5 L 8 5 L 0 8.5 z" class="arrowhead-reply" />
+  </marker>
+
+  <!-- Participants -->
+  <g filter="url(#shadow)">
+    <!-- WorkflowRunner -->
+    <rect x="30" y="120" width="180" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="120" y="150" class="participant-text">WorkflowRunner</text>
+
+    <!-- LLMClient -->
+    <rect x="280" y="120" width="160" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="360" y="150" class="participant-text">LLMClient</text>
+
+    <!-- Backend -->
+    <rect x="520" y="120" width="160" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="600" y="150" class="participant-text">Backend (SSE)</text>
+
+    <!-- on_chunk -->
+    <rect x="710" y="120" width="160" height="50" rx="8" fill="url(#part-grad)" stroke="#475569" stroke-width="1.5" />
+    <text x="790" y="150" class="participant-text">on_chunk callback</text>
+  </g>
+
+  <!-- Step 1: send_stream -->
+  <path d="M 120,200 L 360,200" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="192" class="msg-text">1. send_stream(messages, tools)</text>
+
+  <!-- Step 2: HTTP stream req -->
+  <path d="M 360,240 L 600,240" class="arrow" marker-end="url(#arrow)" />
+  <text x="375" y="232" class="msg-text">2. HTTP POST Request (stream=true)</text>
+
+  <!-- Loop Block for SSE chunks -->
+  <rect x="60" y="270" width="780" height="290" rx="8" class="loop-box" />
+  <text x="75" y="292" class="loop-title">LOOP: For each SSE chunk</text>
+
+  <!-- Loop Step 3a: SSE chunk payload -->
+  <path d="M 600,320 L 360,320" class="arrow-reply" marker-end="url(#arrow-reply)" />
+  <text x="375" y="312" class="msg-text" fill="#94a3b8">3a. SSE Stream chunk: data: {...}</text>
+
+  <!-- Loop Step 3b: client parses chunk -->
+  <path d="M 360,360 C 410,360 410,390 360,390" class="arrow" marker-end="url(#arrow)" />
+  <text x="375" y="355" class="msg-text">3b. Parse chunk type &amp; text</text>
+
+  <!-- Loop Step 3c: yield StreamChunk -->
+  <path d="M 360,430 L 120,430" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="422" class="msg-text">3c. Yield StreamChunk(TEXT_DELTA, "partial...")</text>
+
+  <!-- Loop Step 3d: on_chunk callback call -->
+  <path d="M 120,480 L 800,480" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="472" class="msg-text">3d. Trigger on_chunk(delta)</text>
+  <text x="135" y="490" class="msg-text" fill="#94a3b8">User UI renders text delta dynamically</text>
+
+  <!-- Step 4: Assemble response -->
+  <path d="M 360,590 C 410,590 410,620 360,620" class="arrow" marker-end="url(#arrow)" />
+  <text x="375" y="585" class="msg-text">4. Assemble final tool calls / text</text>
+
+  <!-- Step 5: yield final chunk -->
+  <path d="M 360,650 L 120,650" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="642" class="msg-text">5. Yield StreamChunk(FINAL, response)</text>
+
+  <!-- Alt block representing malformed stream recovery -->
+  <rect x="60" y="690" width="780" height="210" rx="8" class="alt-box" />
+  <text x="75" y="712" class="alt-title">ALT: STREAM EXCEPTION / MALFORMED JSON</text>
+
+  <!-- Action: stream_retries++ -->
+  <path d="M 360,750 C 410,750 410,775 360,775" class="arrow" marker-end="url(#arrow)" />
+  <text x="375" y="745" class="msg-text">Internal retry (stream_retries++)</text>
+
+  <!-- Action: send retry chunk -->
+  <path d="M 360,810 L 120,810" class="arrow" marker-end="url(#arrow)" />
+  <text x="135" y="802" class="msg-text">Yield StreamChunk(RETRY)</text>
+  <text x="135" y="820" class="msg-text" fill="#fda4af">(on_chunk callback should discard partial state)</text>
+
+  <!-- Action: resend HTTP request -->
+  <path d="M 360,860 L 600,860" class="arrow" marker-end="url(#arrow)" />
+  <text x="375" y="852" class="msg-text">Re-send Request to Backend (restart stream)</text>
+
+  <!-- Participants at the bottom -->
+  <g filter="url(#shadow)">
+    <!-- WorkflowRunner bottom -->
+    <rect x="30" y="920" width="180" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="120" y="937" class="participant-text" font-size="11">WorkflowRunner</text>
+
+    <!-- LLMClient bottom -->
+    <rect x="280" y="920" width="160" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="360" y="937" class="participant-text" font-size="11">LLMClient</text>
+
+    <!-- Backend bottom -->
+    <rect x="520" y="920" width="160" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="600" y="937" class="participant-text" font-size="11">Backend (SSE)</text>
+
+    <!-- on_chunk bottom -->
+    <rect x="710" y="920" width="160" height="25" rx="4" fill="url(#part-grad)" stroke="#475569" stroke-width="1" />
+    <text x="790" y="937" class="participant-text" font-size="11">on_chunk callback</text>
+  </g>
+
+</svg>

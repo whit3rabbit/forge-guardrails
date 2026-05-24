@@ -27,13 +27,7 @@ Supports Ollama, llama-server (llama.cpp), Llamafile, Anthropic, and anyllm-rout
 
 ## Provenance
 
-This repository was produced as a clean-room migration of the original Python Forge project into Rust, then brought to full behavioral parity with that reference implementation.
-
 - Original project: [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge)
-- Clean-room workflow: [`whit3rabbit/clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill)
-- Full audit and parity review: [`docs/CLEANROOM.md`](docs/CLEANROOM.md)
-
-This repository is not affiliated with, endorsed by, or maintained by the original Forge author unless stated elsewhere. Keep attribution to the original project and preserve license notices when redistributing.
 
 ## Requirements
 
