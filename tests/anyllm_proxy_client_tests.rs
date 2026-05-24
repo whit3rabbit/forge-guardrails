@@ -622,7 +622,7 @@ async fn anyllm_runtime_client_routes_model_and_handler_emits_tool_call() {
             assert_eq!(calls[0]["function"]["name"], "search");
             assert_eq!(value["choices"][0]["finish_reason"], "tool_calls");
         }
-        HandlerResult::Events(_) => panic!("expected non-streaming response"),
+        HandlerResult::StreamBody(_) => panic!("expected non-streaming response"),
     }
 
     assert_eq!(client.last_usage().unwrap().total_tokens, 9);

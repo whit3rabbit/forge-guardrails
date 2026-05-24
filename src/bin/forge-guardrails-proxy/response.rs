@@ -1,6 +1,10 @@
+use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use forge_guardrails::HTTPServer;
+use forge_guardrails::{HTTPServer, OpenAiEventStream};
+use futures_util::StreamExt;
+use std::io;
+use tokio::sync::OwnedMutexGuard;
 
 pub(crate) fn build_response(status: u16, content_type: &str, body: String) -> Response {
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -18,6 +22,50 @@ pub(crate) fn build_response(status: u16, content_type: &str, body: String) -> R
         }
     }
     response
+}
+
+pub(crate) fn build_openai_sse_response(
+    events: OpenAiEventStream,
+    guard: Option<OwnedMutexGuard<()>>,
+) -> Response {
+    let mut response = (
+        StatusCode::OK,
+        Body::from_stream(openai_sse_bytes_stream(events, guard)),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    insert_cors_headers(response.headers_mut());
+    response
+}
+
+fn insert_cors_headers(headers: &mut axum::http::HeaderMap) {
+    for (name, value) in HTTPServer::cors_headers() {
+        if let Some(header_name) = cors_header_name(name) {
+            headers.insert(header_name, HeaderValue::from_static(value));
+        }
+    }
+}
+
+fn openai_sse_bytes_stream(
+    mut events: OpenAiEventStream,
+    guard: Option<OwnedMutexGuard<()>>,
+) -> impl futures_core::Stream<Item = Result<Bytes, io::Error>> + Send + 'static {
+    async_stream::stream! {
+        let _guard = guard;
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(value) => yield Ok(Bytes::from(format!("data: {}\n\n", value))),
+                Err(err) => {
+                    yield Err(io::Error::other(err.to_string()));
+                    return;
+                }
+            }
+        }
+        yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+    }
 }
 
 fn cors_header_name(name: &str) -> Option<HeaderName> {

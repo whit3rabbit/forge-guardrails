@@ -1,9 +1,16 @@
 //! HTTP response and SSE formatting helpers for the proxy surface.
 
 use anyllm_translate::anthropic::streaming::StreamEvent;
+use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use serde_json::Value;
+use std::io;
+use tokio::sync::OwnedMutexGuard;
+
+use crate::error::StreamError;
 
 const CORS_HEADERS: [(&str, &str); 3] = [
     ("Access-Control-Allow-Origin", "*"),
@@ -28,6 +35,27 @@ pub(crate) fn build_response(status: u16, ct: &str, body: String) -> Response {
             resp.headers_mut().insert(header::CONTENT_TYPE, value);
         }
     }
+    insert_cors_headers(resp.headers_mut());
+    resp
+}
+
+/// Build a live OpenAI SSE response from JSON chunk events.
+pub(crate) fn build_openai_sse_response<S>(
+    events: S,
+    guard: Option<OwnedMutexGuard<()>>,
+) -> Response
+where
+    S: Stream<Item = Result<Value, StreamError>> + Send + 'static,
+{
+    let mut resp = (
+        StatusCode::OK,
+        Body::from_stream(openai_sse_bytes_stream(events, guard)),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
     insert_cors_headers(resp.headers_mut());
     resp
 }
@@ -70,6 +98,44 @@ pub fn format_sse_body(events: &[Value]) -> String {
     }
     body.push_str("data: [DONE]\n\n");
     body
+}
+
+pub(crate) async fn collect_openai_sse_body<S>(events: S) -> Result<String, StreamError>
+where
+    S: Stream<Item = Result<Value, StreamError>>,
+{
+    let mut events = Box::pin(events);
+    let mut body = String::new();
+    while let Some(event) = events.next().await {
+        body.push_str(&format!("data: {}\n\n", event?));
+    }
+    body.push_str("data: [DONE]\n\n");
+    Ok(body)
+}
+
+pub(crate) fn openai_sse_bytes_stream<S>(
+    events: S,
+    guard: Option<OwnedMutexGuard<()>>,
+) -> impl Stream<Item = Result<Bytes, io::Error>> + Send + 'static
+where
+    S: Stream<Item = Result<Value, StreamError>> + Send + 'static,
+{
+    async_stream::stream! {
+        let _guard = guard;
+        let mut events = Box::pin(events);
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(value) => {
+                    yield Ok(Bytes::from(format!("data: {}\n\n", value)));
+                }
+                Err(err) => {
+                    yield Err(io::Error::other(err.to_string()));
+                    return;
+                }
+            }
+        }
+        yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+    }
 }
 
 /// Format Anthropic SSE events with named event fields.

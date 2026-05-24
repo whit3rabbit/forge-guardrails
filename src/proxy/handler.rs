@@ -5,30 +5,45 @@
 //! then strips respond() calls from output.
 
 use crate::clients::base::{
-    LLMClient, LLMRequestOptions, LLMResponse, TextResponse, TokenUsage, ToolCall,
+    ChunkType, LLMClient, LLMRequestOptions, LLMResponse, TextResponse, TokenUsage, ToolCall,
 };
 use crate::context::manager::ContextManager;
 use crate::core::tool_spec::ToolSpec;
+use crate::error::StreamError;
 use crate::proxy::{
     extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,
     respond_tool_openai, strip_respond_calls, text_response_to_openai_with_usage,
-    text_to_sse_events_with_usage, tool_calls_to_openai_with_usage,
-    tool_calls_to_sse_events_with_usage,
+    tool_calls_to_openai_with_usage,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 use anyllm_translate::anthropic::streaming::StreamEvent;
 use anyllm_translate::anthropic::MessageCreateRequest;
+use futures_core::Stream;
+use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Stream of OpenAI chat completion chunk objects.
+pub type OpenAiEventStream = Pin<Box<dyn Stream<Item = Result<Value, StreamError>> + Send>>;
+
 /// Result of handling a chat completion request.
-#[derive(Debug)]
 pub enum HandlerResult {
     /// Non-streaming: single OpenAI response object.
     Response(Value),
-    /// Streaming: list of SSE event objects.
-    Events(Vec<Value>),
+    /// Streaming: OpenAI response chunk objects.
+    StreamBody(OpenAiEventStream),
+}
+
+impl fmt::Debug for HandlerResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Response(value) => f.debug_tuple("Response").field(value).finish(),
+            Self::StreamBody(_) => f.write_str("StreamBody(<openai event stream>)"),
+        }
+    }
 }
 
 /// Result of handling an Anthropic Messages API request.
@@ -65,7 +80,7 @@ impl AnthropicHandlerError {
 /// Handle /v1/messages by translating Anthropic input through the guarded
 /// OpenAI-compatible handler, then translating the response back to Anthropic.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle_anthropic_messages<C: LLMClient>(
+pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
     body: &MessageCreateRequest,
     raw_body: &Value,
     client: &Arc<C>,
@@ -105,9 +120,12 @@ pub async fn handle_anthropic_messages<C: LLMClient>(
                 .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
             Ok(AnthropicHandlerResult::Response(value))
         }
-        HandlerResult::Events(openai_events) => {
+        HandlerResult::StreamBody(openai_events) => {
             let mut translator = anyllm_translate::new_stream_translator(body.model.clone());
             let mut events = Vec::new();
+            let openai_events = collect_openai_events(openai_events)
+                .await
+                .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
             for event in openai_events {
                 let chunk: anyllm_translate::openai::ChatCompletionChunk =
                     serde_json::from_value(event)
@@ -129,7 +147,7 @@ pub async fn handle_anthropic_messages<C: LLMClient>(
 /// Sampling fields are extracted per-request and passed as a dict (or None);
 /// they never persist on the client between calls.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle_chat_completions<C: LLMClient>(
+pub async fn handle_chat_completions<C: LLMClient + 'static>(
     body: &Value,
     client: &Arc<C>,
     context_manager: &Arc<Mutex<ContextManager>>,
@@ -148,7 +166,7 @@ pub async fn handle_chat_completions<C: LLMClient>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_chat_completions_impl<C: LLMClient>(
+async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     body: &Value,
     client: &Arc<C>,
     context_manager: &Arc<Mutex<ContextManager>>,
@@ -231,7 +249,7 @@ async fn handle_chat_completions_impl<C: LLMClient>(
         0,                     // step_index
         "",                    // step_hint
         Some(max_retries + 1), // max_attempts
-        false,                 // stream is false during inference, matching Python
+        stream,
         None,
         request_options,
     )
@@ -278,7 +296,7 @@ async fn handle_chat_completions_impl<C: LLMClient>(
 }
 
 /// Helper to forward requests to LLM Client without tools or guardrails (passthrough).
-pub async fn run_passthrough<C: LLMClient>(
+pub async fn run_passthrough<C: LLMClient + 'static>(
     client: &Arc<C>,
     serialized: &[Value],
     _tools: Option<Vec<ToolSpec>>,
@@ -286,6 +304,10 @@ pub async fn run_passthrough<C: LLMClient>(
     model_name: &str,
     stream: bool,
 ) -> Result<HandlerResult, String> {
+    if stream {
+        return run_passthrough_stream(client, serialized, options, model_name).await;
+    }
+
     let response = client
         .send_with_options(serialized.to_vec(), None, options)
         .await
@@ -306,6 +328,80 @@ pub async fn run_passthrough<C: LLMClient>(
     }
 }
 
+async fn run_passthrough_stream<C: LLMClient + 'static>(
+    client: &Arc<C>,
+    serialized: &[Value],
+    options: LLMRequestOptions,
+    model_name: &str,
+) -> Result<HandlerResult, String> {
+    let mut backend_stream = client
+        .send_stream_with_options(serialized.to_vec(), None, options)
+        .await
+        .map_err(|e| e.to_string())?;
+    let client = client.clone();
+    let model_name = model_name.to_string();
+    let stream = async_stream::stream! {
+        let completion_id = crate::proxy::proxy::openai_stream_completion_id();
+        let mut emitted_text = false;
+
+        while let Some(chunk_result) = backend_stream.next().await {
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    yield Err(err);
+                    return;
+                }
+            };
+
+            match chunk.chunk_type {
+                ChunkType::TextDelta => {
+                    if !chunk.content.is_empty() {
+                        yield Ok(crate::proxy::proxy::text_delta_sse_event(
+                            &completion_id,
+                            &model_name,
+                            &chunk.content,
+                            !emitted_text,
+                            None,
+                        ));
+                        emitted_text = true;
+                    }
+                }
+                ChunkType::Final => {
+                    if !emitted_text {
+                        let content = match chunk.response {
+                            Some(LLMResponse::Text(text)) => text.content,
+                            _ => String::new(),
+                        };
+                        yield Ok(crate::proxy::proxy::text_delta_sse_event(
+                            &completion_id,
+                            &model_name,
+                            &content,
+                            true,
+                            None,
+                        ));
+                    }
+                    let usage = client.last_usage();
+                    let usage_json = usage
+                        .as_ref()
+                        .map(|u| crate::proxy::proxy::usage_to_openai_json(Some(u)));
+                    yield Ok(crate::proxy::proxy::final_sse_event(
+                        &completion_id,
+                        &model_name,
+                        "stop",
+                        usage_json.as_ref(),
+                    ));
+                    return;
+                }
+                ChunkType::ToolCallDelta | ChunkType::Retry => {}
+            }
+        }
+
+        yield Err(StreamError::default());
+    };
+
+    Ok(HandlerResult::StreamBody(Box::pin(stream)))
+}
+
 /// Convert a final text object while preserving the requested response shape.
 fn text_response_result(
     text: &TextResponse,
@@ -314,11 +410,10 @@ fn text_response_result(
     usage: Option<&TokenUsage>,
 ) -> HandlerResult {
     if stream {
-        HandlerResult::Events(text_to_sse_events_with_usage(
-            &text.content,
-            model_name,
-            0,
-            usage,
+        HandlerResult::StreamBody(text_events_stream(
+            text.content.clone(),
+            model_name.to_string(),
+            usage.cloned(),
         ))
     } else {
         HandlerResult::Response(text_response_to_openai_with_usage(text, model_name, usage))
@@ -332,7 +427,11 @@ fn text_content_result(
     usage: Option<&TokenUsage>,
 ) -> HandlerResult {
     if stream {
-        HandlerResult::Events(text_to_sse_events_with_usage(content, model_name, 0, usage))
+        HandlerResult::StreamBody(text_events_stream(
+            content.to_string(),
+            model_name.to_string(),
+            usage.cloned(),
+        ))
     } else {
         let text = TextResponse::new(content);
         HandlerResult::Response(text_response_to_openai_with_usage(&text, model_name, usage))
@@ -348,12 +447,55 @@ fn tool_calls_result(
     if calls.is_empty() {
         text_content_result("", model_name, stream, usage)
     } else if stream {
-        HandlerResult::Events(tool_calls_to_sse_events_with_usage(
-            calls, model_name, usage,
+        HandlerResult::StreamBody(tool_call_events_stream(
+            calls.to_vec(),
+            model_name.to_string(),
+            usage.cloned(),
         ))
     } else {
         HandlerResult::Response(tool_calls_to_openai_with_usage(calls, model_name, usage))
     }
+}
+
+fn text_events_stream(
+    content: String,
+    model_name: String,
+    usage: Option<TokenUsage>,
+) -> OpenAiEventStream {
+    Box::pin(async_stream::stream! {
+        for event in crate::proxy::proxy::text_to_sse_event_iter_with_usage(
+            &content,
+            &model_name,
+            0,
+            usage.as_ref(),
+        ) {
+            yield Ok(event);
+        }
+    })
+}
+
+fn tool_call_events_stream(
+    calls: Vec<ToolCall>,
+    model_name: String,
+    usage: Option<TokenUsage>,
+) -> OpenAiEventStream {
+    Box::pin(async_stream::stream! {
+        for event in crate::proxy::proxy::tool_calls_to_sse_event_iter_with_usage(
+            &calls,
+            &model_name,
+            usage.as_ref(),
+        ) {
+            yield Ok(event);
+        }
+    })
+}
+
+async fn collect_openai_events(mut stream: OpenAiEventStream) -> Result<Vec<Value>, StreamError> {
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event?);
+    }
+    Ok(events)
 }
 
 /// Remove respond() calls, keeping only real tool calls.
@@ -400,12 +542,14 @@ pub fn parse_tool_specs(tools: &[Value]) -> Vec<ToolSpec> {
 mod tests {
     use super::*;
     use crate::clients::base::{
-        ApiFormat, ChunkStream, LLMRequestOptions, SamplingParams, TokenUsage, ToolCall,
+        ApiFormat, ChunkStream, LLMRequestOptions, SamplingParams, StreamChunk, TokenUsage,
+        ToolCall,
     };
     use crate::clients::AnthropicClient;
     use anyllm_translate::anthropic::MessageCreateRequest;
     use indexmap::IndexMap;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn filter_respond_removes_respond() {
@@ -445,18 +589,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn process_response_text_streaming() {
+    async fn collect_stream_events(result: HandlerResult) -> Vec<Value> {
+        match result {
+            HandlerResult::StreamBody(stream) => collect_openai_events(stream).await.unwrap(),
+            other => panic!("expected StreamBody, got {other:?}"),
+        }
+    }
+
+    fn stream_from_response(response: LLMResponse) -> ChunkStream {
+        Box::pin(futures_util::stream::iter(vec![Ok(StreamChunk::new(
+            ChunkType::Final,
+        )
+        .with_response(response))]))
+    }
+
+    #[tokio::test]
+    async fn process_response_text_streaming() {
         let resp = LLMResponse::Text(TextResponse::new("hello"));
         let result = process_response(&resp, "model", true);
-        match result {
-            HandlerResult::Events(events) => {
-                assert!(!events.is_empty());
-                let last = events.last().unwrap();
-                assert_eq!(last["choices"][0]["finish_reason"], "stop");
-            }
-            _ => panic!("expected Events"),
-        }
+        let events = collect_stream_events(result).await;
+        assert!(!events.is_empty());
+        let last = events.last().unwrap();
+        assert_eq!(last["choices"][0]["finish_reason"], "stop");
     }
 
     #[test]
@@ -551,7 +705,9 @@ mod tests {
             _tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            Ok(stream_from_response(LLMResponse::Text(TextResponse::new(
+                "mock response",
+            ))))
         }
         async fn get_context_length(
             &self,
@@ -563,6 +719,75 @@ mod tests {
     struct MockOptionsClient {
         last_options: std::sync::Mutex<Option<LLMRequestOptions>>,
         usage: Option<TokenUsage>,
+    }
+
+    struct MockStreamingOptionsClient {
+        send_calls: AtomicUsize,
+        stream_calls: AtomicUsize,
+    }
+
+    impl MockStreamingOptionsClient {
+        fn new() -> Self {
+            Self {
+                send_calls: AtomicUsize::new(0),
+                stream_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl LLMClient for MockStreamingOptionsClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            self.send_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(LLMResponse::Text(TextResponse::new("non-stream")))
+        }
+
+        async fn send_with_options(
+            &self,
+            messages: Vec<Value>,
+            tools: Option<Vec<ToolSpec>>,
+            options: LLMRequestOptions,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            self.send_calls.fetch_add(1, Ordering::SeqCst);
+            self.send(messages, tools, options.sampling).await
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            Err(crate::error::StreamError::new("use stream_with_options"))
+        }
+
+        async fn send_stream_with_options(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _options: LLMRequestOptions,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(StreamChunk::new(ChunkType::TextDelta).with_content("first")),
+                Ok(StreamChunk::new(ChunkType::Final)
+                    .with_response(LLMResponse::Text(TextResponse::new("first")))),
+            ])))
+        }
+
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
     }
 
     impl MockOptionsClient {
@@ -608,7 +833,9 @@ mod tests {
             _tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            Ok(stream_from_response(LLMResponse::Text(TextResponse::new(
+                "options response",
+            ))))
         }
 
         async fn get_context_length(
@@ -640,7 +867,11 @@ mod tests {
             _tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            let mut args = IndexMap::new();
+            args.insert("message".into(), json!("responded text"));
+            Ok(stream_from_response(LLMResponse::ToolCalls(vec![
+                ToolCall::new("respond", args),
+            ])))
         }
         async fn get_context_length(
             &self,
@@ -672,7 +903,9 @@ mod tests {
             _tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            Ok(stream_from_response(LLMResponse::ToolCalls(vec![
+                ToolCall::new("search", IndexMap::new()),
+            ])))
         }
         async fn get_context_length(
             &self,
@@ -757,6 +990,31 @@ mod tests {
         assert!(!passthrough.contains_key("stream"));
         assert!(!passthrough.contains_key("temperature"));
         assert!(options.inbound_anthropic_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_no_tools_streaming_uses_stream_client() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "stream": true,
+            "temperature": 0.7
+        });
+        let client = Arc::new(MockStreamingOptionsClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        assert_eq!(client.send_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(client.stream_calls.load(Ordering::SeqCst), 1);
+
+        let events = collect_stream_events(result).await;
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "first");
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "stop"
+        );
     }
 
     #[tokio::test]
@@ -867,16 +1125,12 @@ mod tests {
         let client = Arc::new(MockPassthroughToolCallClient);
         let ctx = Arc::new(Mutex::new(dummy_ctx()));
         let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
-        match result.unwrap() {
-            HandlerResult::Events(events) => {
-                assert_eq!(events[0]["choices"][0]["delta"]["content"], "");
-                assert_eq!(
-                    events.last().unwrap()["choices"][0]["finish_reason"],
-                    "stop"
-                );
-            }
-            _ => panic!("expected Events"),
-        }
+        let events = collect_stream_events(result.unwrap()).await;
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "");
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "stop"
+        );
     }
 
     #[tokio::test]
@@ -918,7 +1172,9 @@ mod tests {
             _t: Option<Vec<ToolSpec>>,
             _s: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            Ok(stream_from_response(LLMResponse::Text(TextResponse::new(
+                "always text",
+            ))))
         }
         async fn get_context_length(
             &self,
@@ -987,7 +1243,17 @@ mod tests {
             _t: Option<Vec<ToolSpec>>,
             _s: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            let mut calls = self.calls.lock().unwrap();
+            let content = self
+                .responses
+                .get(*calls)
+                .or_else(|| self.responses.last())
+                .cloned()
+                .unwrap_or_default();
+            *calls += 1;
+            Ok(stream_from_response(LLMResponse::Text(TextResponse::new(
+                content,
+            ))))
         }
         async fn get_context_length(
             &self,
@@ -1027,16 +1293,12 @@ mod tests {
         let client = Arc::new(MockTextSequenceClient::new(vec!["first bad", "raw final"]));
         let ctx = Arc::new(Mutex::new(dummy_ctx()));
         let result = handle_chat_completions(&body, &client, &ctx, 1, true).await;
-        match result.unwrap() {
-            HandlerResult::Events(events) => {
-                assert_eq!(events[0]["choices"][0]["delta"]["content"], "raw final");
-                assert_eq!(
-                    events.last().unwrap()["choices"][0]["finish_reason"],
-                    "stop"
-                );
-            }
-            _ => panic!("expected Events"),
-        }
+        let events = collect_stream_events(result.unwrap()).await;
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "raw final");
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "stop"
+        );
     }
 
     struct MockMixedToolClient;
@@ -1065,13 +1327,107 @@ mod tests {
             _t: Option<Vec<ToolSpec>>,
             _s: Option<SamplingParams>,
         ) -> Result<ChunkStream, crate::error::StreamError> {
-            Err(crate::error::StreamError::new("not implemented"))
+            let mut respond_args = IndexMap::new();
+            respond_args.insert("message".into(), json!("ignored text"));
+            let mut search_args = IndexMap::new();
+            search_args.insert("query".into(), json!("test"));
+            Ok(stream_from_response(LLMResponse::ToolCalls(vec![
+                ToolCall::new("respond", respond_args),
+                ToolCall::new("search", search_args),
+            ])))
         }
         async fn get_context_length(
             &self,
         ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
             Ok(Some(4096))
         }
+    }
+
+    struct MockGuardedStreamingClient {
+        stream_calls: AtomicUsize,
+    }
+
+    impl MockGuardedStreamingClient {
+        fn new() -> Self {
+            Self {
+                stream_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl LLMClient for MockGuardedStreamingClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _m: Vec<Value>,
+            _t: Option<Vec<ToolSpec>>,
+            _s: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            Err(crate::error::BackendError::new(
+                500,
+                "send should not be used",
+            ))
+        }
+
+        async fn send_stream(
+            &self,
+            _m: Vec<Value>,
+            _t: Option<Vec<ToolSpec>>,
+            _s: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            let call = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(StreamChunk::new(ChunkType::ToolCallDelta).with_content("leaky-bogus")),
+                    Ok(
+                        StreamChunk::new(ChunkType::Final).with_response(LLMResponse::ToolCalls(
+                            vec![ToolCall::new("bogus", IndexMap::new())],
+                        )),
+                    ),
+                ])))
+            } else {
+                let mut args = IndexMap::new();
+                args.insert("q".into(), json!("safe"));
+                Ok(stream_from_response(LLMResponse::ToolCalls(vec![
+                    ToolCall::new("search", args),
+                ])))
+            }
+        }
+
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_streaming_holds_invalid_tool_chunks_until_validated() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": true,
+            "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}]
+        });
+        let client = Arc::new(MockGuardedStreamingClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 2, true)
+            .await
+            .expect("handler result");
+
+        assert_eq!(client.stream_calls.load(Ordering::SeqCst), 2);
+        let events = collect_stream_events(result).await;
+        let body = serde_json::to_string(&events).unwrap();
+        assert!(!body.contains("leaky-bogus"));
+        assert!(!body.contains("bogus"));
+        assert!(body.contains("search"));
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "tool_calls"
+        );
     }
 
     #[tokio::test]

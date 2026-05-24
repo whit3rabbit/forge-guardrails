@@ -262,9 +262,10 @@ run_python_oracle() {
 }
 
 run_python_report() {
-  local output report
+  local output report summary
   output="$OUTPUT_DIR/python_oracle.jsonl"
   report="$OUTPUT_DIR/python_report.txt"
+  summary="$OUTPUT_DIR/proxy_summary.txt"
   [[ -f "$output" ]] || return 0
 
   log "Generating Python report -> $report"
@@ -275,6 +276,9 @@ run_python_report() {
   else
     (cd "$REPO_ROOT/forge" && "$PYTHON_BIN" -m tests.eval.report "$output" --include-partial 2>&1) | tee "$report"
   fi
+
+  log "Generating proxy summary -> $summary"
+  run_python_script scripts/summarize_proxy_eval.py "$output" 2>&1 | tee "$summary"
 }
 
 run_published_compare() {

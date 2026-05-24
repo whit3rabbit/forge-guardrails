@@ -27,7 +27,10 @@ terminal schema where possible. The wrapper does not send scenario-owned
 `respond(...)` tools to the proxy because `respond` is proxy-reserved.
 It does not enforce scenario `required_steps` or prerequisites itself; if the
 proxy returns premature text, the row completes with whatever accuracy the
-scenario validator assigns.
+scenario validator assigns. Rows include `proxy_missing_required_steps`,
+`proxy_required_steps_satisfied`, and `proxy_failure_classification` so direct
+runner step-enforcement deltas are not mislabeled as harness or protocol
+failures.
 
 Rows should label the managed backend and proxy mode separately. For a local
 managed llama-server run, use `backend=llamaserver`, `mode=proxy`,
@@ -38,9 +41,25 @@ wrapper applies recommended sampling defaults by model unless
 
 It emits the flat JSONL fields needed by the Python report path plus
 Rust-parity fields such as `impl`, `success`, `tool_sequence`, `tool_args`,
-`final_text`, `proxy_terminal_source`, and `raw_response_on_failure`.
+`final_text`, `proxy_terminal_source`, `proxy_missing_required_steps`,
+`proxy_required_steps_satisfied`, `proxy_failure_classification`, and
+`raw_response_on_failure`.
 Streaming token usage is recorded only when the proxy emits OpenAI `usage`
 chunks.
+
+`scripts/summarize_proxy_eval.py <jsonl>` prints an outer summary that separates
+completeness failures from completed-but-inaccurate rows. This avoids relying on
+the upstream report's completeness-only "Weak" line when diagnosing proxy eval
+results.
+
+Known classifications for the local Ministral proxy comparison:
+
+- `inconsistent_api_recovery_stateful`: proxy contract mismatch from skipped
+  required setup; direct `WorkflowRunner` step enforcement nudges this path.
+- `argument_transformation*`: model/scenario accuracy weakness in local runs.
+- `grounded_synthesis*`: model/scenario weakness; published direct LS/N is also
+  0 for these columns.
+- `data_gap_recovery_extended*`: strict scorer/string-literal misses.
 
 ## Native Rust Smoke Runner
 
@@ -88,7 +107,8 @@ scenario, run, stream, completeness, success, accuracy, iterations,
 ideal_iterations, wasted_calls, elapsed_s, error_type, error_message,
 budget_tokens, compaction_events, retry_nudges, step_nudges, tool_errors,
 reasoning_msgs, tool_sequence, tool_args, final_text, proxy_terminal_source,
-raw_response_on_failure
+proxy_missing_required_steps, proxy_required_steps_satisfied,
+proxy_failure_classification, raw_response_on_failure
 ```
 
 Rows may also include `stream_retries`, `input_tokens`, and `output_tokens`

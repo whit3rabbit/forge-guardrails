@@ -112,6 +112,8 @@ class ProxyRunResult:
     tool_args: list[dict[str, Any]] = field(default_factory=list)
     final_text: str = ""
     proxy_terminal_source: str | None = None
+    proxy_missing_required_steps: list[str] = field(default_factory=list)
+    proxy_required_steps_satisfied: bool = True
 
 
 class OpenAIProxyClient:
@@ -443,6 +445,15 @@ def _validate_result(
     return accuracy, validate_error
 
 
+def _required_step_diagnostics(
+    workflow: Workflow,
+    tool_sequence: list[str],
+) -> tuple[list[str], bool]:
+    called = set(tool_sequence)
+    missing = [step for step in workflow.required_steps if step not in called]
+    return missing, not missing
+
+
 async def run_proxy_scenario(
     client: OpenAIProxyClient,
     scenario: EvalScenario,
@@ -568,8 +579,23 @@ async def run_proxy_scenario(
             "The proxy did not return a terminal text response or terminal tool call."
         )
 
+    missing_steps, steps_satisfied = _required_step_diagnostics(
+        workflow, result.tool_sequence,
+    )
+    result.proxy_missing_required_steps = missing_steps
+    result.proxy_required_steps_satisfied = steps_satisfied
     result.elapsed_seconds = time.monotonic() - started
     return result
+
+
+def _proxy_failure_classification(result: ProxyRunResult) -> str | None:
+    if not result.completeness:
+        return result.error_type or "incomplete"
+    if result.accuracy is not False:
+        return None
+    if not result.proxy_required_steps_satisfied:
+        return "proxy_contract_mismatch"
+    return "accuracy_false"
 
 
 def _result_row(
@@ -593,6 +619,7 @@ def _result_row(
         if result.completeness
         else None
     )
+    proxy_failure_classification = _proxy_failure_classification(result)
 
     row = {
         "impl": "rust-proxy-oracle",
@@ -623,6 +650,9 @@ def _result_row(
         "tool_args": result.tool_args,
         "final_text": result.final_text,
         "proxy_terminal_source": result.proxy_terminal_source,
+        "proxy_missing_required_steps": result.proxy_missing_required_steps,
+        "proxy_required_steps_satisfied": result.proxy_required_steps_satisfied,
+        "proxy_failure_classification": proxy_failure_classification,
         "raw_response_on_failure": result.error_message if not result.completeness else None,
         "ideal_iterations": ideal_iterations,
         "wasted_calls": wasted_calls,

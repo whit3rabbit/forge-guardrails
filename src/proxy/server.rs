@@ -32,7 +32,7 @@ pub struct HTTPServer {
     /// The model name reported in responses.
     pub model_name: String,
     /// Mutex for request serialization.
-    request_mutex: Mutex<()>,
+    request_mutex: Arc<Mutex<()>>,
 }
 
 impl HTTPServer {
@@ -52,14 +52,14 @@ impl HTTPServer {
             max_retries,
             rescue_enabled,
             model_name: model_name.to_string(),
-            request_mutex: Mutex::new(()),
+            request_mutex: Arc::new(Mutex::new(())),
         }
     }
 
     /// Handle an incoming HTTP request.
     ///
     /// Returns (status_code, content_type, headers, body_string).
-    pub async fn handle_request<C: LLMClient>(
+    pub async fn handle_request<C: LLMClient + 'static>(
         &self,
         method: &str,
         path: &str,
@@ -114,7 +114,7 @@ impl HTTPServer {
     }
 
     /// Handle /v1/messages.
-    async fn handle_anthropic_messages<C: LLMClient>(
+    async fn handle_anthropic_messages<C: LLMClient + 'static>(
         &self,
         body: &[u8],
         client: &Arc<C>,
@@ -186,7 +186,7 @@ impl HTTPServer {
     }
 
     /// Handle /v1/chat/completions.
-    async fn handle_chat_completions<C: LLMClient>(
+    async fn handle_chat_completions<C: LLMClient + 'static>(
         &self,
         body: &[u8],
         client: &Arc<C>,
@@ -228,12 +228,70 @@ impl HTTPServer {
         {
             Ok(result) => match result {
                 HandlerResult::Response(v) => (200, "application/json", v.to_string()),
-                HandlerResult::Events(events) => {
-                    let body = response::format_sse_body(&events);
-                    (200, "text/event-stream", body)
+                HandlerResult::StreamBody(events) => {
+                    match response::collect_openai_sse_body(events).await {
+                        Ok(body) => (200, "text/event-stream", body),
+                        Err(e) => (
+                            502,
+                            "application/json",
+                            json!({"error": e.to_string()}).to_string(),
+                        ),
+                    }
                 }
             },
             Err(e) => (502, "application/json", json!({"error": e}).to_string()),
+        }
+    }
+
+    async fn handle_chat_completions_response<C: LLMClient + 'static>(
+        &self,
+        body: &[u8],
+        client: &Arc<C>,
+        context_manager: &Arc<Mutex<ContextManager>>,
+    ) -> axum::response::Response {
+        if body.len() > MAX_BODY_SIZE {
+            return response::build_response(
+                413,
+                "application/json",
+                json!({"error": "request too large"}).to_string(),
+            );
+        }
+
+        let parsed: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return response::build_response(
+                    400,
+                    "application/json",
+                    json!({"error": e.to_string()}).to_string(),
+                );
+            }
+        };
+
+        let guard = if self.serialize_requests {
+            Some(self.request_mutex.clone().lock_owned().await)
+        } else {
+            None
+        };
+
+        match handler::handle_chat_completions(
+            &parsed,
+            client,
+            context_manager,
+            self.max_retries,
+            self.rescue_enabled,
+        )
+        .await
+        {
+            Ok(HandlerResult::Response(v)) => {
+                response::build_response(200, "application/json", v.to_string())
+            }
+            Ok(HandlerResult::StreamBody(events)) => {
+                response::build_openai_sse_response(events, guard)
+            }
+            Err(e) => {
+                response::build_response(502, "application/json", json!({"error": e}).to_string())
+            }
         }
     }
 
@@ -358,10 +416,8 @@ impl HTTPServer {
             let cli = cli_chat.clone();
             let ctx = ctx_chat.clone();
             async move {
-                let (status, ct, _, resp_body) = srv
-                    .handle_request("POST", "/v1/chat/completions", &body, &cli, &ctx)
-                    .await;
-                response::build_response(status, ct, resp_body)
+                srv.handle_chat_completions_response(&body, &cli, &ctx)
+                    .await
             }
         };
 
@@ -446,7 +502,10 @@ pub fn parse_http_request(raw: &[u8]) -> Option<(String, String, Vec<(String, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::base::{ApiFormat, ChunkStream, SamplingParams};
+    use crate::clients::base::{
+        ApiFormat, ChunkStream, ChunkType, LLMRequestOptions, LLMResponse, SamplingParams,
+        StreamChunk, TextResponse,
+    };
     use crate::core::tool_spec::ToolSpec;
     use crate::error::{BackendError, ContextDiscoveryError, StreamError};
     use indexmap::IndexMap;
@@ -474,7 +533,10 @@ mod tests {
             _tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
         ) -> Result<ChunkStream, StreamError> {
-            Err(StreamError::new("not implemented"))
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(
+                StreamChunk::new(ChunkType::Final)
+                    .with_response(LLMResponse::Text(TextResponse::new("test"))),
+            )])))
         }
         async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
             Ok(Some(4096))
@@ -520,6 +582,66 @@ mod tests {
             None,
             None,
         )
+    }
+
+    struct ChannelStreamClient {
+        receiver:
+            std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<Result<StreamChunk, StreamError>>>>,
+    }
+
+    impl ChannelStreamClient {
+        fn new(receiver: tokio::sync::mpsc::Receiver<Result<StreamChunk, StreamError>>) -> Self {
+            Self {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+            }
+        }
+    }
+
+    impl LLMClient for ChannelStreamClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, BackendError> {
+            Err(BackendError::new(500, "send should not be used"))
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, StreamError> {
+            Err(StreamError::new("use send_stream_with_options"))
+        }
+
+        async fn send_stream_with_options(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _options: LLMRequestOptions,
+        ) -> Result<ChunkStream, StreamError> {
+            let mut receiver = self
+                .receiver
+                .lock()
+                .unwrap()
+                .take()
+                .expect("receiver used once");
+            Ok(Box::pin(async_stream::stream! {
+                while let Some(chunk) = receiver.recv().await {
+                    yield chunk;
+                }
+            }))
+        }
+
+        async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
     }
 
     #[test]
@@ -796,6 +918,59 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(ct, "text/event-stream");
         assert!(body_str.contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn live_chat_response_yields_body_chunk_before_backend_final() {
+        use futures_util::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let client = Arc::new(ChannelStreamClient::new(rx));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let body = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test",
+            "stream": true
+        }))
+        .unwrap();
+
+        let response = srv
+            .handle_chat_completions_response(&body, &client, &ctx)
+            .await;
+        let mut body_stream = response.into_body().into_data_stream();
+
+        tx.send(Ok(
+            StreamChunk::new(ChunkType::TextDelta).with_content("first")
+        ))
+        .await
+        .unwrap();
+        let first = timeout(Duration::from_millis(100), body_stream.next())
+            .await
+            .expect("first body chunk before final")
+            .expect("body chunk")
+            .expect("body ok");
+        let first = std::str::from_utf8(&first).unwrap();
+        assert!(first.contains("first"));
+        assert!(!first.contains("[DONE]"));
+
+        assert!(timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .is_err());
+
+        tx.send(Ok(StreamChunk::new(ChunkType::Final)
+            .with_response(LLMResponse::Text(TextResponse::new("first")))))
+            .await
+            .unwrap();
+        let final_event = timeout(Duration::from_millis(100), body_stream.next())
+            .await
+            .expect("final body chunk")
+            .expect("final event")
+            .expect("body ok");
+        assert!(std::str::from_utf8(&final_event)
+            .unwrap()
+            .contains("\"finish_reason\":\"stop\""));
     }
 
     #[test]

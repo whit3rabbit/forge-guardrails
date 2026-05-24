@@ -24,6 +24,63 @@ fn generate_call_id() -> String {
     format!("call_{id:016x}")
 }
 
+pub(crate) fn openai_stream_completion_id() -> String {
+    generate_completion_id()
+}
+
+pub(crate) fn text_delta_sse_event(
+    completion_id: &str,
+    model: &str,
+    content: &str,
+    include_role: bool,
+    usage: Option<&Value>,
+) -> Value {
+    let mut delta = Map::new();
+    if include_role {
+        delta.insert("role".into(), json!("assistant"));
+    }
+    delta.insert("content".into(), json!(content));
+
+    let mut event = json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": Value::Object(delta),
+            "finish_reason": Value::Null
+        }]
+    });
+    if let Some(usage_value) = usage {
+        event["usage"] = usage_value.clone();
+    }
+    event
+}
+
+pub(crate) fn final_sse_event(
+    completion_id: &str,
+    model: &str,
+    finish_reason: &str,
+    usage: Option<&Value>,
+) -> Value {
+    let mut event = json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": finish_reason
+        }]
+    });
+    if let Some(usage_value) = usage {
+        event["usage"] = usage_value.clone();
+    }
+    event
+}
+
 /// Short hex prefix for IDs (8 chars).
 fn uuid_prefix() -> String {
     use std::time::SystemTime;
@@ -252,95 +309,7 @@ pub fn tool_calls_to_sse_events_with_usage(
     model: &str,
     usage: Option<&TokenUsage>,
 ) -> Vec<Value> {
-    let completion_id = generate_completion_id();
-    let mut events = Vec::new();
-    let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
-
-    // Reasoning delta first.
-    let reasoning = calls.first().and_then(|c| c.reasoning.clone());
-    if let Some(ref r) = reasoning {
-        let mut delta = Map::new();
-        delta.insert("role".into(), json!("assistant"));
-        delta.insert("content".into(), json!(r));
-
-        let mut event = json!({
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": Value::Object(delta),
-                "finish_reason": Value::Null
-            }]
-        });
-        if let Some(ref usage_value) = usage_json {
-            event["usage"] = usage_value.clone();
-        }
-        events.push(event);
-    }
-
-    // Tool call deltas.
-    let mut tc_deltas = Vec::new();
-    for (i, tc) in calls.iter().enumerate() {
-        let call_id = tc
-            .id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(generate_call_id);
-        let args_json = serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string());
-        let mut func_map = Map::new();
-        func_map.insert("name".into(), json!(tc.tool));
-        func_map.insert("arguments".into(), json!(args_json));
-
-        let mut tc_map = Map::new();
-        tc_map.insert("index".into(), json!(i));
-        tc_map.insert("id".into(), json!(call_id));
-        tc_map.insert("type".into(), json!("function"));
-        tc_map.insert("function".into(), Value::Object(func_map));
-        tc_deltas.push(Value::Object(tc_map));
-    }
-
-    let mut delta = Map::new();
-    delta.insert("tool_calls".into(), json!(tc_deltas));
-
-    let mut tool_event = json!({
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": 0,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": Value::Object(delta),
-            "finish_reason": Value::Null
-        }]
-    });
-    if reasoning.is_none() {
-        if let Some(ref usage_value) = usage_json {
-            tool_event["usage"] = usage_value.clone();
-        }
-    }
-    events.push(tool_event);
-
-    // Final chunk.
-    let mut final_event = json!({
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": 0,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "tool_calls"
-        }]
-    });
-    if let Some(usage_value) = usage_json {
-        final_event["usage"] = usage_value;
-    }
-    events.push(final_event);
-
-    events
+    tool_calls_to_sse_event_iter_with_usage(calls, model, usage).collect()
 }
 
 /// Convert text to SSE event chunks for streaming.
@@ -358,43 +327,102 @@ pub fn text_to_sse_events_with_usage(
     chunk_size: usize,
     usage: Option<&TokenUsage>,
 ) -> Vec<Value> {
+    text_to_sse_event_iter_with_usage(text, model, chunk_size, usage).collect()
+}
+
+pub(crate) fn text_to_sse_event_iter_with_usage<'a>(
+    text: &'a str,
+    model: &'a str,
+    chunk_size: usize,
+    usage: Option<&'a TokenUsage>,
+) -> impl Iterator<Item = Value> + 'a {
     let completion_id = generate_completion_id();
-    let mut events = Vec::new();
     let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
+    let mut chunks = text_chunks(text, chunk_size);
+    let mut emitted_content = false;
+    let mut emitted_final = false;
 
-    if chunk_size == 0 {
-        // Single content chunk.
-        let mut delta = Map::new();
-        delta.insert("role".into(), json!("assistant"));
-        delta.insert("content".into(), json!(text));
-
-        let mut event = json!({
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": Value::Object(delta),
-                "finish_reason": Value::Null
-            }]
-        });
-        if let Some(ref usage_value) = usage_json {
-            event["usage"] = usage_value.clone();
+    std::iter::from_fn(move || {
+        if let Some(chunk) = chunks.next() {
+            let include_role = !emitted_content;
+            emitted_content = true;
+            let usage = if include_role {
+                usage_json.as_ref()
+            } else {
+                None
+            };
+            return Some(text_delta_sse_event(
+                &completion_id,
+                model,
+                chunk,
+                include_role,
+                usage,
+            ));
         }
-        events.push(event);
-    } else {
-        // Split text into chunks.
-        let chars: Vec<char> = text.chars().collect();
-        let mut first = true;
-        for chunk in chars.chunks(chunk_size) {
-            let mut delta = Map::new();
-            let is_first = first;
-            if first {
-                delta.insert("role".into(), json!("assistant"));
-                first = false;
+
+        if emitted_final {
+            return None;
+        }
+        emitted_final = true;
+        Some(final_sse_event(
+            &completion_id,
+            model,
+            "stop",
+            usage_json.as_ref(),
+        ))
+    })
+}
+
+pub(crate) fn tool_calls_to_sse_event_iter_with_usage<'a>(
+    calls: &'a [ToolCall],
+    model: &'a str,
+    usage: Option<&'a TokenUsage>,
+) -> impl Iterator<Item = Value> + 'a {
+    let completion_id = generate_completion_id();
+    let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
+    let reasoning = calls.first().and_then(|c| c.reasoning.clone());
+    let mut step = 0;
+
+    std::iter::from_fn(move || {
+        if step == 0 {
+            step = 1;
+            if let Some(ref r) = reasoning {
+                return Some(text_delta_sse_event(
+                    &completion_id,
+                    model,
+                    r,
+                    true,
+                    usage_json.as_ref(),
+                ));
             }
-            delta.insert("content".into(), json!(chunk.iter().collect::<String>()));
+        }
+
+        if step == 1 {
+            step = 2;
+            let mut tc_deltas = Vec::new();
+            for (i, tc) in calls.iter().enumerate() {
+                let call_id = tc
+                    .id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(generate_call_id);
+                let args_json =
+                    serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string());
+                let mut func_map = Map::new();
+                func_map.insert("name".into(), json!(tc.tool));
+                func_map.insert("arguments".into(), json!(args_json));
+
+                let mut tc_map = Map::new();
+                tc_map.insert("index".into(), json!(i));
+                tc_map.insert("id".into(), json!(call_id));
+                tc_map.insert("type".into(), json!("function"));
+                tc_map.insert("function".into(), Value::Object(func_map));
+                tc_deltas.push(Value::Object(tc_map));
+            }
+
+            let mut delta = Map::new();
+            delta.insert("tool_calls".into(), json!(tc_deltas));
 
             let mut event = json!({
                 "id": completion_id,
@@ -407,59 +435,84 @@ pub fn text_to_sse_events_with_usage(
                     "finish_reason": Value::Null
                 }]
             });
-            if is_first {
+            if reasoning.is_none() {
                 if let Some(ref usage_value) = usage_json {
                     event["usage"] = usage_value.clone();
                 }
             }
-            events.push(event);
+            return Some(event);
         }
 
-        // If text was empty, still produce one chunk with role.
-        if text.is_empty() {
-            let mut delta = Map::new();
-            delta.insert("role".into(), json!("assistant"));
-            delta.insert("content".into(), json!(""));
-
-            let mut event = json!({
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": 0,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": Value::Object(delta),
-                    "finish_reason": Value::Null
-                }]
-            });
-            if let Some(ref usage_value) = usage_json {
-                event["usage"] = usage_value.clone();
-            }
-            events.push(event);
+        if step == 2 {
+            step = 3;
+            return Some(final_sse_event(
+                &completion_id,
+                model,
+                "tool_calls",
+                usage_json.as_ref(),
+            ));
         }
-    }
 
-    // Final chunk with finish_reason=stop.
-    let mut final_event = json!({
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": 0,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop"
-        }]
-    });
-    if let Some(usage_value) = usage_json {
-        final_event["usage"] = usage_value;
-    }
-    events.push(final_event);
-
-    events
+        None
+    })
 }
 
-fn usage_to_openai_json(usage: Option<&TokenUsage>) -> Value {
+struct TextChunks<'a> {
+    text: &'a str,
+    chunk_size: usize,
+    offset: usize,
+    emitted_empty: bool,
+    emitted_full: bool,
+}
+
+fn text_chunks(text: &str, chunk_size: usize) -> TextChunks<'_> {
+    TextChunks {
+        text,
+        chunk_size,
+        offset: 0,
+        emitted_empty: false,
+        emitted_full: false,
+    }
+}
+
+impl<'a> Iterator for TextChunks<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.chunk_size == 0 {
+            if self.emitted_full {
+                return None;
+            }
+            self.emitted_full = true;
+            return Some(self.text);
+        }
+
+        if self.text.is_empty() {
+            if self.emitted_empty {
+                return None;
+            }
+            self.emitted_empty = true;
+            return Some("");
+        }
+
+        if self.offset >= self.text.len() {
+            return None;
+        }
+
+        let start = self.offset;
+        let mut end = self.text.len();
+        for (count, (idx, _)) in self.text[start..].char_indices().enumerate() {
+            if count == self.chunk_size {
+                end = start + idx;
+                break;
+            }
+        }
+        self.offset = end;
+        Some(&self.text[start..end])
+    }
+}
+
+pub(crate) fn usage_to_openai_json(usage: Option<&TokenUsage>) -> Value {
     let usage = usage.cloned().unwrap_or_else(TokenUsage::empty);
     json!({
         "prompt_tokens": usage.prompt_tokens,
@@ -779,6 +832,27 @@ mod tests {
         assert_eq!(content, "abcdefghijkl");
         // Last event is finish.
         assert_eq!(events[3]["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn sse_text_chunking_preserves_multibyte_boundaries() {
+        let text = "åßçд🙂z";
+        let events = text_to_sse_events(text, "model", 2);
+        let content: String = events
+            .iter()
+            .take(events.len() - 1)
+            .map(|event| {
+                event["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(content, text);
+        assert_eq!(
+            events.last().unwrap()["choices"][0]["finish_reason"],
+            "stop"
+        );
     }
 
     #[test]

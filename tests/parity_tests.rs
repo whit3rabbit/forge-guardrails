@@ -11,6 +11,7 @@ use forge_guardrails::{
     MessageType, NoCompact, OllamaClient, SamplingParams, StepEnforcer, StreamChunk, TieredCompact,
     ToolCallInfo, ToolDef, ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
 };
+use futures_util::StreamExt;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -301,7 +302,16 @@ impl LLMClient for TextSequenceClient {
         _tools: Option<Vec<ToolSpec>>,
         _sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, forge_guardrails::StreamError> {
-        Err(forge_guardrails::StreamError::new("not used"))
+        let idx = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+        let content = self
+            .responses
+            .get(idx)
+            .or_else(|| self.responses.last())
+            .cloned()
+            .unwrap_or_default();
+        Ok(stream_from_response(LLMResponse::Text(
+            forge_guardrails::TextResponse::new(content),
+        )))
     }
 
     async fn get_context_length(
@@ -355,7 +365,14 @@ impl LLMClient for ScriptedClient {
         _tools: Option<Vec<ToolSpec>>,
         _sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, forge_guardrails::StreamError> {
-        Err(forge_guardrails::StreamError::new("not used"))
+        let idx = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+        let response = self
+            .responses
+            .get(idx)
+            .or_else(|| self.responses.last())
+            .cloned()
+            .unwrap_or_else(|| LLMResponse::Text(forge_guardrails::TextResponse::new("")));
+        Ok(stream_from_response(response))
     }
 
     async fn get_context_length(
@@ -363,6 +380,21 @@ impl LLMClient for ScriptedClient {
     ) -> Result<Option<i64>, forge_guardrails::ContextDiscoveryError> {
         Ok(Some(4096))
     }
+}
+
+fn stream_from_response(response: LLMResponse) -> ChunkStream {
+    Box::pin(futures_util::stream::iter(vec![Ok(StreamChunk::new(
+        forge_guardrails::ChunkType::Final,
+    )
+    .with_response(response))]))
+}
+
+async fn collect_stream_events(mut stream: forge_guardrails::OpenAiEventStream) -> Vec<Value> {
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+    events
 }
 
 async fn run_workflow_capture(
@@ -519,7 +551,9 @@ impl LLMClient for RespondOnlyClient {
         _tools: Option<Vec<ToolSpec>>,
         _sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, forge_guardrails::StreamError> {
-        Err(forge_guardrails::StreamError::new("not used"))
+        Ok(stream_from_response(LLMResponse::ToolCalls(vec![
+            forge_guardrails::ToolCall::new("respond", map_from_object(json!({"message": "done"}))),
+        ])))
     }
 
     async fn get_context_length(
@@ -1618,7 +1652,8 @@ async fn python_golden_proxy_mixed_respond_streaming_matches() {
         .expect("proxy response");
 
     match response {
-        HandlerResult::Events(events) => {
+        HandlerResult::StreamBody(stream) => {
+            let events = collect_stream_events(stream).await;
             assert_eq!(
                 Value::Array(first_stream_tool_names(&events)),
                 case["expected"]["tool_names"]
@@ -1628,7 +1663,7 @@ async fn python_golden_proxy_mixed_respond_streaming_matches() {
                 case["expected"]["finish_reason"]
             );
         }
-        other => panic!("expected events, got {other:?}"),
+        other => panic!("expected stream body, got {other:?}"),
     }
 }
 
@@ -1646,7 +1681,8 @@ async fn python_golden_proxy_text_sse_final_chunk_matches() {
         .expect("proxy response");
 
     match response {
-        HandlerResult::Events(events) => {
+        HandlerResult::StreamBody(stream) => {
+            let events = collect_stream_events(stream).await;
             assert_eq!(
                 events[0]["choices"][0]["delta"]["content"],
                 case["expected"]["first_content"]
@@ -1660,7 +1696,7 @@ async fn python_golden_proxy_text_sse_final_chunk_matches() {
                 case["expected"]["finish_reason"]
             );
         }
-        other => panic!("expected events, got {other:?}"),
+        other => panic!("expected stream body, got {other:?}"),
     }
 }
 

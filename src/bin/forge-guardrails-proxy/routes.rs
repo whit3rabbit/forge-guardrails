@@ -6,13 +6,17 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
-use forge_guardrails::{ContextManager, HTTPServer, NoCompact, ServerManager};
+use forge_guardrails::{
+    handle_chat_completions, ContextManager, HTTPServer, HandlerResult, NoCompact, ServerManager,
+};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::client::ClientFactory;
 use crate::config::ProxyConfig;
-use crate::response::build_response;
+use crate::response::{build_openai_sse_response, build_response};
+
+const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -136,7 +140,55 @@ async fn models(State(state): State<AppState>) -> Response {
 }
 
 async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
-    proxy_post(state, "/v1/chat/completions", body, extract_openai_model).await
+    let model = extract_openai_model(body.as_ref(), &state.config.default_model);
+    let client = Arc::new(state.client_factory.client_for_model(model.clone()));
+    let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
+        Box::new(NoCompact),
+        state.config.context_tokens,
+        None,
+        None,
+        None,
+    )));
+
+    if body.len() > MAX_BODY_SIZE {
+        return build_response(
+            413,
+            "application/json",
+            json!({"error": "request too large"}).to_string(),
+        );
+    }
+    let parsed: Value = match serde_json::from_slice(body.as_ref()) {
+        Ok(value) => value,
+        Err(err) => {
+            return build_response(
+                400,
+                "application/json",
+                json!({"error": err.to_string()}).to_string(),
+            );
+        }
+    };
+
+    let guard = if state.config.serialize_requests {
+        Some(state.request_mutex.clone().lock_owned().await)
+    } else {
+        None
+    };
+
+    match handle_chat_completions(
+        &parsed,
+        &client,
+        &context_manager,
+        state.config.max_retries,
+        state.config.rescue_enabled,
+    )
+    .await
+    {
+        Ok(HandlerResult::Response(value)) => {
+            build_response(200, "application/json", value.to_string())
+        }
+        Ok(HandlerResult::StreamBody(events)) => build_openai_sse_response(events, guard),
+        Err(err) => build_response(502, "application/json", json!({"error": err}).to_string()),
+    }
 }
 
 async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Response {

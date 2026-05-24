@@ -6,7 +6,7 @@ pub mod server;
 
 pub use handler::{
     handle_anthropic_messages, handle_chat_completions, AnthropicHandlerError,
-    AnthropicHandlerResult, HandlerResult,
+    AnthropicHandlerResult, HandlerResult, OpenAiEventStream,
 };
 pub use proxy::{
     extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,
