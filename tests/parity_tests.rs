@@ -225,6 +225,33 @@ fn json_dumps_python(value: &Value) -> String {
     }
 }
 
+fn first_openai_tool_name_and_args(response: &Value) -> (Value, Value) {
+    let call = &response["choices"][0]["message"]["tool_calls"][0];
+    let args = serde_json::from_str::<Value>(
+        call["function"]["arguments"]
+            .as_str()
+            .expect("arguments string"),
+    )
+    .expect("arguments json");
+    (call["function"]["name"].clone(), args)
+}
+
+fn first_stream_tool_names(events: &[Value]) -> Vec<Value> {
+    events
+        .iter()
+        .find_map(|event| {
+            event["choices"][0]["delta"]["tool_calls"]
+                .as_array()
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|call| call["function"]["name"].clone())
+                        .collect::<Vec<_>>()
+                })
+        })
+        .unwrap_or_default()
+}
+
 struct TextSequenceClient {
     responses: Vec<String>,
     calls: AtomicI32,
@@ -938,6 +965,57 @@ async fn python_golden_step_nudge_history_matches() {
 }
 
 #[tokio::test]
+async fn python_golden_workflow_step_nudge_exposure_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "workflow_step_nudge_exposure");
+    let expected = &case["expected"];
+
+    let mut tools = IndexMap::new();
+    tools.insert(
+        "lookup".to_string(),
+        ToolDef::new(
+            empty_spec("lookup"),
+            lookup_tool as fn(Vec<String>) -> Result<String, ToolResolutionError>,
+        ),
+    );
+    tools.insert("respond".to_string(), respond_tool_def());
+    let workflow = parity_workflow(tools, vec!["lookup"]);
+    let (_result, messages, _calls) = run_workflow_capture(
+        workflow,
+        vec![
+            LLMResponse::ToolCalls(vec![scripted_call(
+                "respond",
+                json!({"message": "too soon"}),
+            )]),
+            LLMResponse::ToolCalls(vec![scripted_call("lookup", json!({}))]),
+            LLMResponse::ToolCalls(vec![scripted_call(
+                "respond",
+                json!({"message": "lookup complete"}),
+            )]),
+        ],
+        10,
+        2,
+    )
+    .await;
+
+    let step_messages: Vec<_> = messages
+        .iter()
+        .filter(|message| message.metadata.msg_type == MessageType::StepNudge)
+        .collect();
+    assert_eq!(json!(step_messages.len()), expected["step_nudge_count"]);
+    assert_eq!(
+        json!(step_messages[0].tool_name.as_deref().unwrap()),
+        expected["first_tool_name"]
+    );
+    let prefix = step_messages[0]
+        .content
+        .split_once('.')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(step_messages[0].content.as_str());
+    assert_eq!(json!(prefix), expected["first_content_prefix"]);
+}
+
+#[tokio::test]
 async fn python_golden_prerequisite_nudge_history_matches() {
     let fixtures = golden();
     let case = golden_case(&fixtures, "prerequisite_nudge_history");
@@ -1439,6 +1517,148 @@ async fn python_golden_proxy_retry_exhausted_raw_text_matches() {
             assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
         }
         other => panic!("expected response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn python_golden_proxy_rescue_success_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_rescue_success");
+    let client = Arc::new(ScriptedClient::new(vec![LLMResponse::Text(
+        forge_guardrails::TextResponse::new(
+            "{\"tool\":\"search\",\"args\":{\"query\":\"rescued\"}}",
+        ),
+    )]));
+    let context = proxy_context();
+
+    let response = handle_chat_completions(&case["input"], &client, &context, 2, true)
+        .await
+        .expect("proxy response");
+
+    match response {
+        HandlerResult::Response(value) => {
+            let choice = &value["choices"][0];
+            let (name, args) = first_openai_tool_name_and_args(&value);
+            assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
+            assert_eq!(name, case["expected"]["tool_name"]);
+            assert_eq!(args, case["expected"]["tool_args"]);
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn python_golden_proxy_rescue_failure_raw_text_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_rescue_failure_raw_text");
+    let client = Arc::new(ScriptedClient::new(vec![LLMResponse::Text(
+        forge_guardrails::TextResponse::new("not a tool call"),
+    )]));
+    let context = proxy_context();
+    let max_retries = case["input"]["max_retries"].as_i64().unwrap() as i32;
+
+    let response =
+        handle_chat_completions(&case["input"]["body"], &client, &context, max_retries, true)
+            .await
+            .expect("proxy response");
+
+    match response {
+        HandlerResult::Response(value) => {
+            let choice = &value["choices"][0];
+            assert_eq!(choice["message"]["content"], case["expected"]["content"]);
+            assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn python_golden_proxy_unknown_tool_retry_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_unknown_tool_retry");
+    let client = Arc::new(ScriptedClient::new(vec![
+        LLMResponse::ToolCalls(vec![scripted_call("bogus", json!({}))]),
+        LLMResponse::ToolCalls(vec![scripted_call(
+            "search",
+            json!({"query": "after nudge"}),
+        )]),
+    ]));
+    let context = proxy_context();
+
+    let response = handle_chat_completions(&case["input"], &client, &context, 2, true)
+        .await
+        .expect("proxy response");
+
+    match response {
+        HandlerResult::Response(value) => {
+            let choice = &value["choices"][0];
+            let (name, args) = first_openai_tool_name_and_args(&value);
+            assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
+            assert_eq!(name, case["expected"]["tool_name"]);
+            assert_eq!(args, case["expected"]["tool_args"]);
+        }
+        other => panic!("expected response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn python_golden_proxy_mixed_respond_streaming_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_mixed_respond_streaming");
+    let client = Arc::new(ScriptedClient::new(vec![LLMResponse::ToolCalls(vec![
+        scripted_call("respond", json!({"message": "drop me"})),
+        scripted_call("search", json!({"query": "keep me"})),
+    ])]));
+    let context = proxy_context();
+
+    let response = handle_chat_completions(&case["input"], &client, &context, 2, true)
+        .await
+        .expect("proxy response");
+
+    match response {
+        HandlerResult::Events(events) => {
+            assert_eq!(
+                Value::Array(first_stream_tool_names(&events)),
+                case["expected"]["tool_names"]
+            );
+            assert_eq!(
+                events.last().unwrap()["choices"][0]["finish_reason"],
+                case["expected"]["finish_reason"]
+            );
+        }
+        other => panic!("expected events, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn python_golden_proxy_text_sse_final_chunk_matches() {
+    let fixtures = golden();
+    let case = golden_case(&fixtures, "proxy_text_sse_final_chunk");
+    let client = Arc::new(ScriptedClient::new(vec![LLMResponse::Text(
+        forge_guardrails::TextResponse::new("hello"),
+    )]));
+    let context = proxy_context();
+
+    let response = handle_chat_completions(&case["input"], &client, &context, 2, true)
+        .await
+        .expect("proxy response");
+
+    match response {
+        HandlerResult::Events(events) => {
+            assert_eq!(
+                events[0]["choices"][0]["delta"]["content"],
+                case["expected"]["first_content"]
+            );
+            assert_eq!(
+                events.last().unwrap()["choices"][0]["delta"],
+                case["expected"]["final_delta"]
+            );
+            assert_eq!(
+                events.last().unwrap()["choices"][0]["finish_reason"],
+                case["expected"]["finish_reason"]
+            );
+        }
+        other => panic!("expected events, got {other:?}"),
     }
 }
 

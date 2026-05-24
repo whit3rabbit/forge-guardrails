@@ -33,8 +33,11 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 - `src/clients/` - Anthropic, Llamafile, Ollama, and anyllm runtime/sidecar clients
 - `src/server.rs` - backend lifecycle and context-budget resolution
 - `src/proxy/` - HTTP/OpenAI-compatible and Anthropic Messages proxy handling
+- `src/bin/forge-eval.rs` - small native Rust eval smoke runner
 - `tests/` - integration coverage for core behavior
 - `tests/parity/` - Python-generated golden fixtures for Rust parity tests
+- `scripts/eval_openai_proxy.py` - Python eval oracle wrapper for Rust proxy checks
+- `docs/PARITY.md`, `docs/EVAL_GUIDE.md`, `docs/BACKEND_SETUP.md` - Rust parity and backend contracts
 
 ## Commands
 
@@ -47,6 +50,16 @@ cargo test
 ```
 
 Use `cargo fmt --all` to apply formatting.
+
+Focused eval/parity checks:
+
+```bash
+cargo test --test parity_tests
+cargo test proxy::handler
+cargo test server::tests
+cargo test --bin forge-eval
+python scripts/eval_openai_proxy.py --help
+```
 
 Regenerate Python parity fixtures after intentional reference-behavior changes:
 
@@ -87,6 +100,44 @@ Do not weaken parity assertions to make Rust pass. If a fixture fails, either
 fix Rust to match Python or intentionally update the Python fixture because the
 reference behavior changed. For byte-level JSON schema or tool output parity,
 compare both normalized JSON and Python-style `json.dumps(...)` strings.
+
+## Eval parity
+
+Use the upstream Python eval scenarios as the live-backend oracle, but do not
+port the Python dashboard/report platform into Rust unless explicitly asked.
+
+Python oracle against a running Rust proxy:
+
+```bash
+python scripts/eval_openai_proxy.py \
+  --base-url http://127.0.0.1:8081/v1 \
+  --model test-model \
+  --runs 10 \
+  --stream \
+  --scenario basic_2step sequential_3step error_recovery \
+  --output eval_results_rust_proxy.jsonl
+```
+
+Native Rust smoke runner:
+
+```bash
+cargo run --bin forge-eval -- \
+  --backend openai-proxy \
+  --base-url http://127.0.0.1:8081/v1 \
+  --model test-model \
+  --runs 3 \
+  --scenario basic_2step \
+  --stream
+```
+
+The Rust smoke runner supports only the initial small scenario set:
+`basic_2step`, `sequential_3step`, and `error_recovery`. It emits JSONL for
+quick CI/smoke checks and should not grow into a reporting dashboard.
+
+Proxy parity must cover client-visible behavior: no-tools passthrough, empty
+text for unexpected no-tools tool calls, retry-exhaustion raw text, rescue
+success/failure, unknown-tool retry, `respond` stripping, mixed respond plus
+real tool calls, and streaming final chunk shape.
 
 ## Agent rules
 
@@ -133,6 +184,17 @@ When changing Python parity behavior:
 1. Follow the Python parity test workflow above.
 2. Keep fixture updates, regenerated JSON, and Rust assertions in the same change.
 3. Run `cargo test --test parity_tests` before broader repo gates.
+
+When changing eval/backend parity:
+1. Update `docs/PARITY.md`, `docs/EVAL_GUIDE.md`, or `docs/BACKEND_SETUP.md`
+   when the contract changes.
+2. Keep the upstream `forge/` submodule source clean unless the task explicitly
+   asks to patch upstream Python.
+3. Prefer the Python proxy oracle for cross-language live checks and
+   `forge-eval` for small Rust smoke checks.
+4. Do not require exact parity for latency, generated OpenAI IDs, JSON key
+   order outside explicit schema tests, provider metadata, or token estimates
+   from backends that do not report usage.
 
 ## Current status notes
 

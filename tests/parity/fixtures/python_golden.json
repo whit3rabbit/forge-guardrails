@@ -1440,6 +1440,193 @@
         "content": "raw final",
         "finish_reason": "stop"
       }
+    },
+    "proxy_rescue_success": {
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "model": "test-model",
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "search",
+              "description": "Search",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "finish_reason": "tool_calls",
+        "tool_name": "search",
+        "tool_args": {
+          "query": "rescued"
+        }
+      }
+    },
+    "proxy_rescue_failure_raw_text": {
+      "input": {
+        "body": {
+          "messages": [
+            {
+              "role": "user",
+              "content": "hi"
+            }
+          ],
+          "model": "test-model",
+          "stream": false,
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "max_retries": 0
+      },
+      "expected": {
+        "content": "not a tool call",
+        "finish_reason": "stop"
+      }
+    },
+    "proxy_unknown_tool_retry": {
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "model": "test-model",
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "search",
+              "description": "Search",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "finish_reason": "tool_calls",
+        "tool_name": "search",
+        "tool_args": {
+          "query": "after nudge"
+        }
+      }
+    },
+    "proxy_mixed_respond_streaming": {
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "model": "test-model",
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "search",
+              "description": "Search",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "respond",
+              "description": "Respond",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expected": {
+        "tool_names": [
+          "search"
+        ],
+        "finish_reason": "tool_calls"
+      }
+    },
+    "proxy_text_sse_final_chunk": {
+      "input": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "model": "test-model",
+        "stream": true
+      },
+      "expected": {
+        "first_content": "hello",
+        "final_delta": {},
+        "finish_reason": "stop"
+      }
+    },
+    "workflow_step_nudge_exposure": {
+      "input": {
+        "required_steps": [
+          "lookup"
+        ]
+      },
+      "expected": {
+        "step_nudge_count": 1,
+        "first_tool_name": "respond",
+        "first_content_prefix": "[StepEnforcementError] You cannot call respond yet"
+      }
     }
   }
 }

@@ -564,6 +564,222 @@ async def _proxy_retry_exhausted_raw_text_fixture() -> dict[str, Any]:
     }
 
 
+async def _proxy_rescue_success_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    }
+    response = await handle_chat_completions(
+        body,
+        ScriptedClient([
+            TextResponse(content='{"tool":"search","args":{"query":"rescued"}}'),
+        ]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=2,
+        rescue_enabled=True,
+    )
+    choice = response["choices"][0]
+    call = choice["message"]["tool_calls"][0]
+    return {
+        "input": body,
+        "expected": {
+            "finish_reason": choice["finish_reason"],
+            "tool_name": call["function"]["name"],
+            "tool_args": json.loads(call["function"]["arguments"]),
+        },
+    }
+
+
+async def _proxy_rescue_failure_raw_text_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    }
+    response = await handle_chat_completions(
+        body,
+        ScriptedClient([TextResponse(content="not a tool call")]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=0,
+        rescue_enabled=True,
+    )
+    choice = response["choices"][0]
+    return {
+        "input": {"body": body, "max_retries": 0},
+        "expected": {
+            "content": choice["message"]["content"],
+            "finish_reason": choice["finish_reason"],
+        },
+    }
+
+
+async def _proxy_unknown_tool_retry_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    }
+    response = await handle_chat_completions(
+        body,
+        ScriptedClient([
+            [ToolCall(tool="bogus", args={})],
+            [ToolCall(tool="search", args={"query": "after nudge"})],
+        ]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=2,
+        rescue_enabled=True,
+    )
+    choice = response["choices"][0]
+    call = choice["message"]["tool_calls"][0]
+    return {
+        "input": body,
+        "expected": {
+            "finish_reason": choice["finish_reason"],
+            "tool_name": call["function"]["name"],
+            "tool_args": json.loads(call["function"]["arguments"]),
+        },
+    }
+
+
+async def _proxy_mixed_respond_streaming_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": True,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "respond",
+                    "description": "Respond",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string"}},
+                    },
+                },
+            },
+        ],
+    }
+    events = await handle_chat_completions(
+        body,
+        ScriptedClient([
+            [
+                ToolCall(tool="respond", args={"message": "drop me"}),
+                ToolCall(tool="search", args={"query": "keep me"}),
+            ]
+        ]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=2,
+        rescue_enabled=True,
+    )
+    tool_delta = next(
+        event for event in events
+        if event["choices"][0]["delta"].get("tool_calls")
+    )
+    final = events[-1]
+    return {
+        "input": body,
+        "expected": {
+            "tool_names": [
+                call["function"]["name"]
+                for call in tool_delta["choices"][0]["delta"]["tool_calls"]
+            ],
+            "finish_reason": final["choices"][0]["finish_reason"],
+        },
+    }
+
+
+async def _proxy_text_sse_final_chunk_fixture() -> dict[str, Any]:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": True,
+    }
+    events = await handle_chat_completions(
+        body,
+        ScriptedClient([TextResponse(content="hello")]),
+        ContextManager(NoCompact(), budget_tokens=4096),
+        max_retries=2,
+        rescue_enabled=True,
+    )
+    return {
+        "input": body,
+        "expected": {
+            "first_content": events[0]["choices"][0]["delta"]["content"],
+            "final_delta": events[-1]["choices"][0]["delta"],
+            "finish_reason": events[-1]["choices"][0]["finish_reason"],
+        },
+    }
+
+
+async def _workflow_step_nudge_exposure_fixture() -> dict[str, Any]:
+    case = await _step_nudge_history_fixture()
+    step_messages = [
+        message
+        for message in case["expected"]["messages"]
+        if message["type"] == "step_nudge"
+    ]
+    return {
+        "input": case["input"],
+        "expected": {
+            "step_nudge_count": len(step_messages),
+            "first_tool_name": step_messages[0]["tool_name"],
+            "first_content_prefix": step_messages[0]["content"].split(".", 1)[0],
+        },
+    }
+
+
 def _anthropic_conversion_fixture() -> dict[str, Any]:
     messages = [
         {"role": "system", "content": "Sys"},
@@ -1183,6 +1399,12 @@ async def build_fixtures() -> dict[str, Any]:
             "proxy_respond_stripping": await _proxy_respond_fixture(),
             "proxy_no_tools_tool_calls": await _proxy_no_tools_tool_calls_fixture(),
             "proxy_retry_exhausted_raw_text": await _proxy_retry_exhausted_raw_text_fixture(),
+            "proxy_rescue_success": await _proxy_rescue_success_fixture(),
+            "proxy_rescue_failure_raw_text": await _proxy_rescue_failure_raw_text_fixture(),
+            "proxy_unknown_tool_retry": await _proxy_unknown_tool_retry_fixture(),
+            "proxy_mixed_respond_streaming": await _proxy_mixed_respond_streaming_fixture(),
+            "proxy_text_sse_final_chunk": await _proxy_text_sse_final_chunk_fixture(),
+            "workflow_step_nudge_exposure": await _workflow_step_nudge_exposure_fixture(),
         },
     }
 

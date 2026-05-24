@@ -21,7 +21,41 @@ FORGE_ROOT = ROOT / "forge"
 sys.path.insert(0, str(FORGE_ROOT / "src"))
 sys.path.insert(0, str(FORGE_ROOT))
 
-import httpx
+
+def _print_early_help() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run upstream Python eval scenarios against an OpenAI proxy"
+    )
+    parser.add_argument("--base-url", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--scenario", nargs="*")
+    parser.add_argument("--tags", nargs="*")
+    parser.add_argument(
+        "--ablation",
+        choices=[
+            "bare",
+            "no_compact",
+            "no_nudge",
+            "no_recovery",
+            "no_rescue",
+            "no_steps",
+            "reforged",
+        ],
+        default="reforged",
+    )
+    parser.add_argument("--output")
+    parser.add_argument("--no-history", action="store_true")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--timeout", type=float, default=300.0)
+    parser.print_help()
+
+
+if __name__ == "__main__" and any(arg in {"--help", "-h"} for arg in sys.argv[1:]):
+    _print_early_help()
+    raise SystemExit(0)
+
 
 from forge.clients.base import ChunkType, StreamChunk, format_tool
 from forge.core.workflow import TextResponse, ToolCall, ToolSpec
@@ -48,6 +82,8 @@ class OpenAIProxyClient:
         tools: list[ToolSpec] | None = None,
         sampling: dict[str, Any] | None = None,
     ) -> list[ToolCall] | TextResponse:
+        import httpx
+
         body = self._body(messages, tools, sampling, stream=False)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(self.base_url, json=body)
@@ -62,6 +98,8 @@ class OpenAIProxyClient:
         tools: list[ToolSpec] | None = None,
         sampling: dict[str, Any] | None = None,
     ):
+        import httpx
+
         body = self._body(messages, tools, sampling, stream=True)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream("POST", self.base_url, json=body) as response:
@@ -153,7 +191,7 @@ def _parse_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
-async def _parse_openai_sse(response: httpx.Response):
+async def _parse_openai_sse(response: Any):
     content = ""
     tool_parts: dict[int, dict[str, Any]] = {}
 
