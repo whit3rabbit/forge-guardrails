@@ -7,14 +7,15 @@ use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    handle_chat_completions, ContextManager, HTTPServer, HandlerResult, NoCompact, ServerManager,
+    handle_anthropic_messages, handle_chat_completions, AnthropicHandlerError,
+    AnthropicHandlerResult, ContextManager, HandlerResult, LLMClient, NoCompact, ServerManager,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::client::ClientFactory;
 use crate::config::ProxyConfig;
-use crate::response::{build_openai_sse_response, build_response};
+use crate::response::{build_anthropic_sse_response, build_openai_sse_response, build_response};
 
 const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
 
@@ -192,47 +193,98 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
 }
 
 async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Response {
-    proxy_post(state, "/v1/messages", body, extract_anthropic_model).await
-}
+    if body.len() > MAX_BODY_SIZE {
+        return build_response(
+            413,
+            "application/json",
+            json!({"error": "request too large"}).to_string(),
+        );
+    }
 
-async fn cors_preflight() -> Response {
-    build_response(204, "", String::new())
-}
-
-async fn proxy_post(
-    state: AppState,
-    path: &'static str,
-    body: Bytes,
-    model_from_body: fn(&[u8], &str) -> String,
-) -> Response {
-    let model = model_from_body(body.as_ref(), &state.config.default_model);
+    let model = extract_anthropic_model(body.as_ref(), &state.config.default_model);
     let client = Arc::new(state.client_factory.client_for_model(model.clone()));
+    anthropic_messages_with_client(state.config, state.request_mutex, client, body).await
+}
+
+async fn anthropic_messages_with_client<C: LLMClient + 'static>(
+    config: Arc<ProxyConfig>,
+    request_mutex: Arc<TokioMutex<()>>,
+    client: Arc<C>,
+    body: Bytes,
+) -> Response {
+    if body.len() > MAX_BODY_SIZE {
+        return build_response(
+            413,
+            "application/json",
+            json!({"error": "request too large"}).to_string(),
+        );
+    }
+
+    let raw: Value = match serde_json::from_slice(body.as_ref()) {
+        Ok(value) => value,
+        Err(err) => {
+            return build_response(
+                400,
+                "application/json",
+                json!({"error": err.to_string()}).to_string(),
+            );
+        }
+    };
+    let parsed: anyllm_translate::anthropic::MessageCreateRequest =
+        match serde_json::from_value(raw.clone()) {
+            Ok(value) => value,
+            Err(err) => {
+                return build_response(
+                    400,
+                    "application/json",
+                    json!({"error": err.to_string()}).to_string(),
+                );
+            }
+        };
     let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
         Box::new(NoCompact),
-        state.config.context_tokens,
+        config.context_tokens,
         None,
         None,
         None,
     )));
-    let server = HTTPServer::new(
-        &state.config.host,
-        state.config.port,
-        false,
-        state.config.max_retries,
-        state.config.rescue_enabled,
-        &model,
-    );
 
-    let _guard = if state.config.serialize_requests {
-        Some(state.request_mutex.lock().await)
+    let guard = if config.serialize_requests {
+        Some(request_mutex.clone().lock_owned().await)
     } else {
         None
     };
 
-    let (status, content_type, _headers, response_body) = server
-        .handle_request("POST", path, body.as_ref(), &client, &context_manager)
-        .await;
-    build_response(status, content_type, response_body)
+    match handle_anthropic_messages(
+        &parsed,
+        &raw,
+        &client,
+        &context_manager,
+        config.max_retries,
+        config.rescue_enabled,
+    )
+    .await
+    {
+        Ok(AnthropicHandlerResult::Response(value)) => {
+            build_response(200, "application/json", value.to_string())
+        }
+        Ok(AnthropicHandlerResult::StreamBody(events)) => {
+            build_anthropic_sse_response(events, guard)
+        }
+        Err(AnthropicHandlerError::BadRequest(err)) => {
+            build_response(400, "application/json", json!({"error": err}).to_string())
+        }
+        Err(AnthropicHandlerError::Upstream(err)) => {
+            build_response(502, "application/json", json!({"error": err}).to_string())
+        }
+        Err(AnthropicHandlerError::Internal(err)) => {
+            build_response(500, "application/json", json!({"error": err}).to_string())
+        }
+    }
+}
+
+async fn cors_preflight() -> Response {
+    build_response(204, "", String::new())
 }
 
 fn extract_openai_model(body: &[u8], default_model: &str) -> String {
@@ -260,6 +312,71 @@ fn extract_json_model(body: &[u8], default_model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forge_guardrails::{
+        ApiFormat, BackendError, ChunkStream, ChunkType, ContextDiscoveryError, LLMRequestOptions,
+        LLMResponse, SamplingParams, StreamChunk, StreamError, TextResponse, ToolSpec,
+    };
+    use futures_util::StreamExt;
+
+    struct BinaryChannelStreamClient {
+        receiver:
+            std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<Result<StreamChunk, StreamError>>>>,
+    }
+
+    impl BinaryChannelStreamClient {
+        fn new(receiver: tokio::sync::mpsc::Receiver<Result<StreamChunk, StreamError>>) -> Self {
+            Self {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+            }
+        }
+    }
+
+    impl LLMClient for BinaryChannelStreamClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, BackendError> {
+            Err(BackendError::new(500, "send should not be used"))
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, StreamError> {
+            Err(StreamError::new("use send_stream_with_options"))
+        }
+
+        async fn send_stream_with_options(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _options: LLMRequestOptions,
+        ) -> Result<ChunkStream, StreamError> {
+            let mut receiver = self
+                .receiver
+                .lock()
+                .unwrap()
+                .take()
+                .expect("receiver used once");
+            Ok(Box::pin(async_stream::stream! {
+                while let Some(chunk) = receiver.recv().await {
+                    yield chunk;
+                }
+            }))
+        }
+
+        async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
 
     #[test]
     fn extracts_openai_request_model() {
@@ -341,8 +458,66 @@ mod tests {
             .to_string(),
         );
 
-        let response = proxy_post(state, "/v1/chat/completions", body, extract_openai_model).await;
+        let response = chat_completions(State(state), body).await;
 
         assert_eq!(response.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn binary_anthropic_response_yields_body_chunk_before_backend_final() {
+        use tokio::time::{timeout, Duration};
+
+        let config = Arc::new(ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8081,
+            default_model: "default".to_string(),
+            context_tokens: 8192,
+            max_retries: 0,
+            rescue_enabled: true,
+            serialize_requests: false,
+            verbose: false,
+        });
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let client = Arc::new(BinaryChannelStreamClient::new(rx));
+        let body = Bytes::from(
+            json!({
+                "model": "claude-test",
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true
+            })
+            .to_string(),
+        );
+
+        let response =
+            anthropic_messages_with_client(config, Arc::new(TokioMutex::new(())), client, body)
+                .await;
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-cache");
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
+
+        let mut body_stream = response.into_body().into_data_stream();
+        tx.send(Ok(
+            StreamChunk::new(ChunkType::TextDelta).with_content("first")
+        ))
+        .await
+        .unwrap();
+        let first = timeout(Duration::from_millis(100), body_stream.next())
+            .await
+            .expect("first body chunk before final")
+            .expect("body chunk")
+            .expect("body ok");
+        let first = std::str::from_utf8(&first).unwrap();
+        assert!(first.starts_with("event: "));
+        assert!(!first.contains("[DONE]"));
+
+        tx.send(Ok(StreamChunk::new(ChunkType::Final)
+            .with_response(LLMResponse::Text(TextResponse::new("first")))))
+            .await
+            .unwrap();
     }
 }

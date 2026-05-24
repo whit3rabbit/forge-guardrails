@@ -168,11 +168,16 @@ impl HTTPServer {
         .await
         {
             Ok(AnthropicHandlerResult::Response(v)) => (200, "application/json", v.to_string()),
-            Ok(AnthropicHandlerResult::Events(events)) => (
-                200,
-                "text/event-stream",
-                response::format_anthropic_sse_body(&events),
-            ),
+            Ok(AnthropicHandlerResult::StreamBody(events)) => {
+                match response::collect_anthropic_sse_body(events).await {
+                    Ok(body) => (200, "text/event-stream", body),
+                    Err(e) => (
+                        502,
+                        "application/json",
+                        json!({"error": e.to_string()}).to_string(),
+                    ),
+                }
+            }
             Err(AnthropicHandlerError::BadRequest(e)) => {
                 (400, "application/json", json!({"error": e}).to_string())
             }
@@ -181,6 +186,77 @@ impl HTTPServer {
             }
             Err(AnthropicHandlerError::Internal(e)) => {
                 (500, "application/json", json!({"error": e}).to_string())
+            }
+        }
+    }
+
+    async fn handle_anthropic_messages_response<C: LLMClient + 'static>(
+        &self,
+        body: &[u8],
+        client: &Arc<C>,
+        context_manager: &Arc<Mutex<ContextManager>>,
+    ) -> axum::response::Response {
+        if body.len() > MAX_BODY_SIZE {
+            return response::build_response(
+                413,
+                "application/json",
+                json!({"error": "request too large"}).to_string(),
+            );
+        }
+
+        let raw: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return response::build_response(
+                    400,
+                    "application/json",
+                    json!({"error": e.to_string()}).to_string(),
+                );
+            }
+        };
+
+        let parsed: anyllm_translate::anthropic::MessageCreateRequest =
+            match serde_json::from_value(raw.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    return response::build_response(
+                        400,
+                        "application/json",
+                        json!({"error": e.to_string()}).to_string(),
+                    );
+                }
+            };
+
+        let guard = if self.serialize_requests {
+            Some(self.request_mutex.clone().lock_owned().await)
+        } else {
+            None
+        };
+
+        match handler::handle_anthropic_messages(
+            &parsed,
+            &raw,
+            client,
+            context_manager,
+            self.max_retries,
+            self.rescue_enabled,
+        )
+        .await
+        {
+            Ok(AnthropicHandlerResult::Response(v)) => {
+                response::build_response(200, "application/json", v.to_string())
+            }
+            Ok(AnthropicHandlerResult::StreamBody(events)) => {
+                response::build_anthropic_sse_response(events, guard)
+            }
+            Err(AnthropicHandlerError::BadRequest(e)) => {
+                response::build_response(400, "application/json", json!({"error": e}).to_string())
+            }
+            Err(AnthropicHandlerError::Upstream(e)) => {
+                response::build_response(502, "application/json", json!({"error": e}).to_string())
+            }
+            Err(AnthropicHandlerError::Internal(e)) => {
+                response::build_response(500, "application/json", json!({"error": e}).to_string())
             }
         }
     }
@@ -426,10 +502,8 @@ impl HTTPServer {
             let cli = cli_messages.clone();
             let ctx = ctx_messages.clone();
             async move {
-                let (status, ct, _, resp_body) = srv
-                    .handle_request("POST", "/v1/messages", &body, &cli, &ctx)
-                    .await;
-                response::build_response(status, ct, resp_body)
+                srv.handle_anthropic_messages_response(&body, &cli, &ctx)
+                    .await
             }
         };
 
@@ -895,6 +969,50 @@ mod tests {
         assert!(body_str.contains("event: content_block_delta"));
         assert!(body_str.contains("event: message_stop"));
         assert!(body_str.contains("test"));
+        assert!(!body_str.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn live_anthropic_response_yields_body_chunk_before_backend_final() {
+        use futures_util::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let client = Arc::new(ChannelStreamClient::new(rx));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let body = serde_json::to_vec(&json!({
+            "model": "claude-test",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .unwrap();
+
+        let response = srv
+            .handle_anthropic_messages_response(&body, &client, &ctx)
+            .await;
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-cache");
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
+
+        let mut body_stream = response.into_body().into_data_stream();
+        tx.send(Ok(
+            StreamChunk::new(ChunkType::TextDelta).with_content("first")
+        ))
+        .await
+        .unwrap();
+        let first = timeout(Duration::from_millis(100), body_stream.next())
+            .await
+            .expect("first body chunk before final")
+            .expect("body chunk")
+            .expect("body ok");
+        let first = std::str::from_utf8(&first).unwrap();
+        assert!(first.starts_with("event: "));
+        assert!(!first.contains("[DONE]"));
     }
 
     #[tokio::test]
@@ -939,6 +1057,12 @@ mod tests {
         let response = srv
             .handle_chat_completions_response(&body, &client, &ctx)
             .await;
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-cache");
+        assert_eq!(response.headers().get("x-accel-buffering").unwrap(), "no");
         let mut body_stream = response.into_body().into_data_stream();
 
         tx.send(Ok(

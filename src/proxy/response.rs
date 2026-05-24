@@ -52,10 +52,25 @@ where
         Body::from_stream(openai_sse_bytes_stream(events, guard)),
     )
         .into_response();
-    resp.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream"),
-    );
+    insert_sse_headers(resp.headers_mut());
+    insert_cors_headers(resp.headers_mut());
+    resp
+}
+
+/// Build a live Anthropic SSE response from named stream events.
+pub(crate) fn build_anthropic_sse_response<S>(
+    events: S,
+    guard: Option<OwnedMutexGuard<()>>,
+) -> Response
+where
+    S: Stream<Item = Result<StreamEvent, StreamError>> + Send + 'static,
+{
+    let mut resp = (
+        StatusCode::OK,
+        Body::from_stream(anthropic_sse_bytes_stream(events, guard)),
+    )
+        .into_response();
+    insert_sse_headers(resp.headers_mut());
     insert_cors_headers(resp.headers_mut());
     resp
 }
@@ -71,6 +86,18 @@ fn insert_cors_headers(headers: &mut HeaderMap) {
             headers.insert(header_name, HeaderValue::from_static(value));
         }
     }
+}
+
+fn insert_sse_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
 }
 
 fn cors_header_name(name: &str) -> Option<HeaderName> {
@@ -113,6 +140,18 @@ where
     Ok(body)
 }
 
+pub(crate) async fn collect_anthropic_sse_body<S>(events: S) -> Result<String, StreamError>
+where
+    S: Stream<Item = Result<StreamEvent, StreamError>>,
+{
+    let mut events = Box::pin(events);
+    let mut body = String::new();
+    while let Some(event) = events.next().await {
+        push_anthropic_sse_event(&mut body, &event?);
+    }
+    Ok(body)
+}
+
 pub(crate) fn openai_sse_bytes_stream<S>(
     events: S,
     guard: Option<OwnedMutexGuard<()>>,
@@ -138,18 +177,48 @@ where
     }
 }
 
+pub(crate) fn anthropic_sse_bytes_stream<S>(
+    events: S,
+    guard: Option<OwnedMutexGuard<()>>,
+) -> impl Stream<Item = Result<Bytes, io::Error>> + Send + 'static
+where
+    S: Stream<Item = Result<StreamEvent, StreamError>> + Send + 'static,
+{
+    async_stream::stream! {
+        let _guard = guard;
+        let mut events = Box::pin(events);
+        while let Some(event) = events.next().await {
+            match event {
+                Ok(event) => {
+                    let mut body = String::new();
+                    push_anthropic_sse_event(&mut body, &event);
+                    yield Ok(Bytes::from(body));
+                }
+                Err(err) => {
+                    yield Err(io::Error::other(err.to_string()));
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Format Anthropic SSE events with named event fields.
 pub fn format_anthropic_sse_body(events: &[StreamEvent]) -> String {
     let mut body = String::new();
     for event in events {
-        body.push_str("event: ");
-        body.push_str(anthropic_event_name(event));
-        body.push('\n');
-        body.push_str("data: ");
-        body.push_str(&serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()));
-        body.push_str("\n\n");
+        push_anthropic_sse_event(&mut body, event);
     }
     body
+}
+
+fn push_anthropic_sse_event(body: &mut String, event: &StreamEvent) {
+    body.push_str("event: ");
+    body.push_str(anthropic_event_name(event));
+    body.push('\n');
+    body.push_str("data: ");
+    body.push_str(&serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()));
+    body.push_str("\n\n");
 }
 
 fn anthropic_event_name(event: &StreamEvent) -> &'static str {

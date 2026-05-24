@@ -29,6 +29,10 @@ use tokio::sync::Mutex;
 /// Stream of OpenAI chat completion chunk objects.
 pub type OpenAiEventStream = Pin<Box<dyn Stream<Item = Result<Value, StreamError>> + Send>>;
 
+/// Stream of Anthropic Messages API SSE events.
+pub type AnthropicEventStream =
+    Pin<Box<dyn Stream<Item = Result<StreamEvent, StreamError>> + Send>>;
+
 /// Result of handling a chat completion request.
 pub enum HandlerResult {
     /// Non-streaming: single OpenAI response object.
@@ -47,12 +51,20 @@ impl fmt::Debug for HandlerResult {
 }
 
 /// Result of handling an Anthropic Messages API request.
-#[derive(Debug)]
 pub enum AnthropicHandlerResult {
     /// Non-streaming: single Anthropic message response object.
     Response(Value),
     /// Streaming: Anthropic SSE events.
-    Events(Vec<StreamEvent>),
+    StreamBody(AnthropicEventStream),
+}
+
+impl fmt::Debug for AnthropicHandlerResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Response(value) => f.debug_tuple("Response").field(value).finish(),
+            Self::StreamBody(_) => f.write_str("StreamBody(<anthropic event stream>)"),
+        }
+    }
 }
 
 /// Error class for Anthropic request handling.
@@ -120,21 +132,9 @@ pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
                 .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
             Ok(AnthropicHandlerResult::Response(value))
         }
-        HandlerResult::StreamBody(openai_events) => {
-            let mut translator = anyllm_translate::new_stream_translator(body.model.clone());
-            let mut events = Vec::new();
-            let openai_events = collect_openai_events(openai_events)
-                .await
-                .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
-            for event in openai_events {
-                let chunk: anyllm_translate::openai::ChatCompletionChunk =
-                    serde_json::from_value(event)
-                        .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
-                events.extend(translator.process_chunk(&chunk));
-            }
-            events.extend(translator.finish());
-            Ok(AnthropicHandlerResult::Events(events))
-        }
+        HandlerResult::StreamBody(openai_events) => Ok(AnthropicHandlerResult::StreamBody(
+            anthropic_events_stream(openai_events, body.model.clone()),
+        )),
     }
 }
 
@@ -490,7 +490,53 @@ fn tool_call_events_stream(
     })
 }
 
+#[cfg(test)]
 async fn collect_openai_events(mut stream: OpenAiEventStream) -> Result<Vec<Value>, StreamError> {
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event?);
+    }
+    Ok(events)
+}
+
+fn anthropic_events_stream(
+    openai_events: OpenAiEventStream,
+    model: String,
+) -> AnthropicEventStream {
+    Box::pin(async_stream::stream! {
+        let mut openai_events = openai_events;
+        let mut translator = anyllm_translate::new_stream_translator(model);
+
+        while let Some(event) = openai_events.next().await {
+            let event = match event {
+                Ok(event) => event,
+                Err(err) => {
+                    yield Err(err);
+                    return;
+                }
+            };
+            let chunk: anyllm_translate::openai::ChatCompletionChunk = match serde_json::from_value(event) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    yield Err(StreamError::new(err.to_string()));
+                    return;
+                }
+            };
+            for event in translator.process_chunk(&chunk) {
+                yield Ok(event);
+            }
+        }
+
+        for event in translator.finish() {
+            yield Ok(event);
+        }
+    })
+}
+
+#[cfg(test)]
+async fn collect_anthropic_events(
+    mut stream: AnthropicEventStream,
+) -> Result<Vec<StreamEvent>, StreamError> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
         events.push(event?);
@@ -1018,6 +1064,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_no_tools_streaming_uses_stream_client() {
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        });
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let client = Arc::new(MockStreamingOptionsClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        assert_eq!(client.send_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(client.stream_calls.load(Ordering::SeqCst), 1);
+
+        let events = match result {
+            AnthropicHandlerResult::StreamBody(stream) => {
+                collect_anthropic_events(stream).await.expect("events")
+            }
+            other => panic!("expected StreamBody, got {other:?}"),
+        };
+        let body = crate::proxy::server::format_anthropic_sse_body(events.as_slice());
+        assert!(body.contains("event: message_start"));
+        assert!(body.contains("event: content_block_delta"));
+        assert!(body.contains("first"));
+        assert!(!body.contains("[DONE]"));
+    }
+
+    #[tokio::test]
     async fn anthropic_messages_translates_nonzero_usage() {
         let raw = json!({
             "model": "claude-3",
@@ -1093,6 +1170,61 @@ mod tests {
             }
             _ => panic!("expected Response"),
         }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_streaming_preserves_cache_control_to_backend() {
+        let mut server = mockito::Server::new_async().await;
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hi",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let sse = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let mock = server
+            .mock("POST", "/messages")
+            .match_body(mockito::Matcher::Json(raw.clone()))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let client = Arc::new(
+            AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+                .with_base_url(server.url())
+                .with_timeout(5.0),
+        );
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        let events = match result {
+            AnthropicHandlerResult::StreamBody(stream) => {
+                collect_anthropic_events(stream).await.expect("events")
+            }
+            other => panic!("expected StreamBody, got {other:?}"),
+        };
+        let body = crate::proxy::server::format_anthropic_sse_body(events.as_slice());
+        assert!(body.contains("ok"));
+        assert!(!body.contains("[DONE]"));
         mock.assert_async().await;
     }
 
@@ -1428,6 +1560,42 @@ mod tests {
             events.last().unwrap()["choices"][0]["finish_reason"],
             "tool_calls"
         );
+    }
+
+    #[tokio::test]
+    async fn anthropic_guarded_streaming_holds_invalid_tool_chunks_until_validated() {
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "tools": [{
+                "name": "search",
+                "description": "Search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}}
+                }
+            }]
+        });
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let client = Arc::new(MockGuardedStreamingClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 2, true)
+            .await
+            .expect("handler result");
+
+        assert_eq!(client.stream_calls.load(Ordering::SeqCst), 2);
+        let events = match result {
+            AnthropicHandlerResult::StreamBody(stream) => {
+                collect_anthropic_events(stream).await.expect("events")
+            }
+            other => panic!("expected StreamBody, got {other:?}"),
+        };
+        let body = crate::proxy::server::format_anthropic_sse_body(events.as_slice());
+        assert!(!body.contains("leaky-bogus"));
+        assert!(!body.contains("bogus"));
+        assert!(body.contains("search"));
     }
 
     #[tokio::test]

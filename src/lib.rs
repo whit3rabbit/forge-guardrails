@@ -65,7 +65,8 @@ pub use proxy::{
     extract_passthrough, extract_sampling, handle_anthropic_messages, handle_chat_completions,
     has_respond_tool, openai_to_messages, respond_tool_openai, strip_respond_calls,
     text_response_to_openai, text_to_sse_events, tool_calls_to_openai, tool_calls_to_sse_events,
-    AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerResult, OpenAiEventStream,
+    AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerResult,
+    OpenAiEventStream,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};
