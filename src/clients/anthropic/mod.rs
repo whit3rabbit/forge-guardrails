@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::clients::base::{
-    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMResponse, SamplingParams, StreamChunk,
-    TokenUsage,
+    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMRequestOptions, LLMResponse, SamplingParams,
+    StreamChunk, TokenUsage,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -94,6 +94,90 @@ impl AnthropicClient {
     pub fn get_last_usage(&self) -> Option<TokenUsage> {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
     }
+
+    fn build_body_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+        stream: bool,
+    ) -> Value {
+        if let Some(mut body) = options.inbound_anthropic_body {
+            if let Some(obj) = body.as_object_mut() {
+                if stream {
+                    obj.insert("stream".to_string(), Value::Bool(true));
+                } else {
+                    obj.remove("stream");
+                }
+                obj.entry("model".to_string())
+                    .or_insert_with(|| Value::String(self.model.clone()));
+            }
+            return body;
+        }
+
+        let (_system, mut body) = convert::build_request_body(
+            &self.model,
+            &messages,
+            self.max_tokens,
+            tools.as_deref(),
+            self.tool_choice.as_deref(),
+        );
+        apply_rebuilt_anthropic_passthrough(options.passthrough.as_ref(), &mut body);
+        if stream {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("stream".to_string(), Value::Bool(true));
+            }
+        }
+        body
+    }
+}
+
+fn apply_rebuilt_anthropic_passthrough(
+    passthrough: Option<&serde_json::Map<String, Value>>,
+    body: &mut Value,
+) {
+    let Some(passthrough) = passthrough else {
+        return;
+    };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+
+    if let Some(model) = passthrough.get("model").and_then(Value::as_str) {
+        obj.insert("model".to_string(), Value::String(model.to_string()));
+    }
+    if let Some(max_tokens) = passthrough
+        .get("max_completion_tokens")
+        .or_else(|| passthrough.get("max_tokens"))
+    {
+        obj.insert("max_tokens".to_string(), max_tokens.clone());
+    }
+    if let Some(stop) = passthrough.get("stop") {
+        obj.insert("stop_sequences".to_string(), stop.clone());
+    }
+    if let Some(tool_choice) = passthrough.get("tool_choice") {
+        if let Some(mapped) = openai_tool_choice_to_anthropic(tool_choice) {
+            obj.insert("tool_choice".to_string(), mapped);
+        }
+    }
+    if let Some(user) = passthrough.get("user").and_then(Value::as_str) {
+        obj.insert("metadata".to_string(), serde_json::json!({"user_id": user}));
+    }
+}
+
+fn openai_tool_choice_to_anthropic(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(choice) if choice == "required" => Some(serde_json::json!({"type": "any"})),
+        Value::String(choice) if choice == "auto" || choice == "none" => {
+            Some(serde_json::json!({"type": choice}))
+        }
+        Value::Object(obj) => obj
+            .get("function")
+            .and_then(|func| func.get("name"))
+            .and_then(Value::as_str)
+            .map(|name| serde_json::json!({"type": "tool", "name": name})),
+        _ => None,
+    }
 }
 
 impl LLMClient for AnthropicClient {
@@ -111,6 +195,17 @@ impl LLMClient for AnthropicClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<LLMResponse, BackendError> {
+        self.send_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponse, BackendError> {
+        let sampling = options.sampling.clone();
         if let Some(sp) = &sampling {
             log::debug!(
                 "AnthropicClient: ignoring sampling keys: {:?}",
@@ -118,13 +213,7 @@ impl LLMClient for AnthropicClient {
             );
         }
 
-        let (_system, body) = convert::build_request_body(
-            &self.model,
-            &messages,
-            self.max_tokens,
-            tools.as_deref(),
-            self.tool_choice.as_deref(),
-        );
+        let body = self.build_body_with_options(messages, tools, options, false);
 
         let client = reqwest::Client::new();
         let mut req = client
@@ -164,6 +253,17 @@ impl LLMClient for AnthropicClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, StreamError> {
+        self.send_stream_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_stream_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<ChunkStream, StreamError> {
+        let sampling = options.sampling.clone();
         if let Some(sp) = &sampling {
             log::debug!(
                 "AnthropicClient: ignoring sampling keys: {:?}",
@@ -171,18 +271,7 @@ impl LLMClient for AnthropicClient {
             );
         }
 
-        let (_system, body) = convert::build_request_body(
-            &self.model,
-            &messages,
-            self.max_tokens,
-            tools.as_deref(),
-            self.tool_choice.as_deref(),
-        );
-
-        let mut body = body;
-        if let Some(obj) = body.as_object_mut() {
-            obj.insert("stream".to_string(), Value::Bool(true));
-        }
+        let body = self.build_body_with_options(messages, tools, options, true);
 
         let client = reqwest::Client::new();
         let mut req = client
@@ -628,5 +717,103 @@ mod tests {
         let u = client.get_last_usage().expect("set");
         assert_eq!(u.prompt_tokens, 42);
         assert_eq!(u.total_tokens, 49);
+    }
+
+    #[test]
+    fn rebuilt_body_maps_passthrough_to_anthropic_fields() {
+        let client = AnthropicClient::new("fallback-model", None);
+        let mut passthrough = serde_json::Map::new();
+        passthrough.insert("model".to_string(), json!("request-model"));
+        passthrough.insert("max_tokens".to_string(), json!(128));
+        passthrough.insert("stop".to_string(), json!(["done"]));
+        passthrough.insert(
+            "tool_choice".to_string(),
+            json!({"type": "function", "function": {"name": "search"}}),
+        );
+        passthrough.insert("user".to_string(), json!("user-123"));
+
+        let body = client.build_body_with_options(
+            vec![json!({"role": "user", "content": "hi"})],
+            Some(vec![make_tool_spec(
+                "search",
+                "Search",
+                &[("query", "string")],
+            )]),
+            LLMRequestOptions {
+                passthrough: Some(passthrough),
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(body["model"], "request-model");
+        assert_eq!(body["max_tokens"], 128);
+        assert_eq!(body["stop_sequences"], json!(["done"]));
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "tool", "name": "search"})
+        );
+        assert_eq!(body["metadata"]["user_id"], "user-123");
+    }
+
+    #[tokio::test]
+    async fn raw_anthropic_body_is_sent_verbatim_for_clean_path() {
+        let mut server = mockito::Server::new_async().await;
+        let raw = json!({
+            "model": "claude-request",
+            "max_tokens": 128,
+            "system": [{
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hi",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }],
+            "metadata": {"user_id": "user-123"}
+        });
+        let mock = server
+            .mock("POST", "/messages")
+            .match_header("content-type", "application/json")
+            .match_body(mockito::Matcher::Json(raw.clone()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 2}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0);
+        let result = client
+            .send_with_options(
+                vec![json!({"role": "user", "content": "mutated"})],
+                None,
+                LLMRequestOptions {
+                    inbound_anthropic_body: Some(raw),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("accepted");
+
+        match result {
+            LLMResponse::Text(text) => assert_eq!(text.content, "ok"),
+            _ => panic!("expected text"),
+        }
+        let usage = client.last_usage().expect("usage");
+        assert_eq!(usage.total_tokens, 12);
+        mock.assert_async().await;
     }
 }

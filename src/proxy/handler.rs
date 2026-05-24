@@ -4,13 +4,16 @@
 //! It converts inbound OpenAI messages, runs inference with validation/retry,
 //! then strips respond() calls from output.
 
-use crate::clients::base::{LLMClient, LLMResponse, SamplingParams, TextResponse, ToolCall};
+use crate::clients::base::{
+    LLMClient, LLMRequestOptions, LLMResponse, TextResponse, TokenUsage, ToolCall,
+};
 use crate::context::manager::ContextManager;
 use crate::core::tool_spec::ToolSpec;
 use crate::proxy::{
-    extract_sampling, has_respond_tool, openai_to_messages, respond_tool_openai,
-    strip_respond_calls, text_response_to_openai, text_to_sse_events, tool_calls_to_openai,
-    tool_calls_to_sse_events,
+    extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,
+    respond_tool_openai, strip_respond_calls, text_response_to_openai_with_usage,
+    text_to_sse_events_with_usage, tool_calls_to_openai_with_usage,
+    tool_calls_to_sse_events_with_usage,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 use anyllm_translate::anthropic::streaming::StreamEvent;
@@ -64,6 +67,7 @@ impl AnthropicHandlerError {
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_anthropic_messages<C: LLMClient>(
     body: &MessageCreateRequest,
+    raw_body: &Value,
     client: &Arc<C>,
     context_manager: &Arc<Mutex<ContextManager>>,
     max_retries: i32,
@@ -72,15 +76,22 @@ pub async fn handle_anthropic_messages<C: LLMClient>(
     let config = anyllm_translate::TranslationConfig::default();
     let openai_req = anyllm_translate::translate_request(body, &config)
         .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
-    let openai_value = serde_json::to_value(&openai_req)
+    let mut openai_value = serde_json::to_value(&openai_req)
         .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+    if let (Some(max_tokens), Some(obj)) =
+        (raw_body.get("max_tokens"), openai_value.as_object_mut())
+    {
+        obj.insert("max_tokens".to_string(), max_tokens.clone());
+        obj.remove("max_completion_tokens");
+    }
 
-    match handle_chat_completions(
+    match handle_chat_completions_impl(
         &openai_value,
         client,
         context_manager,
         max_retries,
         rescue_enabled,
+        Some(raw_body.clone()),
     )
     .await
     .map_err(AnthropicHandlerError::Upstream)?
@@ -125,6 +136,26 @@ pub async fn handle_chat_completions<C: LLMClient>(
     max_retries: i32,
     rescue_enabled: bool,
 ) -> Result<HandlerResult, String> {
+    handle_chat_completions_impl(
+        body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_chat_completions_impl<C: LLMClient>(
+    body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    inbound_anthropic_body: Option<Value>,
+) -> Result<HandlerResult, String> {
     let messages = body
         .get("messages")
         .and_then(|m| m.as_array())
@@ -147,6 +178,12 @@ pub async fn handle_chat_completions<C: LLMClient>(
         .unwrap_or_default();
 
     let sampling = extract_sampling(body);
+    let passthrough = extract_passthrough(body);
+    let request_options = LLMRequestOptions {
+        sampling,
+        passthrough,
+        inbound_anthropic_body,
+    };
 
     // Convert inbound OpenAI messages to internal format.
     let mut internal_msgs = openai_to_messages(messages);
@@ -155,7 +192,15 @@ pub async fn handle_chat_completions<C: LLMClient>(
     if tools_raw.is_empty() {
         let api_format = client.api_format().as_str();
         let serialized = crate::core::inference::fold_and_serialize(&internal_msgs, api_format);
-        return run_passthrough(client, &serialized, None, &sampling, model_name, stream).await;
+        return run_passthrough(
+            client,
+            &serialized,
+            None,
+            request_options,
+            model_name,
+            stream,
+        )
+        .await;
     }
 
     // Tools present: inject respond tool if needed.
@@ -175,7 +220,7 @@ pub async fn handle_chat_completions<C: LLMClient>(
     let mut ctx = context_manager.lock().await;
 
     // Run inference (compact -> fold -> serialize -> send -> validate -> retry)
-    let inference_result = crate::core::inference::run_inference(
+    let inference_result = crate::core::inference::run_inference_with_options(
         &mut internal_msgs,
         client.as_ref(),
         &mut ctx,
@@ -188,7 +233,7 @@ pub async fn handle_chat_completions<C: LLMClient>(
         Some(max_retries + 1), // max_attempts
         false,                 // stream is false during inference, matching Python
         None,
-        sampling.as_ref(),
+        request_options,
     )
     .await;
 
@@ -199,23 +244,32 @@ pub async fn handle_chat_completions<C: LLMClient>(
         Ok(None) => LLMResponse::Text(TextResponse::new("")),
         Err(crate::error::ForgeError::ToolCall(err)) => {
             let raw = err.raw_response.unwrap_or_default();
-            return Ok(text_content_result(&raw, model_name, stream));
+            let usage = client.last_usage();
+            return Ok(text_content_result(
+                &raw,
+                model_name,
+                stream,
+                usage.as_ref(),
+            ));
         }
         Err(err) => return Err(err.to_string()),
     };
+    let usage = client.last_usage();
 
     let handler_result = match response {
-        LLMResponse::Text(ref text) => text_response_result(text, model_name, stream),
+        LLMResponse::Text(ref text) => {
+            text_response_result(text, model_name, stream, usage.as_ref())
+        }
         LLMResponse::ToolCalls(ref calls) => {
             let (real_calls, respond_text) = strip_respond_calls(calls);
 
             if real_calls.is_empty() {
                 // Pure respond: convert to text.
                 let text = respond_text.unwrap_or_default();
-                text_content_result(&text, model_name, stream)
+                text_content_result(&text, model_name, stream, usage.as_ref())
             } else {
                 // Real tool calls: return only those calls and drop respond.
-                tool_calls_result(&real_calls, model_name, stream)
+                tool_calls_result(&real_calls, model_name, stream, usage.as_ref())
             }
         }
     };
@@ -228,49 +282,77 @@ pub async fn run_passthrough<C: LLMClient>(
     client: &Arc<C>,
     serialized: &[Value],
     _tools: Option<Vec<ToolSpec>>,
-    sampling: &Option<SamplingParams>,
+    options: LLMRequestOptions,
     model_name: &str,
     stream: bool,
 ) -> Result<HandlerResult, String> {
     let response = client
-        .send(serialized.to_vec(), None, sampling.clone())
+        .send_with_options(serialized.to_vec(), None, options)
         .await
         .map_err(|e| e.to_string())?;
+    let usage = client.last_usage();
 
     match response {
-        LLMResponse::Text(text) => Ok(text_response_result(&text, model_name, stream)),
+        LLMResponse::Text(text) => Ok(text_response_result(
+            &text,
+            model_name,
+            stream,
+            usage.as_ref(),
+        )),
         LLMResponse::ToolCalls(_) => {
             // No-tools passthrough must not expose unexpected backend tool calls.
-            Ok(text_content_result("", model_name, stream))
+            Ok(text_content_result("", model_name, stream, usage.as_ref()))
         }
     }
 }
 
 /// Convert a final text object while preserving the requested response shape.
-fn text_response_result(text: &TextResponse, model_name: &str, stream: bool) -> HandlerResult {
+fn text_response_result(
+    text: &TextResponse,
+    model_name: &str,
+    stream: bool,
+    usage: Option<&TokenUsage>,
+) -> HandlerResult {
     if stream {
-        HandlerResult::Events(text_to_sse_events(&text.content, model_name, 0))
+        HandlerResult::Events(text_to_sse_events_with_usage(
+            &text.content,
+            model_name,
+            0,
+            usage,
+        ))
     } else {
-        HandlerResult::Response(text_response_to_openai(text, model_name))
+        HandlerResult::Response(text_response_to_openai_with_usage(text, model_name, usage))
     }
 }
 
-fn text_content_result(content: &str, model_name: &str, stream: bool) -> HandlerResult {
+fn text_content_result(
+    content: &str,
+    model_name: &str,
+    stream: bool,
+    usage: Option<&TokenUsage>,
+) -> HandlerResult {
     if stream {
-        HandlerResult::Events(text_to_sse_events(content, model_name, 0))
+        HandlerResult::Events(text_to_sse_events_with_usage(content, model_name, 0, usage))
     } else {
         let text = TextResponse::new(content);
-        HandlerResult::Response(text_response_to_openai(&text, model_name))
+        HandlerResult::Response(text_response_to_openai_with_usage(&text, model_name, usage))
     }
 }
 
-fn tool_calls_result(calls: &[ToolCall], model_name: &str, stream: bool) -> HandlerResult {
+fn tool_calls_result(
+    calls: &[ToolCall],
+    model_name: &str,
+    stream: bool,
+    usage: Option<&TokenUsage>,
+) -> HandlerResult {
     if calls.is_empty() {
-        text_content_result("", model_name, stream)
+        text_content_result("", model_name, stream, usage)
     } else if stream {
-        HandlerResult::Events(tool_calls_to_sse_events(calls, model_name))
+        HandlerResult::Events(tool_calls_to_sse_events_with_usage(
+            calls, model_name, usage,
+        ))
     } else {
-        HandlerResult::Response(tool_calls_to_openai(calls, model_name))
+        HandlerResult::Response(tool_calls_to_openai_with_usage(calls, model_name, usage))
     }
 }
 
@@ -286,8 +368,8 @@ pub fn filter_respond(calls: &[ToolCall]) -> Vec<ToolCall> {
 /// Convert LLM response to OpenAI format (streaming or non-streaming).
 pub fn process_response(response: &LLMResponse, model_name: &str, stream: bool) -> HandlerResult {
     match response {
-        LLMResponse::ToolCalls(calls) => tool_calls_result(calls, model_name, stream),
-        LLMResponse::Text(text) => text_response_result(text, model_name, stream),
+        LLMResponse::ToolCalls(calls) => tool_calls_result(calls, model_name, stream, None),
+        LLMResponse::Text(text) => text_response_result(text, model_name, stream, None),
     }
 }
 
@@ -317,7 +399,11 @@ pub fn parse_tool_specs(tools: &[Value]) -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::base::{ApiFormat, ChunkStream, ToolCall};
+    use crate::clients::base::{
+        ApiFormat, ChunkStream, LLMRequestOptions, SamplingParams, TokenUsage, ToolCall,
+    };
+    use crate::clients::AnthropicClient;
+    use anyllm_translate::anthropic::MessageCreateRequest;
     use indexmap::IndexMap;
     use serde_json::json;
 
@@ -474,6 +560,64 @@ mod tests {
         }
     }
 
+    struct MockOptionsClient {
+        last_options: std::sync::Mutex<Option<LLMRequestOptions>>,
+        usage: Option<TokenUsage>,
+    }
+
+    impl MockOptionsClient {
+        fn new(usage: Option<TokenUsage>) -> Self {
+            Self {
+                last_options: std::sync::Mutex::new(None),
+                usage,
+            }
+        }
+    }
+
+    impl LLMClient for MockOptionsClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        fn last_usage(&self) -> Option<TokenUsage> {
+            self.usage.clone()
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            Ok(LLMResponse::Text(TextResponse::new("options response")))
+        }
+
+        async fn send_with_options(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            options: LLMRequestOptions,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            *self.last_options.lock().unwrap() = Some(options);
+            Ok(LLMResponse::Text(TextResponse::new("options response")))
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            Err(crate::error::StreamError::new("not implemented"))
+        }
+
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
     struct MockToolCallClient;
 
     impl LLMClient for MockToolCallClient {
@@ -563,6 +707,135 @@ mod tests {
             }
             _ => panic!("expected Response"),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_no_tools_forwards_passthrough_options_and_usage() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "stream": false,
+            "max_tokens": 128,
+            "stop": ["done"],
+            "tool_choice": {"type": "function", "function": {"name": "search"}},
+            "response_format": {"type": "json_object"},
+            "temperature": 0.7
+        });
+        let client = Arc::new(MockOptionsClient::new(Some(TokenUsage::new(11, 5, 16))));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
+
+        match result.unwrap() {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["message"]["content"], "options response");
+                assert_eq!(v["usage"]["prompt_tokens"], 11);
+                assert_eq!(v["usage"]["completion_tokens"], 5);
+                assert_eq!(v["usage"]["total_tokens"], 16);
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let options = client
+            .last_options
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("options recorded");
+        let passthrough = options.passthrough.expect("passthrough");
+        assert_eq!(passthrough["model"], "request-model");
+        assert_eq!(passthrough["max_tokens"], 128);
+        assert_eq!(passthrough["stop"], json!(["done"]));
+        assert_eq!(
+            passthrough["tool_choice"],
+            json!({"type": "function", "function": {"name": "search"}})
+        );
+        assert_eq!(
+            passthrough["response_format"],
+            json!({"type": "json_object"})
+        );
+        assert!(!passthrough.contains_key("messages"));
+        assert!(!passthrough.contains_key("stream"));
+        assert!(!passthrough.contains_key("temperature"));
+        assert!(options.inbound_anthropic_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_translates_nonzero_usage() {
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let client = Arc::new(MockOptionsClient::new(Some(TokenUsage::new(13, 7, 20))));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true).await;
+
+        match result.unwrap() {
+            AnthropicHandlerResult::Response(v) => {
+                assert_eq!(v["content"][0]["text"], "options response");
+                assert_eq!(v["usage"]["input_tokens"], 13);
+                assert_eq!(v["usage"]["output_tokens"], 7);
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let options = client
+            .last_options
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("options recorded");
+        assert_eq!(options.inbound_anthropic_body, Some(raw));
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_clean_path_preserves_cache_control_to_backend() {
+        let mut server = mockito::Server::new_async().await;
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hi",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let mock = server
+            .mock("POST", "/messages")
+            .match_body(mockito::Matcher::Json(raw.clone()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 3, "output_tokens": 1}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let client = Arc::new(
+            AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+                .with_base_url(server.url())
+                .with_timeout(5.0),
+        );
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true).await;
+
+        match result.unwrap() {
+            AnthropicHandlerResult::Response(v) => {
+                assert_eq!(v["content"][0]["text"], "ok");
+                assert_eq!(v["usage"]["input_tokens"], 3);
+                assert_eq!(v["usage"]["output_tokens"], 1);
+            }
+            _ => panic!("expected Response"),
+        }
+        mock.assert_async().await;
     }
 
     #[tokio::test]

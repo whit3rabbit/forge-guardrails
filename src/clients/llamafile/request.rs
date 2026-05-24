@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::{helpers, streaming, LlamafileClient, LlamafileMode};
 use crate::clients::base::{
@@ -14,8 +14,9 @@ impl LlamafileClient {
         messages: Vec<Value>,
         tools: Option<&[ToolSpec]>,
         sampling: Option<&SamplingParams>,
+        passthrough: Option<&Map<String, Value>>,
     ) -> Result<LLMResponse, BackendError> {
-        let body = self.build_native_body(&messages, tools, sampling);
+        let body = self.build_native_body(&messages, tools, sampling, passthrough);
         let resp = reqwest::Client::new()
             .post(format!("{}/chat/completions", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
@@ -48,8 +49,9 @@ impl LlamafileClient {
         messages: Vec<Value>,
         tools: &[ToolSpec],
         sampling: Option<&SamplingParams>,
+        passthrough: Option<&Map<String, Value>>,
     ) -> Result<LLMResponse, BackendError> {
-        let body = self.build_prompt_body(&messages, tools, sampling);
+        let body = self.build_prompt_body(&messages, tools, sampling, passthrough);
         let resp = reqwest::Client::new()
             .post(format!("{}/chat/completions", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
@@ -82,9 +84,16 @@ impl LlamafileClient {
         messages: Vec<Value>,
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
+        passthrough: Option<Map<String, Value>>,
         mode: LlamafileMode,
     ) -> Result<ChunkStream, StreamError> {
-        let body = self.build_stream_body(&messages, tools.as_deref(), sampling.as_ref(), mode);
+        let body = self.build_stream_body(
+            &messages,
+            tools.as_deref(),
+            sampling.as_ref(),
+            passthrough.as_ref(),
+            mode,
+        );
         let resp = reqwest::Client::new()
             .post(format!("{}/chat/completions", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
@@ -131,14 +140,16 @@ impl LlamafileClient {
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
         sampling: Option<&SamplingParams>,
+        passthrough: Option<&Map<String, Value>>,
     ) -> Value {
         let merged = helpers::merge_messages(messages);
-        let mut body = json!({
-            "model": self.model,
-            "messages": merged,
-            "stream": false,
-            "cache_prompt": self.cache_prompt
-        });
+        let mut body = Value::Object(passthrough.cloned().unwrap_or_default());
+        if let Some(obj) = body.as_object_mut() {
+            obj.entry("model").or_insert_with(|| json!(self.model));
+            obj.insert("messages".into(), json!(merged));
+            obj.insert("stream".into(), Value::Bool(false));
+            obj.insert("cache_prompt".into(), json!(self.cache_prompt));
+        }
         if let Some(tl) = tools {
             if !tl.is_empty() {
                 let fmt: Vec<Value> = tl.iter().map(format_tool).collect();
@@ -156,15 +167,17 @@ impl LlamafileClient {
         messages: &[Value],
         tools: &[ToolSpec],
         sampling: Option<&SamplingParams>,
+        passthrough: Option<&Map<String, Value>>,
     ) -> Value {
         let mut downgraded = helpers::downgrade_messages_for_prompt(messages);
         inject_tool_prompt(&mut downgraded, tools);
-        let mut body = json!({
-            "model": self.model,
-            "messages": downgraded,
-            "stream": false,
-            "cache_prompt": self.cache_prompt
-        });
+        let mut body = Value::Object(passthrough.cloned().unwrap_or_default());
+        if let Some(obj) = body.as_object_mut() {
+            obj.entry("model").or_insert_with(|| json!(self.model));
+            obj.insert("messages".into(), json!(downgraded));
+            obj.insert("stream".into(), Value::Bool(false));
+            obj.insert("cache_prompt".into(), json!(self.cache_prompt));
+        }
         self.apply_common_body_options(sampling, &mut body);
         body
     }
@@ -174,15 +187,17 @@ impl LlamafileClient {
         messages: &[Value],
         tools: Option<&[ToolSpec]>,
         sampling: Option<&SamplingParams>,
+        passthrough: Option<&Map<String, Value>>,
         mode: LlamafileMode,
     ) -> Value {
-        let mut body = json!({
-            "model": self.model,
-            "messages": helpers::merge_messages(messages),
-            "stream": true,
-            "stream_options": {"include_usage": true},
-            "cache_prompt": self.cache_prompt
-        });
+        let mut body = Value::Object(passthrough.cloned().unwrap_or_default());
+        if let Some(obj) = body.as_object_mut() {
+            obj.entry("model").or_insert_with(|| json!(self.model));
+            obj.insert("messages".into(), json!(helpers::merge_messages(messages)));
+            obj.insert("stream".into(), Value::Bool(true));
+            obj.insert("stream_options".into(), json!({"include_usage": true}));
+            obj.insert("cache_prompt".into(), json!(self.cache_prompt));
+        }
         if mode == LlamafileMode::Native {
             if let Some(tl) = tools {
                 if !tl.is_empty() {
@@ -265,6 +280,7 @@ mod tests {
             &[json!({"role": "user", "content": "go"})],
             Some(&[tool]),
             None,
+            None,
         );
         assert_eq!(body["tools"].as_array().expect("tools").len(), 1);
     }
@@ -272,8 +288,12 @@ mod tests {
     #[test]
     fn native_body_omits_empty_tools() {
         let c = LlamafileClient::new(Path::new("t.gguf"));
-        let body =
-            c.build_native_body(&[json!({"role": "user", "content": "go"})], Some(&[]), None);
+        let body = c.build_native_body(
+            &[json!({"role": "user", "content": "go"})],
+            Some(&[]),
+            None,
+            None,
+        );
         assert!(body.get("tools").is_none());
     }
 
@@ -287,6 +307,7 @@ mod tests {
                 json!({"role": "tool", "content": "done"}),
             ],
             &[tool],
+            None,
             None,
         );
         let messages = body["messages"].as_array().expect("messages");
@@ -308,6 +329,7 @@ mod tests {
             &[json!({"role": "user", "content": "go"})],
             None,
             None,
+            None,
             LlamafileMode::Native,
         );
         assert_eq!(body["stream"], true);
@@ -326,6 +348,7 @@ mod tests {
             })],
             Some(&[tool]),
             None,
+            None,
             LlamafileMode::Prompt,
         );
         let content = body["messages"][0]["content"].as_str().expect("content");
@@ -336,14 +359,14 @@ mod tests {
     #[test]
     fn sampling_absent_by_default() {
         let c = LlamafileClient::new(Path::new("t.gguf"));
-        let body = c.build_native_body(&[], None, None);
+        let body = c.build_native_body(&[], None, None, None);
         assert!(body.get("temperature").is_none());
     }
 
     #[test]
     fn sampling_populated() {
         let c = LlamafileClient::new(Path::new("t.gguf")).with_temperature(0.7);
-        let body = c.build_native_body(&[], None, None);
+        let body = c.build_native_body(&[], None, None, None);
         assert_eq!(body["temperature"], 0.7);
     }
 
@@ -352,7 +375,7 @@ mod tests {
         let c = LlamafileClient::new(Path::new("t.gguf")).with_temperature(0.5);
         let mut sp = SamplingParams::new();
         sp.insert("temperature".into(), json!(0.9));
-        let body = c.build_native_body(&[], None, Some(&sp));
+        let body = c.build_native_body(&[], None, Some(&sp), None);
         assert_eq!(body["temperature"], 0.9);
     }
 
@@ -361,22 +384,22 @@ mod tests {
         let c = LlamafileClient::new(Path::new("t.gguf")).with_temperature(0.5);
         let mut sp = SamplingParams::new();
         sp.insert("temperature".into(), json!(0.9));
-        let _ = c.build_native_body(&[], None, Some(&sp));
-        let body = c.build_native_body(&[], None, None);
+        let _ = c.build_native_body(&[], None, Some(&sp), None);
+        let body = c.build_native_body(&[], None, None, None);
         assert_eq!(body["temperature"], 0.5);
     }
 
     #[test]
     fn slot_id_injection() {
         let c = LlamafileClient::new(Path::new("t.gguf")).with_slot_id(3);
-        let body = c.build_native_body(&[], None, None);
+        let body = c.build_native_body(&[], None, None, None);
         assert_eq!(body["slot_id"], 3);
     }
 
     #[test]
     fn slot_id_default_noop() {
         let c = LlamafileClient::new(Path::new("t.gguf"));
-        let body = c.build_native_body(&[], None, None);
+        let body = c.build_native_body(&[], None, None, None);
         assert!(body.get("slot_id").is_none());
     }
 
@@ -385,7 +408,7 @@ mod tests {
         let c = LlamafileClient::new(Path::new("qwen3:8b-q4_K_M.gguf"))
             .with_recommended_sampling(true)
             .with_temperature(0.99);
-        let body = c.build_native_body(&[], None, None);
+        let body = c.build_native_body(&[], None, None, None);
         assert_eq!(body["temperature"], 0.99);
     }
 }

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value};
 
 use crate::clients::base::{
-    ApiFormat, ChunkStream, LLMClient, LLMResponse, SamplingParams, TokenUsage,
+    ApiFormat, ChunkStream, LLMClient, LLMRequestOptions, LLMResponse, SamplingParams, TokenUsage,
 };
 use crate::clients::sampling::get_sampling_defaults;
 use crate::core::tool_spec::ToolSpec;
@@ -223,24 +223,54 @@ impl LLMClient for LlamafileClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<LLMResponse, BackendError> {
+        self.send_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponse, BackendError> {
         match self.get_resolved_mode() {
             Some(LlamafileMode::Prompt) => {
-                self.prompt_send(messages, &tools.unwrap_or_default(), sampling.as_ref())
-                    .await
+                self.prompt_send(
+                    messages,
+                    &tools.unwrap_or_default(),
+                    options.sampling.as_ref(),
+                    options.passthrough.as_ref(),
+                )
+                .await
             }
             Some(LlamafileMode::Native) => {
-                self.native_send(messages, tools.as_deref(), sampling.as_ref())
-                    .await
+                self.native_send(
+                    messages,
+                    tools.as_deref(),
+                    options.sampling.as_ref(),
+                    options.passthrough.as_ref(),
+                )
+                .await
             }
             _ => {
                 if tools.as_ref().is_none_or(|t| t.is_empty()) {
                     self.set_resolved_mode(LlamafileMode::Native);
                     return self
-                        .native_send(messages, tools.as_deref(), sampling.as_ref())
+                        .native_send(
+                            messages,
+                            tools.as_deref(),
+                            options.sampling.as_ref(),
+                            options.passthrough.as_ref(),
+                        )
                         .await;
                 }
                 match self
-                    .native_send(messages.clone(), tools.as_deref(), sampling.as_ref())
+                    .native_send(
+                        messages.clone(),
+                        tools.as_deref(),
+                        options.sampling.as_ref(),
+                        options.passthrough.as_ref(),
+                    )
                     .await
                 {
                     Ok(resp) => {
@@ -249,8 +279,13 @@ impl LLMClient for LlamafileClient {
                     }
                     Err(_) => {
                         self.set_resolved_mode(LlamafileMode::Prompt);
-                        self.prompt_send(messages, &tools.unwrap_or_default(), sampling.as_ref())
-                            .await
+                        self.prompt_send(
+                            messages,
+                            &tools.unwrap_or_default(),
+                            options.sampling.as_ref(),
+                            options.passthrough.as_ref(),
+                        )
+                        .await
                     }
                 }
             }
@@ -263,14 +298,25 @@ impl LLMClient for LlamafileClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, StreamError> {
+        self.send_stream_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_stream_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<ChunkStream, StreamError> {
         let resolved = self.get_resolved_mode();
         if resolved.is_none() && tools.as_ref().is_some_and(|t| !t.is_empty()) {
             let _ = self
-                .send(messages.clone(), tools.clone(), sampling.clone())
+                .send_with_options(messages.clone(), tools.clone(), options.clone())
                 .await;
         }
         let mode = self.get_resolved_mode().unwrap_or(LlamafileMode::Native);
-        self.stream_send(messages, tools, sampling, mode).await
+        self.stream_send(messages, tools, options.sampling, options.passthrough, mode)
+            .await
     }
 
     async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {

@@ -81,6 +81,13 @@ pub(crate) fn direct_openai_api_key(provider_env_vars: &[&str]) -> Option<String
         })
 }
 
+pub(crate) fn direct_anthropic_api_key() -> Option<String> {
+    env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn is_exact_local_url(raw: &str) -> bool {
     let Ok(parsed) = Url::parse(raw) else {
         return false;

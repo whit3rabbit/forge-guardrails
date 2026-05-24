@@ -1,7 +1,7 @@
 //! Core inference: compaction, folding, validation, and retries.
 //! fold_and_serialize converts internal messages to API wire format.
 
-use crate::clients::base::{ChunkType, LLMClient, LLMResponse, StreamChunk};
+use crate::clients::base::{ChunkType, LLMClient, LLMRequestOptions, LLMResponse, StreamChunk};
 use crate::context::manager::ContextManager;
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
@@ -109,6 +109,42 @@ pub async fn run_inference<C: LLMClient>(
     on_chunk: Option<&OnChunkFn>,
     sampling: Option<&serde_json::Map<String, Value>>,
 ) -> Result<Option<InferenceResult>, ForgeError> {
+    let options = LLMRequestOptions::from_sampling(sampling.cloned());
+    run_inference_with_options(
+        messages,
+        client,
+        context_manager,
+        validator,
+        error_tracker,
+        tool_specs,
+        tool_call_counter,
+        step_index,
+        step_hint,
+        max_attempts,
+        stream,
+        on_chunk,
+        options,
+    )
+    .await
+}
+
+/// Core inference function with full request options.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_inference_with_options<C: LLMClient>(
+    messages: &mut Vec<Message>,
+    client: &C,
+    context_manager: &mut ContextManager,
+    validator: &ResponseValidator,
+    error_tracker: &mut ErrorTracker,
+    tool_specs: &[ToolSpec],
+    tool_call_counter: &mut i64,
+    step_index: i64,
+    step_hint: &str,
+    max_attempts: Option<i32>,
+    stream: bool,
+    on_chunk: Option<&OnChunkFn>,
+    options: LLMRequestOptions,
+) -> Result<Option<InferenceResult>, ForgeError> {
     let mut new_messages: Vec<Message> = Vec::new();
     let mut attempts = 0;
     let retry_limit = error_tracker.max_retries().saturating_add(1);
@@ -119,6 +155,7 @@ pub async fn run_inference<C: LLMClient>(
     } else {
         Some(tool_specs.to_vec())
     };
+    let mut verbatim_anthropic_body = options.inbound_anthropic_body.clone();
 
     while attempts < max {
         attempts += 1;
@@ -128,10 +165,14 @@ pub async fn run_inference<C: LLMClient>(
         if let std::borrow::Cow::Owned(ref new_msgs) = compacted {
             messages.clear();
             messages.extend(new_msgs.iter().cloned());
+            verbatim_anthropic_body = None;
         }
 
         // Check context thresholds and inject transient warning.
         let transient_warning = context_manager.check_thresholds(messages);
+        if transient_warning.is_some() {
+            verbatim_anthropic_body = None;
+        }
 
         // Fold and serialize.
         let mut wire = fold_and_serialize(messages, api_format);
@@ -148,12 +189,13 @@ pub async fn run_inference<C: LLMClient>(
             new_messages.push(warning_msg);
         }
 
-        let sampling_owned = sampling.cloned();
+        let mut request_options = options.clone();
+        request_options.inbound_anthropic_body = verbatim_anthropic_body.clone();
 
         // Send to LLM.
         let response = if stream {
             let mut stream = client
-                .send_stream(wire, tools_opt.clone(), sampling_owned)
+                .send_stream_with_options(wire, tools_opt.clone(), request_options)
                 .await
                 .map_err(ForgeError::from)?;
             let mut final_response: Option<LLMResponse> = None;
@@ -173,10 +215,11 @@ pub async fn run_inference<C: LLMClient>(
             })?
         } else {
             client
-                .send(wire, tools_opt.clone(), sampling_owned)
+                .send_with_options(wire, tools_opt.clone(), request_options)
                 .await
                 .map_err(ForgeError::from)?
         };
+        verbatim_anthropic_body = None;
 
         // Sync token count: prefer real usage from client, fall back to heuristic.
         if let Some(usage) = client.last_usage() {
@@ -334,7 +377,11 @@ pub(crate) fn response_to_raw_string(response: &LLMResponse) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::base::{ApiFormat, ChunkStream, SamplingParams, TextResponse, ToolCall};
+    use crate::context::strategies::NoCompact;
+    use crate::core::tool_spec::ToolSpec;
     use indexmap::IndexMap;
+    use serde_json::json;
 
     #[test]
     fn tool_call_id_format() {
@@ -451,5 +498,125 @@ mod tests {
         };
         assert_eq!(result.tool_call_counter, 5);
         assert_eq!(result.attempts, 1);
+    }
+
+    struct RetryRecordingClient {
+        raw_bodies: std::sync::Mutex<Vec<Option<Value>>>,
+    }
+
+    impl RetryRecordingClient {
+        fn new() -> Self {
+            Self {
+                raw_bodies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LLMClient for RetryRecordingClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            Ok(LLMResponse::Text(TextResponse::new("unused")))
+        }
+
+        async fn send_with_options(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            options: LLMRequestOptions,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            let mut raw_bodies = self.raw_bodies.lock().unwrap();
+            let attempt = raw_bodies.len();
+            raw_bodies.push(options.inbound_anthropic_body);
+            drop(raw_bodies);
+
+            if attempt == 0 {
+                Ok(LLMResponse::Text(TextResponse::new("not a tool call")))
+            } else {
+                let mut args = IndexMap::new();
+                args.insert("message".to_string(), json!("ok"));
+                Ok(LLMResponse::ToolCalls(vec![ToolCall::new("respond", args)]))
+            }
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            Err(crate::error::StreamError::new("not implemented"))
+        }
+
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_anthropic_body_is_cleared_after_retry_mutates_transcript() {
+        let client = RetryRecordingClient::new();
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "system": [{
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hi",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let mut messages = vec![Message::new(
+            MessageRole::User,
+            "hi",
+            MessageMeta::new(MessageType::UserInput),
+        )];
+        let mut context = ContextManager::new(Box::new(NoCompact), 4096, None, None, None);
+        let validator = ResponseValidator::new(vec!["respond".to_string()], false, None);
+        let mut tracker = ErrorTracker::new(3, 2);
+        let mut counter = 0;
+        let tools = vec![crate::tools::respond::respond_spec()];
+
+        let result = run_inference_with_options(
+            &mut messages,
+            &client,
+            &mut context,
+            &validator,
+            &mut tracker,
+            &tools,
+            &mut counter,
+            0,
+            "",
+            Some(3),
+            false,
+            None,
+            LLMRequestOptions {
+                inbound_anthropic_body: Some(raw.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("inference")
+        .expect("result");
+
+        assert_eq!(result.attempts, 2);
+        let raw_bodies = client.raw_bodies.lock().unwrap().clone();
+        assert_eq!(raw_bodies, vec![Some(raw), None]);
     }
 }

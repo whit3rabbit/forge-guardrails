@@ -231,4 +231,66 @@ mod tests {
         let body = br#"{"model":"   ","messages":[]}"#;
         assert_eq!(extract_anthropic_model(body, "default"), "default");
     }
+
+    #[tokio::test]
+    async fn external_backend_uses_request_model() {
+        let mut upstream = mockito::Server::new_async().await;
+        let _mock = upstream
+            .mock("POST", "/v1/chat/completions")
+            .match_body(mockito::Matcher::Json(json!({
+                "model": "request-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": false
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "id": "chatcmpl-routed",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "request-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let state = AppState {
+            config: Arc::new(ProxyConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8081,
+                default_model: "default".to_string(),
+                context_tokens: 8192,
+                max_retries: 0,
+                rescue_enabled: true,
+                serialize_requests: false,
+                verbose: false,
+            }),
+            client_factory: Arc::new(ClientFactory::DirectOpenAi {
+                base_url: upstream.url(),
+                api_key: None,
+                context_tokens: 8192,
+            }),
+            request_mutex: Arc::new(TokioMutex::new(())),
+        };
+        let body = Bytes::from(
+            json!({
+                "model": "request-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": false
+            })
+            .to_string(),
+        );
+
+        let response = proxy_post(state, "/v1/chat/completions", body, extract_openai_model).await;
+
+        assert_eq!(response.status().as_u16(), 200);
+    }
 }

@@ -68,7 +68,8 @@ impl HTTPServer {
         context_manager: &Arc<Mutex<ContextManager>>,
     ) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String) {
         let headers = Self::cors_headers();
-        match (method, path) {
+        let route_path = path.split('?').next().unwrap_or(path);
+        match (method, route_path) {
             ("GET", "/health") => {
                 let resp = json!({"status": "ok"});
                 (200, "application/json", headers, resp.to_string())
@@ -127,8 +128,19 @@ impl HTTPServer {
             );
         }
 
+        let raw: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    400,
+                    "application/json",
+                    json!({"error": e.to_string()}).to_string(),
+                );
+            }
+        };
+
         let parsed: anyllm_translate::anthropic::MessageCreateRequest =
-            match serde_json::from_slice(body) {
+            match serde_json::from_value(raw.clone()) {
                 Ok(v) => v,
                 Err(e) => {
                     return (
@@ -147,6 +159,7 @@ impl HTTPServer {
 
         match handler::handle_anthropic_messages(
             &parsed,
+            &raw,
             client,
             context_manager,
             self.max_retries,
@@ -660,6 +673,31 @@ mod tests {
         assert_eq!(v["model"], "claude-test");
         assert_eq!(v["content"][0]["text"], "test");
         assert_eq!(v["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn anthropic_messages_route_ignores_query_string() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "model": "claude-test",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let (status, ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/messages?beta=true",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(ct, "application/json");
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(v["content"][0]["text"], "test");
     }
 
     #[tokio::test]

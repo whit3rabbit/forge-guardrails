@@ -225,6 +225,42 @@ pub struct LLMCallInfo {
 /// only, without mutating the client.
 pub type SamplingParams = serde_json::Map<String, serde_json::Value>;
 
+/// Per-request options passed through proxy-driven LLM calls.
+///
+/// `sampling` carries backend generation controls already understood by
+/// clients. `passthrough` carries non-forge-owned request fields that should
+/// ride to the outbound wire body. `inbound_anthropic_body` is only meaningful
+/// for Anthropic-shape downstreams: it lets a clean Anthropic proxy turn send
+/// the original request body verbatim, preserving block annotations such as
+/// `cache_control`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LLMRequestOptions {
+    /// Per-call sampling overrides.
+    pub sampling: Option<SamplingParams>,
+    /// Extra request fields to merge into the outbound body.
+    pub passthrough: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Original inbound Anthropic body for clean Path-1 proxy calls.
+    pub inbound_anthropic_body: Option<Value>,
+}
+
+impl LLMRequestOptions {
+    /// Build options from sampling-only callers.
+    pub fn from_sampling(sampling: Option<SamplingParams>) -> Self {
+        Self {
+            sampling,
+            passthrough: None,
+            inbound_anthropic_body: None,
+        }
+    }
+
+    /// Returns true when no options are populated.
+    pub fn is_empty(&self) -> bool {
+        self.sampling.is_none()
+            && self.passthrough.is_none()
+            && self.inbound_anthropic_body.is_none()
+    }
+}
+
 /// Wire format identifier for message serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApiFormat {
@@ -280,6 +316,20 @@ pub trait LLMClient: Send + Sync {
         sampling: Option<SamplingParams>,
     ) -> impl std::future::Future<Output = Result<LLMResponse, BackendError>> + Send;
 
+    /// Send messages with proxy request options.
+    ///
+    /// Default behavior preserves existing clients by forwarding only
+    /// `sampling`. Clients that can honor passthrough fields or raw Anthropic
+    /// bodies override this method.
+    fn send_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> impl std::future::Future<Output = Result<LLMResponse, BackendError>> + Send {
+        async move { self.send(messages, tools, options.sampling).await }
+    }
+
     /// Send messages and yield `StreamChunk` objects progressively.
     ///
     /// Yields TEXT_DELTA or TOOL_CALL_DELTA chunks progressively. The final
@@ -291,6 +341,16 @@ pub trait LLMClient: Send + Sync {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> impl std::future::Future<Output = Result<ChunkStream, StreamError>> + Send;
+
+    /// Stream messages with proxy request options.
+    fn send_stream_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> impl std::future::Future<Output = Result<ChunkStream, StreamError>> + Send {
+        async move { self.send_stream(messages, tools, options.sampling).await }
+    }
 
     /// Query the backend for its configured context window size.
     ///

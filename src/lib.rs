@@ -35,8 +35,8 @@ pub use tools::respond;
 pub use clients::{
     apply_sampling_defaults, format_tool, get_sampling_defaults, AnthropicClient,
     AnyLlmProxyClient, AnyLlmRuntimeClient, ApiFormat, ChunkStream, ChunkType, LLMCallInfo,
-    LLMClient, LLMRateLimitInfo, LLMResponse, LlamafileClient, OllamaClient, SamplingParams,
-    StreamChunk, TextResponse, TokenUsage, ToolCall, MODEL_SAMPLING_DEFAULTS,
+    LLMClient, LLMRateLimitInfo, LLMRequestOptions, LLMResponse, LlamafileClient, OllamaClient,
+    SamplingParams, StreamChunk, TextResponse, TokenUsage, ToolCall, MODEL_SAMPLING_DEFAULTS,
 };
 pub use context::{
     default_context_warning, detect_hardware, CompactEvent, CompactStrategy, ContextManager,
@@ -62,10 +62,10 @@ pub use prompts::{
     step_nudge, unknown_tool_nudge,
 };
 pub use proxy::{
-    extract_sampling, handle_anthropic_messages, handle_chat_completions, has_respond_tool,
-    openai_to_messages, respond_tool_openai, strip_respond_calls, text_response_to_openai,
-    text_to_sse_events, tool_calls_to_openai, tool_calls_to_sse_events, AnthropicHandlerError,
-    AnthropicHandlerResult, HTTPServer, HandlerResult,
+    extract_passthrough, extract_sampling, handle_anthropic_messages, handle_chat_completions,
+    has_respond_tool, openai_to_messages, respond_tool_openai, strip_respond_calls,
+    text_response_to_openai, text_to_sse_events, tool_calls_to_openai, tool_calls_to_sse_events,
+    AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerResult,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};

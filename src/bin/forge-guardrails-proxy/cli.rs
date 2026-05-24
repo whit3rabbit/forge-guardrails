@@ -50,6 +50,14 @@ pub(crate) struct Cli {
     )]
     pub(crate) extra_flags: Vec<String>,
 
+    /// Function-calling mode for llama-compatible OpenAI-shape backends.
+    #[arg(long, value_enum, default_value = "native", value_name = "MODE")]
+    pub(crate) mode: CliMode,
+
+    /// Wire protocol used by an external backend.
+    #[arg(long, value_enum, default_value = "openai", value_name = "PROTOCOL")]
+    pub(crate) backend_protocol: CliBackendProtocol,
+
     /// Proxy listen host (default: 127.0.0.1 in CLI mode).
     #[arg(long, value_name = "HOST")]
     pub(crate) host: Option<String>,
@@ -84,6 +92,27 @@ pub(crate) enum CliBackend {
     Llamaserver,
     Llamafile,
     Ollama,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CliMode {
+    Native,
+    Prompt,
+}
+
+impl CliMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Prompt => "prompt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CliBackendProtocol {
+    Openai,
+    Anthropic,
 }
 
 impl CliBackend {
@@ -141,6 +170,8 @@ mod tests {
         assert_eq!(cli.backend_port, DEFAULT_BACKEND_PORT);
         assert_eq!(cli.budget_mode, CliBudgetMode::Backend);
         assert_eq!(cli.budget_tokens, None);
+        assert_eq!(cli.mode, CliMode::Native);
+        assert_eq!(cli.backend_protocol, CliBackendProtocol::Openai);
         assert!(!cli.serialize);
         assert!(!cli.no_serialize);
         assert!(!cli.no_rescue);
@@ -217,5 +248,19 @@ mod tests {
             cli.llamafile_runtime.as_deref(),
             Some("/opt/forge/bin/llamafile")
         );
+    }
+
+    #[test]
+    fn mode_and_backend_protocol_are_parsed() {
+        let cli = parse(&[
+            "--backend-url",
+            "http://localhost:8080",
+            "--mode",
+            "prompt",
+            "--backend-protocol",
+            "anthropic",
+        ]);
+        assert_eq!(cli.mode, CliMode::Prompt);
+        assert_eq!(cli.backend_protocol, CliBackendProtocol::Anthropic);
     }
 }

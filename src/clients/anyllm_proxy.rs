@@ -15,7 +15,8 @@ use serde_json::{json, Value};
 
 use crate::clients::base::{
     format_tool, ApiFormat, ChunkStream, ChunkType, LLMCallInfo, LLMClient, LLMRateLimitInfo,
-    LLMResponse, SamplingParams, StreamChunk, TextResponse, TokenUsage, ToolCall,
+    LLMRequestOptions, LLMResponse, SamplingParams, StreamChunk, TextResponse, TokenUsage,
+    ToolCall,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -79,10 +80,10 @@ impl AnyLlmProxyClient {
         &self,
         messages: Vec<Value>,
         tools: Option<Vec<ToolSpec>>,
-        sampling: Option<SamplingParams>,
+        options: LLMRequestOptions,
         stream: bool,
     ) -> Value {
-        build_openai_request_body(&self.model, messages, tools, sampling, stream)
+        build_openai_request_body(&self.model, messages, tools, options, stream)
     }
 
     async fn send_request(&self, body: Value) -> Result<reqwest::Response, BackendError> {
@@ -148,7 +149,17 @@ impl LLMClient for AnyLlmProxyClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<LLMResponse, BackendError> {
-        let body = self.build_request_body(messages, tools, sampling, false);
+        self.send_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponse, BackendError> {
+        let body = self.build_request_body(messages, tools, options, false);
         let resp = self.send_request(body).await?;
         let status = resp.status().as_u16() as i64;
         let headers = resp.headers().clone();
@@ -171,7 +182,17 @@ impl LLMClient for AnyLlmProxyClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, StreamError> {
-        let body = self.build_request_body(messages, tools, sampling, true);
+        self.send_stream_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_stream_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<ChunkStream, StreamError> {
+        let body = self.build_request_body(messages, tools, options, true);
         let resp = self
             .send_request(body)
             .await
@@ -266,10 +287,10 @@ impl AnyLlmRuntimeClient {
         &self,
         messages: Vec<Value>,
         tools: Option<Vec<ToolSpec>>,
-        sampling: Option<SamplingParams>,
+        options: LLMRequestOptions,
         stream: bool,
     ) -> Result<anyllm_translate::openai::ChatCompletionRequest, BackendError> {
-        let body = build_openai_request_body(&self.model, messages, tools, sampling, stream);
+        let body = build_openai_request_body(&self.model, messages, tools, options, stream);
         serde_json::from_value(body).map_err(|e| BackendError::new(400, e.to_string()))
     }
 }
@@ -296,7 +317,17 @@ impl LLMClient for AnyLlmRuntimeClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<LLMResponse, BackendError> {
-        let req = self.build_request(messages, tools, sampling, false)?;
+        self.send_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponse, BackendError> {
+        let req = self.build_request(messages, tools, options, false)?;
         let result = self
             .service
             .complete(req)
@@ -323,8 +354,18 @@ impl LLMClient for AnyLlmRuntimeClient {
         tools: Option<Vec<ToolSpec>>,
         sampling: Option<SamplingParams>,
     ) -> Result<ChunkStream, StreamError> {
+        self.send_stream_with_options(messages, tools, LLMRequestOptions::from_sampling(sampling))
+            .await
+    }
+
+    async fn send_stream_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<ChunkStream, StreamError> {
         let req = self
-            .build_request(messages, tools, sampling, true)
+            .build_request(messages, tools, options, true)
             .map_err(|e| StreamError::new(e.to_string()))?;
         let result = self
             .service
@@ -359,14 +400,16 @@ fn build_openai_request_body(
     model: &str,
     messages: Vec<Value>,
     tools: Option<Vec<ToolSpec>>,
-    sampling: Option<SamplingParams>,
+    options: LLMRequestOptions,
     stream: bool,
 ) -> Value {
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-    });
+    let mut body = Value::Object(options.passthrough.unwrap_or_default());
+    if let Some(obj) = body.as_object_mut() {
+        obj.entry("model".to_string())
+            .or_insert_with(|| json!(model));
+        obj.insert("messages".to_string(), Value::Array(messages));
+        obj.insert("stream".to_string(), Value::Bool(stream));
+    }
 
     if let Some(tool_specs) = tools {
         if !tool_specs.is_empty() {
@@ -377,7 +420,7 @@ fn build_openai_request_body(
         }
     }
 
-    if let Some(params) = sampling {
+    if let Some(params) = options.sampling {
         if let Some(obj) = body.as_object_mut() {
             for (key, value) in params {
                 obj.insert(key, value);

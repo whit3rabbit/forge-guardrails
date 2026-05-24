@@ -6,7 +6,7 @@
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 
-use crate::clients::base::{TextResponse, ToolCall};
+use crate::clients::base::{TextResponse, TokenUsage, ToolCall};
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::tools::respond::RESPOND_TOOL_NAME;
 
@@ -143,8 +143,17 @@ fn parse_args_value(args_raw: Option<&Value>) -> IndexMap<String, Value> {
 /// Convert internal tool calls to OpenAI chat completion response format.
 ///
 /// Includes reasoning text as message content (or None if no reasoning).
-/// Generates unique call and completion IDs. Usage fields are zeroed placeholders.
+/// Generates unique call and completion IDs.
 pub fn tool_calls_to_openai(calls: &[ToolCall], model: &str) -> Value {
+    tool_calls_to_openai_with_usage(calls, model, None)
+}
+
+/// Convert internal tool calls to OpenAI chat completion response format with usage.
+pub fn tool_calls_to_openai_with_usage(
+    calls: &[ToolCall],
+    model: &str,
+    usage: Option<&TokenUsage>,
+) -> Value {
     let completion_id = generate_completion_id();
     let mut tool_calls_out = Vec::new();
 
@@ -188,12 +197,21 @@ pub fn tool_calls_to_openai(calls: &[ToolCall], model: &str) -> Value {
         "created": 0,
         "model": model,
         "choices": [Value::Object(choice)],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        "usage": usage_to_openai_json(usage)
     })
 }
 
 /// Convert internal TextResponse to OpenAI chat completion response format.
 pub fn text_response_to_openai(response: &TextResponse, model: &str) -> Value {
+    text_response_to_openai_with_usage(response, model, None)
+}
+
+/// Convert internal TextResponse to OpenAI chat completion response format with usage.
+pub fn text_response_to_openai_with_usage(
+    response: &TextResponse,
+    model: &str,
+    usage: Option<&TokenUsage>,
+) -> Value {
     let completion_id = generate_completion_id();
 
     json!({
@@ -206,7 +224,7 @@ pub fn text_response_to_openai(response: &TextResponse, model: &str) -> Value {
             "message": {"role": "assistant", "content": response.content},
             "finish_reason": "stop"
         }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        "usage": usage_to_openai_json(usage)
     })
 }
 
@@ -216,8 +234,18 @@ pub fn text_response_to_openai(response: &TextResponse, model: &str) -> Value {
 /// indexed entries, then a final chunk with finish_reason=tool_calls.
 /// All events share the same completion ID.
 pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
+    tool_calls_to_sse_events_with_usage(calls, model, None)
+}
+
+/// Convert tool calls to SSE event chunks with usage.
+pub fn tool_calls_to_sse_events_with_usage(
+    calls: &[ToolCall],
+    model: &str,
+    usage: Option<&TokenUsage>,
+) -> Vec<Value> {
     let completion_id = generate_completion_id();
     let mut events = Vec::new();
+    let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
 
     // Reasoning delta first.
     let reasoning = calls.first().and_then(|c| c.reasoning.clone());
@@ -226,7 +254,7 @@ pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
         delta.insert("role".into(), json!("assistant"));
         delta.insert("content".into(), json!(r));
 
-        events.push(json!({
+        let mut event = json!({
             "id": completion_id,
             "object": "chat.completion.chunk",
             "created": 0,
@@ -236,7 +264,11 @@ pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
                 "delta": Value::Object(delta),
                 "finish_reason": Value::Null
             }]
-        }));
+        });
+        if let Some(ref usage_value) = usage_json {
+            event["usage"] = usage_value.clone();
+        }
+        events.push(event);
     }
 
     // Tool call deltas.
@@ -259,7 +291,7 @@ pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
     let mut delta = Map::new();
     delta.insert("tool_calls".into(), json!(tc_deltas));
 
-    events.push(json!({
+    let mut tool_event = json!({
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": 0,
@@ -269,10 +301,16 @@ pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
             "delta": Value::Object(delta),
             "finish_reason": Value::Null
         }]
-    }));
+    });
+    if reasoning.is_none() {
+        if let Some(ref usage_value) = usage_json {
+            tool_event["usage"] = usage_value.clone();
+        }
+    }
+    events.push(tool_event);
 
     // Final chunk.
-    events.push(json!({
+    let mut final_event = json!({
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": 0,
@@ -282,7 +320,11 @@ pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
             "delta": {},
             "finish_reason": "tool_calls"
         }]
-    }));
+    });
+    if let Some(usage_value) = usage_json {
+        final_event["usage"] = usage_value;
+    }
+    events.push(final_event);
 
     events
 }
@@ -292,8 +334,19 @@ pub fn tool_calls_to_sse_events(calls: &[ToolCall], model: &str) -> Vec<Value> {
 /// First chunk includes role=assistant. Text is split by chunk_size if >0.
 /// Final chunk has finish_reason=stop. All events share the same completion ID.
 pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Value> {
+    text_to_sse_events_with_usage(text, model, chunk_size, None)
+}
+
+/// Convert text to SSE event chunks with usage.
+pub fn text_to_sse_events_with_usage(
+    text: &str,
+    model: &str,
+    chunk_size: usize,
+    usage: Option<&TokenUsage>,
+) -> Vec<Value> {
     let completion_id = generate_completion_id();
     let mut events = Vec::new();
+    let usage_json = usage.map(|u| usage_to_openai_json(Some(u)));
 
     if chunk_size == 0 {
         // Single content chunk.
@@ -301,7 +354,7 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
         delta.insert("role".into(), json!("assistant"));
         delta.insert("content".into(), json!(text));
 
-        events.push(json!({
+        let mut event = json!({
             "id": completion_id,
             "object": "chat.completion.chunk",
             "created": 0,
@@ -311,20 +364,25 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
                 "delta": Value::Object(delta),
                 "finish_reason": Value::Null
             }]
-        }));
+        });
+        if let Some(ref usage_value) = usage_json {
+            event["usage"] = usage_value.clone();
+        }
+        events.push(event);
     } else {
         // Split text into chunks.
         let chars: Vec<char> = text.chars().collect();
         let mut first = true;
         for chunk in chars.chunks(chunk_size) {
             let mut delta = Map::new();
+            let is_first = first;
             if first {
                 delta.insert("role".into(), json!("assistant"));
                 first = false;
             }
             delta.insert("content".into(), json!(chunk.iter().collect::<String>()));
 
-            events.push(json!({
+            let mut event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": 0,
@@ -334,7 +392,13 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
                     "delta": Value::Object(delta),
                     "finish_reason": Value::Null
                 }]
-            }));
+            });
+            if is_first {
+                if let Some(ref usage_value) = usage_json {
+                    event["usage"] = usage_value.clone();
+                }
+            }
+            events.push(event);
         }
 
         // If text was empty, still produce one chunk with role.
@@ -343,7 +407,7 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
             delta.insert("role".into(), json!("assistant"));
             delta.insert("content".into(), json!(""));
 
-            events.push(json!({
+            let mut event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": 0,
@@ -353,12 +417,16 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
                     "delta": Value::Object(delta),
                     "finish_reason": Value::Null
                 }]
-            }));
+            });
+            if let Some(ref usage_value) = usage_json {
+                event["usage"] = usage_value.clone();
+            }
+            events.push(event);
         }
     }
 
     // Final chunk with finish_reason=stop.
-    events.push(json!({
+    let mut final_event = json!({
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": 0,
@@ -368,9 +436,22 @@ pub fn text_to_sse_events(text: &str, model: &str, chunk_size: usize) -> Vec<Val
             "delta": {},
             "finish_reason": "stop"
         }]
-    }));
+    });
+    if let Some(usage_value) = usage_json {
+        final_event["usage"] = usage_value;
+    }
+    events.push(final_event);
 
     events
+}
+
+fn usage_to_openai_json(usage: Option<&TokenUsage>) -> Value {
+    let usage = usage.cloned().unwrap_or_else(TokenUsage::empty);
+    json!({
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens
+    })
 }
 
 /// Build a respond ToolSpec in OpenAI wire format for injection.
@@ -408,6 +489,36 @@ pub fn extract_sampling(body: &Value) -> Option<Map<String, Value>> {
         if let Some(v) = body.get(key) {
             map.insert((*key).to_string(), v.clone());
         }
+    }
+
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
+}
+
+/// Extract non-forge-owned request fields for client passthrough.
+pub fn extract_passthrough(body: &Value) -> Option<Map<String, Value>> {
+    let obj = body.as_object()?;
+    let mut map = Map::new();
+    let forge_owned = ["messages", "tools", "stream", "system"];
+    let sampling_fields = [
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repeat_penalty",
+        "presence_penalty",
+        "seed",
+        "chat_template_kwargs",
+    ];
+
+    for (key, value) in obj {
+        if forge_owned.contains(&key.as_str()) || sampling_fields.contains(&key.as_str()) {
+            continue;
+        }
+        map.insert(key.clone(), value.clone());
     }
 
     if map.is_empty() {
@@ -664,6 +775,55 @@ mod tests {
         assert!(sampling.contains_key("temperature"));
         assert!(!sampling.contains_key("frequency_penalty"));
         assert!(!sampling.contains_key("response_format"));
+    }
+
+    #[test]
+    fn extract_passthrough_keeps_provider_fields() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+            "stream": true,
+            "model": "request-model",
+            "max_tokens": 128,
+            "stop": ["done"],
+            "tool_choice": {"type": "function", "function": {"name": "search"}},
+            "response_format": {"type": "json_object"},
+            "temperature": 0.5
+        });
+        let passthrough = extract_passthrough(&body).unwrap();
+
+        assert_eq!(passthrough["model"], "request-model");
+        assert_eq!(passthrough["max_tokens"], 128);
+        assert_eq!(passthrough["stop"], json!(["done"]));
+        assert_eq!(
+            passthrough["tool_choice"],
+            json!({"type": "function", "function": {"name": "search"}})
+        );
+        assert_eq!(
+            passthrough["response_format"],
+            json!({"type": "json_object"})
+        );
+        assert!(!passthrough.contains_key("messages"));
+        assert!(!passthrough.contains_key("tools"));
+        assert!(!passthrough.contains_key("stream"));
+        assert!(!passthrough.contains_key("temperature"));
+    }
+
+    #[test]
+    fn response_helpers_emit_nonzero_usage() {
+        let usage = TokenUsage::new(11, 5, 16);
+        let response = text_response_to_openai_with_usage(
+            &TextResponse::new("counted"),
+            "model",
+            Some(&usage),
+        );
+        assert_eq!(response["usage"]["prompt_tokens"], 11);
+        assert_eq!(response["usage"]["completion_tokens"], 5);
+        assert_eq!(response["usage"]["total_tokens"], 16);
+
+        let events = text_to_sse_events_with_usage("counted", "model", 0, Some(&usage));
+        assert_eq!(events[0]["usage"]["prompt_tokens"], 11);
+        assert_eq!(events.last().unwrap()["usage"]["total_tokens"], 16);
     }
 
     #[test]

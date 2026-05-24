@@ -362,6 +362,18 @@ fn qwen_xml_multiline_value() {
 }
 
 #[test]
+fn qwen_xml_after_think_tag() {
+    let text = "<think>I should call fetch here</think>\n<function=search><parameter=query>weather</parameter></function>";
+    let result = rescue_tool_call(text, &["search"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].tool, "search");
+    assert_eq!(
+        result[0].args["query"],
+        Value::String("weather".to_string())
+    );
+}
+
+#[test]
 fn qwen_xml_two_functions() {
     let text = "<function=search><parameter=query>a</parameter></function><function=analyze><parameter=data>b</parameter></function>";
     let result = rescue_tool_call(text, &["search", "analyze"]);
