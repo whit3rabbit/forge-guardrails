@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use super::handler::{self, AnthropicHandlerError, AnthropicHandlerResult, HandlerResult};
+use super::response;
 use crate::clients::base::LLMClient;
 use crate::context::manager::ContextManager;
 
@@ -35,6 +36,7 @@ pub struct HTTPServer {
 }
 
 impl HTTPServer {
+    /// Creates a new `HTTPServer` instance with the specified binding and validation options.
     pub fn new(
         host: &str,
         port: u16,
@@ -153,9 +155,11 @@ impl HTTPServer {
         .await
         {
             Ok(AnthropicHandlerResult::Response(v)) => (200, "application/json", v.to_string()),
-            Ok(AnthropicHandlerResult::Events(events)) => {
-                (200, "text/event-stream", format_anthropic_sse_body(&events))
-            }
+            Ok(AnthropicHandlerResult::Events(events)) => (
+                200,
+                "text/event-stream",
+                response::format_anthropic_sse_body(&events),
+            ),
             Err(AnthropicHandlerError::BadRequest(e)) => {
                 (400, "application/json", json!({"error": e}).to_string())
             }
@@ -212,7 +216,7 @@ impl HTTPServer {
             Ok(result) => match result {
                 HandlerResult::Response(v) => (200, "application/json", v.to_string()),
                 HandlerResult::Events(events) => {
-                    let body = format_sse_body(&events);
+                    let body = response::format_sse_body(&events);
                     (200, "text/event-stream", body)
                 }
             },
@@ -293,35 +297,8 @@ impl HTTPServer {
     {
         use axum::{
             body::Bytes,
-            http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-            response::{IntoResponse, Response},
             routing::{get, options, post},
         };
-
-        // Helper: build a Response with status, content-type, body, and CORS headers.
-        fn build_response(status: u16, ct: &str, body: String) -> Response {
-            let status_code =
-                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let mut resp = (status_code, body).into_response();
-            if !ct.is_empty() {
-                if let Ok(v) = HeaderValue::from_str(ct) {
-                    resp.headers_mut()
-                        .insert(axum::http::header::CONTENT_TYPE, v);
-                }
-            }
-            for (k, v) in HTTPServer::cors_headers() {
-                let key_lower = match k {
-                    "Access-Control-Allow-Origin" => "access-control-allow-origin",
-                    "Access-Control-Allow-Methods" => "access-control-allow-methods",
-                    "Access-Control-Allow-Headers" => "access-control-allow-headers",
-                    _ => continue,
-                };
-                if let Ok(hk) = HeaderName::from_bytes(key_lower.as_bytes()) {
-                    resp.headers_mut().insert(hk, HeaderValue::from_static(v));
-                }
-            }
-            resp
-        }
 
         // Capture shared state in Arcs for each route closure.
         let srv_health = server.clone();
@@ -347,7 +324,7 @@ impl HTTPServer {
             async move {
                 let (status, ct, _, body) =
                     srv.handle_request("GET", "/health", &[], &cli, &ctx).await;
-                build_response(status, ct, body)
+                response::build_response(status, ct, body)
             }
         };
 
@@ -359,7 +336,7 @@ impl HTTPServer {
                 let (status, ct, _, body) = srv
                     .handle_request("GET", "/v1/models", &[], &cli, &ctx)
                     .await;
-                build_response(status, ct, body)
+                response::build_response(status, ct, body)
             }
         };
 
@@ -371,7 +348,7 @@ impl HTTPServer {
                 let (status, ct, _, resp_body) = srv
                     .handle_request("POST", "/v1/chat/completions", &body, &cli, &ctx)
                     .await;
-                build_response(status, ct, resp_body)
+                response::build_response(status, ct, resp_body)
             }
         };
 
@@ -383,41 +360,13 @@ impl HTTPServer {
                 let (status, ct, _, resp_body) = srv
                     .handle_request("POST", "/v1/messages", &body, &cli, &ctx)
                     .await;
-                build_response(status, ct, resp_body)
+                response::build_response(status, ct, resp_body)
             }
         };
 
-        let opts_chat = || async move {
-            let mut headers = HeaderMap::new();
-            for (k, v) in HTTPServer::cors_headers() {
-                let key_lower = match k {
-                    "Access-Control-Allow-Origin" => "access-control-allow-origin",
-                    "Access-Control-Allow-Methods" => "access-control-allow-methods",
-                    "Access-Control-Allow-Headers" => "access-control-allow-headers",
-                    _ => continue,
-                };
-                if let Ok(hk) = HeaderName::from_bytes(key_lower.as_bytes()) {
-                    headers.insert(hk, HeaderValue::from_static(v));
-                }
-            }
-            (StatusCode::NO_CONTENT, headers).into_response()
-        };
+        let opts_chat = || async move { response::cors_preflight_response() };
 
-        let opts_messages = || async move {
-            let mut headers = HeaderMap::new();
-            for (k, v) in HTTPServer::cors_headers() {
-                let key_lower = match k {
-                    "Access-Control-Allow-Origin" => "access-control-allow-origin",
-                    "Access-Control-Allow-Methods" => "access-control-allow-methods",
-                    "Access-Control-Allow-Headers" => "access-control-allow-headers",
-                    _ => continue,
-                };
-                if let Ok(hk) = HeaderName::from_bytes(key_lower.as_bytes()) {
-                    headers.insert(hk, HeaderValue::from_static(v));
-                }
-            }
-            (StatusCode::NO_CONTENT, headers).into_response()
-        };
+        let opts_messages = || async move { response::cors_preflight_response() };
 
         axum::Router::new()
             .route("/health", get(health))
@@ -430,14 +379,7 @@ impl HTTPServer {
 
     /// Build CORS headers for OPTIONS responses.
     pub fn cors_headers() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("Access-Control-Allow-Origin", "*"),
-            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-            (
-                "Access-Control-Allow-Headers",
-                "Content-Type, Authorization",
-            ),
-        ]
+        response::cors_headers()
     }
 }
 
@@ -445,12 +387,7 @@ impl HTTPServer {
 ///
 /// Each event is "data: <json>\n\n". Terminator is "data: [DONE]\n\n".
 pub fn format_sse_body(events: &[Value]) -> String {
-    let mut body = String::new();
-    for event in events {
-        body.push_str(&format!("data: {}\n\n", event));
-    }
-    body.push_str("data: [DONE]\n\n");
-    body
+    response::format_sse_body(events)
 }
 
 /// Format Anthropic SSE events.
@@ -460,37 +397,7 @@ pub fn format_sse_body(events: &[Value]) -> String {
 pub fn format_anthropic_sse_body(
     events: &[anyllm_translate::anthropic::streaming::StreamEvent],
 ) -> String {
-    let mut body = String::new();
-    for event in events {
-        body.push_str("event: ");
-        body.push_str(anthropic_event_name(event));
-        body.push('\n');
-        body.push_str("data: ");
-        body.push_str(&serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string()));
-        body.push_str("\n\n");
-    }
-    body
-}
-
-fn anthropic_event_name(
-    event: &anyllm_translate::anthropic::streaming::StreamEvent,
-) -> &'static str {
-    match event {
-        anyllm_translate::anthropic::streaming::StreamEvent::MessageStart { .. } => "message_start",
-        anyllm_translate::anthropic::streaming::StreamEvent::ContentBlockStart { .. } => {
-            "content_block_start"
-        }
-        anyllm_translate::anthropic::streaming::StreamEvent::ContentBlockDelta { .. } => {
-            "content_block_delta"
-        }
-        anyllm_translate::anthropic::streaming::StreamEvent::ContentBlockStop { .. } => {
-            "content_block_stop"
-        }
-        anyllm_translate::anthropic::streaming::StreamEvent::MessageDelta { .. } => "message_delta",
-        anyllm_translate::anthropic::streaming::StreamEvent::MessageStop { .. } => "message_stop",
-        anyllm_translate::anthropic::streaming::StreamEvent::Ping { .. } => "ping",
-        anyllm_translate::anthropic::streaming::StreamEvent::Error { .. } => "error",
-    }
+    response::format_anthropic_sse_body(events)
 }
 
 /// Parse an HTTP request from raw bytes.

@@ -33,7 +33,7 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 - `src/clients/` - Anthropic, Llamafile, Ollama, and anyllm runtime/sidecar clients
 - `src/server.rs` - backend lifecycle and context-budget resolution
 - `src/proxy/` - HTTP/OpenAI-compatible and Anthropic Messages proxy handling
-- `src/bin/forge-eval.rs` - small native Rust eval smoke runner
+- `src/bin/forge-eval/` - small native Rust eval smoke runner
 - `tests/` - integration coverage for core behavior
 - `tests/parity/` - Python-generated golden fixtures for Rust parity tests
 - `scripts/eval_openai_proxy.py` - Python eval oracle wrapper for Rust proxy checks

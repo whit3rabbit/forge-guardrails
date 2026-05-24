@@ -40,12 +40,16 @@ pub enum AnthropicHandlerResult {
 /// Error class for Anthropic request handling.
 #[derive(Debug)]
 pub enum AnthropicHandlerError {
+    /// The request is invalid or malformed.
     BadRequest(String),
+    /// An error occurred in the upstream OpenAI/inference handler.
     Upstream(String),
+    /// An internal server or serialization error occurred.
     Internal(String),
 }
 
 impl AnthropicHandlerError {
+    /// Returns the underlying error message.
     pub fn message(&self) -> &str {
         match self {
             Self::BadRequest(message) | Self::Upstream(message) | Self::Internal(message) => {
@@ -195,46 +199,23 @@ pub async fn handle_chat_completions<C: LLMClient>(
         Ok(None) => LLMResponse::Text(TextResponse::new("")),
         Err(crate::error::ForgeError::ToolCall(err)) => {
             let raw = err.raw_response.unwrap_or_default();
-            if stream {
-                return Ok(HandlerResult::Events(text_to_sse_events(
-                    &raw, model_name, 0,
-                )));
-            }
-            let text_resp = TextResponse::new(raw);
-            return Ok(HandlerResult::Response(text_response_to_openai(
-                &text_resp, model_name,
-            )));
+            return Ok(text_content_result(&raw, model_name, stream));
         }
         Err(err) => return Err(err.to_string()),
     };
 
     let handler_result = match response {
-        LLMResponse::Text(ref text) => {
-            if stream {
-                HandlerResult::Events(text_to_sse_events(&text.content, model_name, 0))
-            } else {
-                HandlerResult::Response(text_response_to_openai(text, model_name))
-            }
-        }
+        LLMResponse::Text(ref text) => text_response_result(text, model_name, stream),
         LLMResponse::ToolCalls(ref calls) => {
             let (real_calls, respond_text) = strip_respond_calls(calls);
 
             if real_calls.is_empty() {
-                // Pure respond — convert to text
+                // Pure respond: convert to text.
                 let text = respond_text.unwrap_or_default();
-                if stream {
-                    HandlerResult::Events(text_to_sse_events(&text, model_name, 0))
-                } else {
-                    let text_resp = TextResponse::new(text);
-                    HandlerResult::Response(text_response_to_openai(&text_resp, model_name))
-                }
+                text_content_result(&text, model_name, stream)
             } else {
-                // Real tool calls — return the real tool calls only, drop respond
-                if stream {
-                    HandlerResult::Events(tool_calls_to_sse_events(&real_calls, model_name))
-                } else {
-                    HandlerResult::Response(tool_calls_to_openai(&real_calls, model_name))
-                }
+                // Real tool calls: return only those calls and drop respond.
+                tool_calls_result(&real_calls, model_name, stream)
             }
         }
     };
@@ -257,29 +238,39 @@ pub async fn run_passthrough<C: LLMClient>(
         .map_err(|e| e.to_string())?;
 
     match response {
-        LLMResponse::Text(text) => {
-            if stream {
-                Ok(HandlerResult::Events(text_to_sse_events(
-                    &text.content,
-                    model_name,
-                    0,
-                )))
-            } else {
-                Ok(HandlerResult::Response(text_response_to_openai(
-                    &text, model_name,
-                )))
-            }
-        }
+        LLMResponse::Text(text) => Ok(text_response_result(&text, model_name, stream)),
         LLMResponse::ToolCalls(_) => {
-            let text = TextResponse::new("");
-            if stream {
-                Ok(HandlerResult::Events(text_to_sse_events("", model_name, 0)))
-            } else {
-                Ok(HandlerResult::Response(text_response_to_openai(
-                    &text, model_name,
-                )))
-            }
+            // No-tools passthrough must not expose unexpected backend tool calls.
+            Ok(text_content_result("", model_name, stream))
         }
+    }
+}
+
+/// Convert a final text object while preserving the requested response shape.
+fn text_response_result(text: &TextResponse, model_name: &str, stream: bool) -> HandlerResult {
+    if stream {
+        HandlerResult::Events(text_to_sse_events(&text.content, model_name, 0))
+    } else {
+        HandlerResult::Response(text_response_to_openai(text, model_name))
+    }
+}
+
+fn text_content_result(content: &str, model_name: &str, stream: bool) -> HandlerResult {
+    if stream {
+        HandlerResult::Events(text_to_sse_events(content, model_name, 0))
+    } else {
+        let text = TextResponse::new(content);
+        HandlerResult::Response(text_response_to_openai(&text, model_name))
+    }
+}
+
+fn tool_calls_result(calls: &[ToolCall], model_name: &str, stream: bool) -> HandlerResult {
+    if calls.is_empty() {
+        text_content_result("", model_name, stream)
+    } else if stream {
+        HandlerResult::Events(tool_calls_to_sse_events(calls, model_name))
+    } else {
+        HandlerResult::Response(tool_calls_to_openai(calls, model_name))
     }
 }
 
@@ -295,27 +286,8 @@ pub fn filter_respond(calls: &[ToolCall]) -> Vec<ToolCall> {
 /// Convert LLM response to OpenAI format (streaming or non-streaming).
 pub fn process_response(response: &LLMResponse, model_name: &str, stream: bool) -> HandlerResult {
     match response {
-        LLMResponse::ToolCalls(calls) => {
-            if calls.is_empty() {
-                let text_resp = TextResponse::new("");
-                if stream {
-                    HandlerResult::Events(text_to_sse_events("", model_name, 0))
-                } else {
-                    HandlerResult::Response(text_response_to_openai(&text_resp, model_name))
-                }
-            } else if stream {
-                HandlerResult::Events(tool_calls_to_sse_events(calls, model_name))
-            } else {
-                HandlerResult::Response(tool_calls_to_openai(calls, model_name))
-            }
-        }
-        LLMResponse::Text(text) => {
-            if stream {
-                HandlerResult::Events(text_to_sse_events(&text.content, model_name, 0))
-            } else {
-                HandlerResult::Response(text_response_to_openai(text, model_name))
-            }
-        }
+        LLMResponse::ToolCalls(calls) => tool_calls_result(calls, model_name, stream),
+        LLMResponse::Text(text) => text_response_result(text, model_name, stream),
     }
 }
 

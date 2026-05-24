@@ -7,12 +7,19 @@ use crate::context::strategies::CompactStrategy;
 /// Immutable record of a compaction event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactEvent {
+    /// The step index at which the compaction occurred.
     pub step_index: i64,
+    /// Estimated token count of the context prior to compaction.
     pub tokens_before: i64,
+    /// Estimated token count of the context after compaction.
     pub tokens_after: i64,
+    /// Total context token budget.
     pub budget_tokens: i64,
+    /// Message count in the conversation list prior to compaction.
     pub messages_before: usize,
+    /// Message count in the conversation list after compaction.
     pub messages_after: usize,
+    /// The compaction phase reached (e.g. 1, 2, 3).
     pub phase_reached: i64,
 }
 
@@ -38,6 +45,7 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
+    /// Creates a new `ContextManager` with the specified strategy, budget, and callbacks.
     pub fn new(
         strategy: Box<dyn CompactStrategy>,
         budget_tokens: i64,

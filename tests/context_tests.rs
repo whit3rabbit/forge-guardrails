@@ -1,3 +1,5 @@
+//! Integration tests for context tests.
+
 use forge_guardrails::{
     default_context_warning, CompactEvent, ContextManager, Message, MessageMeta, MessageRole,
     MessageType, NoCompact, TieredCompact,

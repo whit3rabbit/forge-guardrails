@@ -1,3 +1,5 @@
+//! Integration tests for streaming tests.
+
 use forge_guardrails::{ChunkType, LLMResponse, StreamChunk, TextResponse, ToolCall};
 use indexmap::IndexMap;
 

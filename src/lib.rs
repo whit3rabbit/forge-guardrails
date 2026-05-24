@@ -1,11 +1,24 @@
+//! Guarded LLM-agent workflows with step and tool enforcement.
+
+#![warn(missing_docs)]
+
+/// LLM backend client adapters and traits.
 pub mod clients;
+/// Context budget tracking and token compaction strategies.
 pub mod context;
+/// Core execution core components including message types and tool specifications.
 pub mod core;
+/// Custom error types for the framework.
 pub mod error;
+/// Response validation and step enforcement guardrails.
 pub mod guardrails;
+/// System and rescue prompt templates.
 pub mod prompts;
+/// HTTP and OpenAI-compatible proxy interface.
 pub mod proxy;
+/// In-process server backend manager.
 pub mod server;
+/// Built-in tools like `respond`.
 pub mod tools;
 
 // Legacy module-level re-exports for backwards compatibility and integration tests

@@ -7,13 +7,18 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
+    /// System instruction role.
     System,
+    /// User input role.
     User,
+    /// Assistant/model response role.
     Assistant,
+    /// Tool result response role.
     Tool,
 }
 
 impl MessageRole {
+    /// Returns the string representation of the message role.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::System => "system",
@@ -34,20 +39,32 @@ impl fmt::Display for MessageRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageType {
+    /// Crate-level or system instruction prompt.
     SystemPrompt,
+    /// Direct user request or query.
     UserInput,
+    /// Model-generated tool invocation request.
     ToolCall,
+    /// Result payload returned from tool execution.
     ToolResult,
+    /// Internal reasoning or thinking thoughts from the model.
     Reasoning,
+    /// Final text response intended for the user.
     TextResponse,
+    /// Nudge generated when a required step is missing.
     StepNudge,
+    /// Nudge generated when a prerequisite step is missing.
     PrerequisiteNudge,
+    /// Nudge or retry instructions following an error.
     RetryNudge,
+    /// Warning nudge triggered by budget/hardware limits.
     ContextWarning,
+    /// Summarized representation of older turns.
     Summary,
 }
 
 impl MessageType {
+    /// Returns the string representation of the message type.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SystemPrompt => "system_prompt",
@@ -74,13 +91,18 @@ impl fmt::Display for MessageType {
 /// Immutable metadata attached to a message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageMeta {
+    /// The classified message type.
     pub msg_type: MessageType,
+    /// The iteration or step index of the workflow loop.
     pub step_index: Option<i64>,
+    /// The original message type if this message was transformed.
     pub original_type: Option<MessageType>,
+    /// Estimated token count for this message.
     pub token_estimate: Option<i64>,
 }
 
 impl MessageMeta {
+    /// Creates a new `MessageMeta` with the given type.
     pub fn new(msg_type: MessageType) -> Self {
         Self {
             msg_type,
@@ -90,16 +112,19 @@ impl MessageMeta {
         }
     }
 
+    /// Sets the step index.
     pub fn with_step_index(mut self, idx: i64) -> Self {
         self.step_index = Some(idx);
         self
     }
 
+    /// Sets the original message type.
     pub fn with_original_type(mut self, t: MessageType) -> Self {
         self.original_type = Some(t);
         self
     }
 
+    /// Sets the token estimate.
     pub fn with_token_estimate(mut self, est: i64) -> Self {
         self.token_estimate = Some(est);
         self
@@ -109,12 +134,16 @@ impl MessageMeta {
 /// Immutable representation of a single tool call within a message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCallInfo {
+    /// Name of the tool being called.
     pub name: String,
+    /// Arguments passed to the tool, if any.
     pub args: Option<IndexMap<String, Value>>,
+    /// Uniquely generated identifier for this tool call.
     pub call_id: String,
 }
 
 impl ToolCallInfo {
+    /// Creates a new `ToolCallInfo`.
     pub fn new(
         name: impl Into<String>,
         args: Option<IndexMap<String, Value>>,
@@ -178,15 +207,22 @@ fn json_dumps_default_object(values: &IndexMap<String, Value>) -> String {
 /// A conversation message with dual serialization format support.
 #[derive(Debug, Clone)]
 pub struct Message {
+    /// Message role (system, user, assistant, tool).
     pub role: MessageRole,
+    /// Main text content of the message.
     pub content: String,
+    /// Metadata tagging for tracking and budget decisions.
     pub metadata: MessageMeta,
+    /// Tool name associated with the message, if it is a tool response.
     pub tool_name: Option<String>,
+    /// Tool call identifier paired with this message.
     pub tool_call_id: Option<String>,
+    /// List of tool call invocations, if this is an assistant message.
     pub tool_calls: Option<Vec<ToolCallInfo>>,
 }
 
 impl Message {
+    /// Creates a new `Message`.
     pub fn new(role: MessageRole, content: impl Into<String>, metadata: MessageMeta) -> Self {
         Self {
             role,
@@ -198,16 +234,19 @@ impl Message {
         }
     }
 
+    /// Sets the tool name.
     pub fn with_tool_name(mut self, name: impl Into<String>) -> Self {
         self.tool_name = Some(name.into());
         self
     }
 
+    /// Sets the tool call ID.
     pub fn with_tool_call_id(mut self, id: impl Into<String>) -> Self {
         self.tool_call_id = Some(id.into());
         self
     }
 
+    /// Sets the list of tool calls.
     pub fn with_tool_calls(mut self, calls: Vec<ToolCallInfo>) -> Self {
         self.tool_calls = Some(calls);
         self

@@ -14,6 +14,7 @@ pub type ToolCallable = Arc<
 
 /// Trait to automatically convert sync or async tools into a standard ToolCallable.
 pub trait IntoToolCallable {
+    /// Converts this type into a boxed `ToolCallable` future wrapper.
     fn into_callable(self) -> ToolCallable;
 }
 
@@ -55,19 +56,30 @@ pub use crate::core::tool_spec::ParamModel;
 /// A prerequisite specification: either name-only or arg-matched.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrerequisiteSpec {
+    /// Prerequisite satisfied solely by the occurrence of a tool call.
     NameOnly(String),
-    ArgMatched { tool: String, match_arg: String },
+    /// Prerequisite satisfied by a tool call only when specific arguments match.
+    ArgMatched {
+        /// Name of the tool.
+        tool: String,
+        /// Description or key matching parameter criteria.
+        match_arg: String,
+    },
 }
 
 /// Binds a tool spec to a callable with optional prerequisites.
 #[derive(Clone)]
 pub struct ToolDef {
+    /// The tool schema/specification.
     pub spec: ToolSpec,
+    /// The asynchronous function pointer executing the tool.
     pub callable: ToolCallable,
+    /// Optional dependencies/prerequisites for this tool.
     pub prerequisites: Vec<PrerequisiteSpec>,
 }
 
 impl ToolDef {
+    /// Creates a new `ToolDef` linking a spec to a callable.
     pub fn new<C>(spec: ToolSpec, callable: C) -> Self
     where
         C: IntoToolCallable,
@@ -79,11 +91,13 @@ impl ToolDef {
         }
     }
 
+    /// Appends prerequisites to the tool definition.
     pub fn with_prerequisites(mut self, prereqs: Vec<PrerequisiteSpec>) -> Self {
         self.prerequisites = prereqs;
         self
     }
 
+    /// Returns the name of the tool.
     pub fn name(&self) -> &str {
         &self.spec.name
     }
@@ -100,11 +114,17 @@ impl fmt::Debug for ToolDef {
 
 /// A validated workflow definition.
 pub struct Workflow {
+    /// Name of the workflow.
     pub name: String,
+    /// Description of the workflow.
     pub description: String,
+    /// Map of tool names to their definition.
     pub tools: IndexMap<String, ToolDef>,
+    /// List of step names that must be completed.
     pub required_steps: Vec<String>,
+    /// Set of tools designated as terminal (success terminates loop).
     pub terminal_tools: HashSet<String>,
+    /// System prompt template containing variable interpolation placeholders.
     pub system_prompt_template: String,
 }
 
@@ -241,7 +261,9 @@ impl fmt::Debug for Workflow {
 /// Input type for terminal_tool: either a single string or a list.
 #[derive(Debug, Clone)]
 pub enum TerminalToolInput {
+    /// A single terminal tool name.
     Single(String),
+    /// Multiple terminal tool names.
     Multiple(Vec<String>),
 }
 

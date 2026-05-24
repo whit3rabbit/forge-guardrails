@@ -55,6 +55,7 @@ pub struct SlotWorker<C: LLMClient> {
 }
 
 impl<C: LLMClient> SlotWorker<C> {
+    /// Creates a new `SlotWorker` queue.
     pub fn new(runner: Arc<WorkflowRunner<C>>) -> Self {
         Self {
             runner,

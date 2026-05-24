@@ -438,7 +438,7 @@ src/
     server.rs                HTTPServer — axum HTTP/SSE server
   bin/
     forge-guardrails-proxy.rs  CLI proxy entry point
-    forge-eval.rs              Native Rust eval smoke runner
+    forge-eval/                Native Rust eval smoke runner
 tests/
   parity/                    Python-generated golden fixtures for Rust parity tests
   parity_tests.rs            Rust assertions against python_golden.json

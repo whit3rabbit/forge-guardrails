@@ -1,3 +1,5 @@
+//! Integration tests for anyllm proxy client tests.
+
 use anyllm_proxy::config::model_router::{Deployment, ModelRouter};
 use anyllm_proxy::config::{
     BackendAuth, BackendConfig, BackendKind, ModelMapping, MultiConfig, OpenAIApiFormat, TlsConfig,

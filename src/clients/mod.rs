@@ -1,8 +1,16 @@
+//! Adapters and clients for connecting to various LLM provider backends.
+
+/// Anthropic client implementation.
 pub mod anthropic;
+/// AnyLLM proxy and runtime client implementation.
 pub mod anyllm_proxy;
+/// Base client traits and shared data structures.
 pub mod base;
+/// Llamafile client implementation.
 pub mod llamafile;
+/// Ollama client implementation.
 pub mod ollama;
+/// Model sampling defaults management.
 pub mod sampling;
 
 pub use anthropic::AnthropicClient;

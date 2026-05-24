@@ -8,22 +8,31 @@ use indexmap::IndexSet;
 /// Action determined by Guardrails.check().
 #[derive(Debug, Clone, PartialEq)]
 pub enum GuardAction {
+    /// Execute the tool call batch.
     Execute,
+    /// Retry the inference step with a nudge.
     Retry,
+    /// Step execution is blocked by dependencies/rules.
     StepBlocked,
+    /// Execution terminated with a fatal guardrail error.
     Fatal,
 }
 
 /// Frozen result of Guardrails.check().
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckResult {
+    /// Action designated by the guardrails check.
     pub action: GuardAction,
+    /// Tool calls payload if validation succeeded.
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Escalating instruction nudge if blocked or retrying.
     pub nudge: Option<Nudge>,
+    /// Underlying cause explanation.
     pub reason: Option<String>,
 }
 
 impl CheckResult {
+    /// Creates a `CheckResult` that executes tool calls.
     pub fn execute(tool_calls: Vec<ToolCall>) -> Self {
         Self {
             action: GuardAction::Execute,
@@ -33,6 +42,7 @@ impl CheckResult {
         }
     }
 
+    /// Creates a `CheckResult` requesting a retry with a nudge.
     pub fn retry(nudge: Nudge) -> Self {
         Self {
             action: GuardAction::Retry,
@@ -42,6 +52,7 @@ impl CheckResult {
         }
     }
 
+    /// Creates a `CheckResult` indicating step block.
     pub fn step_blocked(nudge: Nudge) -> Self {
         Self {
             action: GuardAction::StepBlocked,
@@ -51,6 +62,7 @@ impl CheckResult {
         }
     }
 
+    /// Creates a `CheckResult` indicating a fatal termination.
     pub fn fatal(reason: impl Into<String>) -> Self {
         Self {
             action: GuardAction::Fatal,
@@ -63,7 +75,9 @@ impl CheckResult {
 
 /// Terminal tool specification: either a single string or a set of strings.
 pub enum TerminalTool {
+    /// A single terminal tool name.
     Single(String),
+    /// A set of multiple terminal tool names.
     Multiple(IndexSet<String>),
 }
 
@@ -71,13 +85,18 @@ pub enum TerminalTool {
 /// two-method check()/record() API. check() processes through two sequential
 /// checkpoints: first validation, then step enforcement.
 pub struct Guardrails {
+    /// Internal error tracker.
     pub error_tracker: ErrorTracker,
+    /// Internal response structure validator.
     pub validator: ResponseValidator,
+    /// Internal step enforcement manager.
     pub step_enforcer: StepEnforcer,
+    /// Designated set of terminal tools.
     pub terminal_tools: IndexSet<String>,
 }
 
 impl Guardrails {
+    /// Creates a new `Guardrails` engine.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tool_names: Vec<String>,

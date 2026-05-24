@@ -10,13 +10,18 @@ use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 /// Type of streaming chunk from the LLM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChunkType {
+    /// Text content update.
     TextDelta,
+    /// Tool call update.
     ToolCallDelta,
+    /// Final response containing complete results.
     Final,
+    /// Nudge or retry instruction chunk.
     Retry,
 }
 
 impl ChunkType {
+    /// Return the string representation of the chunk type.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TextDelta => "text_delta",
@@ -36,13 +41,18 @@ impl fmt::Display for ChunkType {
 /// A validated tool call response from the LLM client.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
+    /// Unique identifier for the tool call.
     pub id: Option<String>,
+    /// Name of the tool being called.
     pub tool: String,
+    /// Arguments passed to the tool.
     pub args: IndexMap<String, Value>,
+    /// Optional chain-of-thought or reasoning text.
     pub reasoning: Option<String>,
 }
 
 impl ToolCall {
+    /// Creates a new `ToolCall`.
     pub fn new(tool: impl Into<String>, args: IndexMap<String, Value>) -> Self {
         Self {
             id: None,
@@ -52,11 +62,13 @@ impl ToolCall {
         }
     }
 
+    /// Sets the tool call ID.
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
         self
     }
 
+    /// Sets the reasoning content.
     pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
         self.reasoning = Some(reasoning.into());
         self
@@ -66,10 +78,12 @@ impl ToolCall {
 /// A non-tool-call text response from the LLM.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextResponse {
+    /// The generated text content.
     pub content: String,
 }
 
 impl TextResponse {
+    /// Creates a new `TextResponse`.
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
@@ -81,19 +95,25 @@ impl TextResponse {
 /// or a text response.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LLMResponse {
+    /// List of tool calls.
     ToolCalls(Vec<ToolCall>),
+    /// Plain text response.
     Text(TextResponse),
 }
 
 /// An immutable streaming chunk from the LLM.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamChunk {
+    /// The type of chunk.
     pub chunk_type: ChunkType,
+    /// Any text or raw content payload.
     pub content: String,
+    /// The fully resolved response, if this is a final chunk.
     pub response: Option<LLMResponse>,
 }
 
 impl StreamChunk {
+    /// Creates a new `StreamChunk` of the given type.
     pub fn new(chunk_type: ChunkType) -> Self {
         Self {
             chunk_type,
@@ -102,11 +122,13 @@ impl StreamChunk {
         }
     }
 
+    /// Sets the chunk content.
     pub fn with_content(mut self, content: impl Into<String>) -> Self {
         self.content = content.into();
         self
     }
 
+    /// Sets the final response.
     pub fn with_response(mut self, response: LLMResponse) -> Self {
         self.response = Some(response);
         self
@@ -120,12 +142,16 @@ impl StreamChunk {
 /// estimation. Immutable once constructed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenUsage {
+    /// Number of tokens in the prompt context.
     pub prompt_tokens: i64,
+    /// Number of tokens in the generated completion.
     pub completion_tokens: i64,
+    /// Total tokens (prompt + completion).
     pub total_tokens: i64,
 }
 
 impl TokenUsage {
+    /// Creates a new `TokenUsage`.
     pub fn new(prompt_tokens: i64, completion_tokens: i64, total_tokens: i64) -> Self {
         Self {
             prompt_tokens,
@@ -134,6 +160,7 @@ impl TokenUsage {
         }
     }
 
+    /// Creates an empty `TokenUsage` with all counts at zero.
     pub fn empty() -> Self {
         Self {
             prompt_tokens: 0,
@@ -146,29 +173,48 @@ impl TokenUsage {
 /// Rate-limit details observed from the last LLM call.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LLMRateLimitInfo {
+    /// Limit on the number of requests.
     pub requests_limit: Option<String>,
+    /// Remaining requests in the current window.
     pub requests_remaining: Option<String>,
+    /// Duration or time when the request limit resets.
     pub requests_reset: Option<String>,
+    /// Limit on the number of tokens.
     pub tokens_limit: Option<String>,
+    /// Remaining tokens in the current window.
     pub tokens_remaining: Option<String>,
+    /// Duration or time when the token limit resets.
     pub tokens_reset: Option<String>,
+    /// Duration to wait before retrying.
     pub retry_after: Option<String>,
+    /// Organization identifier.
     pub organization_id: Option<String>,
 }
 
 /// Provider-routing and accounting metadata observed from the last LLM call.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LLMCallInfo {
+    /// The specific model requested by the client.
     pub requested_model: Option<String>,
+    /// The specific model that responded.
     pub response_model: Option<String>,
+    /// The routing/backend selected.
     pub selected_backend: Option<String>,
+    /// The internal mapped model name.
     pub mapped_model: Option<String>,
+    /// The backend adapter kind.
     pub backend_kind: Option<String>,
+    /// Identifier for the provider.
     pub provider_id: Option<String>,
+    /// Whether the responses API was used.
     pub used_responses_api: bool,
+    /// Warnings regarding performance or configuration.
     pub degradation_warnings: Option<String>,
+    /// Status of the prompt/response cache.
     pub cache_status: Option<String>,
+    /// Rate limit state information.
     pub rate_limits: LLMRateLimitInfo,
+    /// Estimated cost of the API call in USD.
     pub estimated_cost_usd: Option<f64>,
 }
 
@@ -182,11 +228,14 @@ pub type SamplingParams = serde_json::Map<String, serde_json::Value>;
 /// Wire format identifier for message serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApiFormat {
+    /// OpenAI-compatible format.
     OpenAI,
+    /// Ollama-native format.
     Ollama,
 }
 
 impl ApiFormat {
+    /// Return string representation of the format.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::OpenAI => "openai",

@@ -25,8 +25,11 @@ use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 /// Function calling mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlamafileMode {
+    /// Native tool call support via JSON parameters.
     Native,
+    /// Fallback tool call support via prompt injection.
     Prompt,
+    /// Automated detection of native support with prompt fallback.
     Auto,
 }
 
@@ -53,6 +56,7 @@ pub struct LlamafileClient {
 }
 
 impl LlamafileClient {
+    /// Creates a new `LlamafileClient` representing the model file at the given path.
     pub fn new(gguf_path: impl AsRef<Path>) -> Self {
         let model = helpers::extract_model_identity(gguf_path.as_ref());
         Self {
@@ -77,39 +81,48 @@ impl LlamafileClient {
         }
     }
 
+    /// Sets the base URL for the Llamafile endpoint.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
     }
+    /// Sets the temperature sampling parameter.
     pub fn with_temperature(mut self, t: f64) -> Self {
         self.temperature = Some(t);
         self
     }
+    /// Sets the top_p sampling parameter.
     pub fn with_top_p(mut self, v: f64) -> Self {
         self.top_p = Some(v);
         self
     }
+    /// Sets the top_k sampling parameter.
     pub fn with_top_k(mut self, v: i64) -> Self {
         self.top_k = Some(v);
         self
     }
+    /// Sets the min_p sampling parameter.
     pub fn with_min_p(mut self, v: f64) -> Self {
         self.min_p = Some(v);
         self
     }
+    /// Sets the repeat_penalty sampling parameter.
     pub fn with_repeat_penalty(mut self, v: f64) -> Self {
         self.repeat_penalty = Some(v);
         self
     }
+    /// Sets the presence_penalty sampling parameter.
     pub fn with_presence_penalty(mut self, v: f64) -> Self {
         self.presence_penalty = Some(v);
         self
     }
+    /// Sets custom chat template keyword arguments.
     pub fn with_chat_template_kwargs(mut self, kw: Map<String, Value>) -> Self {
         self.chat_template_kwargs = Some(kw);
         self
     }
 
+    /// Sets the function calling mode (native, prompt, or auto).
     pub fn with_mode(mut self, mode: &str) -> Self {
         self.mode = match mode {
             "native" => LlamafileMode::Native,
@@ -124,23 +137,28 @@ impl LlamafileClient {
         self
     }
 
+    /// Sets the request timeout in seconds.
     pub fn with_timeout(mut self, s: f64) -> Self {
         self.timeout_secs = s;
         self
     }
+    /// Sets whether thinking/reasoning parsing is enabled.
     pub fn with_think(mut self, t: Option<bool>) -> Self {
         self.think = t.unwrap_or(true);
         self
     }
+    /// Sets whether prompt caching is enabled.
     pub fn with_cache_prompt(mut self, c: bool) -> Self {
         self.cache_prompt = c;
         self
     }
+    /// Sets the server slot ID to query usage on.
     pub fn with_slot_id(mut self, s: i64) -> Self {
         self.slot_id = Some(s);
         self
     }
 
+    /// Sets whether recommended sampling defaults are used.
     pub fn with_recommended_sampling(mut self, enabled: bool) -> Self {
         self.recommended_sampling = enabled;
         if enabled {
@@ -152,6 +170,7 @@ impl LlamafileClient {
         self
     }
 
+    /// Returns the model identity string.
     pub fn model_identity(&self) -> &str {
         &self.model
     }
@@ -182,6 +201,7 @@ impl LlamafileClient {
         }
     }
 
+    /// Returns the token usage of the last request for the given slot.
     pub fn get_usage(&self, slot: i64) -> Option<TokenUsage> {
         self.last_usage.lock().ok()?.get(&slot).cloned()
     }

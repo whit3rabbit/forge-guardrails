@@ -8,8 +8,15 @@ use indexmap::{IndexMap, IndexSet};
 /// Supports name-only and arg-matched variants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepPrerequisite {
+    /// Prerequisite satisfied solely by the occurrence of a tool call.
     NameOnly(String),
-    ArgMatched { tool: String, match_arg: String },
+    /// Prerequisite satisfied by a tool call only when specific arguments match.
+    ArgMatched {
+        /// Name of the tool.
+        tool: String,
+        /// Description or key matching parameter criteria.
+        match_arg: String,
+    },
 }
 
 impl From<&StepPrerequisite> for Prerequisite {
@@ -27,11 +34,14 @@ impl From<&StepPrerequisite> for Prerequisite {
 /// Result of StepEnforcer.check().
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepCheck {
+    /// The nudge content to return to the user/model if blocked.
     pub nudge: Option<Nudge>,
+    /// Whether a nudge is required.
     pub needs_nudge: bool,
 }
 
 impl StepCheck {
+    /// Return a successful step check (not blocked).
     pub fn ok() -> Self {
         Self {
             nudge: None,
@@ -39,6 +49,7 @@ impl StepCheck {
         }
     }
 
+    /// Return a blocked step check containing the nudge.
     pub fn blocked(nudge: Nudge) -> Self {
         Self {
             nudge: Some(nudge),
@@ -50,16 +61,24 @@ impl StepCheck {
 /// Stateful step tracker that detects premature terminal tool calls and enforces
 /// tool prerequisites, producing escalating nudges capped at tier 3.
 pub struct StepEnforcer {
+    /// Internal step tracker state.
     pub tracker: StepTracker,
+    /// Set of tools designated as terminal (ending the workflow).
     pub terminal_tools: IndexSet<String>,
+    /// Map of tool names to their corresponding prerequisites.
     pub tool_prerequisites: IndexMap<String, Vec<StepPrerequisite>>,
+    /// Maximum allowed premature attempts before triggering a hard error.
     pub max_premature_attempts: i32,
+    /// Maximum allowed prerequisite violations before triggering a hard error.
     pub max_prereq_violations: i32,
+    /// Running count of premature attempts.
     pub premature_attempts: i32,
+    /// Running count of prerequisite violations.
     pub prereq_violations: i32,
 }
 
 impl StepEnforcer {
+    /// Creates a new `StepEnforcer`.
     pub fn new(
         required_steps: Vec<String>,
         terminal_tools: IndexSet<String>,
@@ -124,18 +143,22 @@ impl StepEnforcer {
         StepCheck::ok()
     }
 
+    /// Record the execution of a tool with its arguments.
     pub fn record(&mut self, tool_name: &str, args: Option<&IndexMap<String, serde_json::Value>>) {
         self.tracker.record(tool_name, args);
     }
 
+    /// Returns true if all required steps have been completed.
     pub fn is_satisfied(&self) -> bool {
         self.tracker.is_satisfied()
     }
 
+    /// Returns the list of pending required step names.
     pub fn pending(&self) -> Vec<String> {
         self.tracker.pending()
     }
 
+    /// Returns true if a terminal tool call is present and all required steps are satisfied.
     pub fn terminal_reached(&self, tool_calls: &[ToolCall]) -> bool {
         let has_terminal = tool_calls
             .iter()
@@ -143,30 +166,37 @@ impl StepEnforcer {
         has_terminal && self.tracker.is_satisfied()
     }
 
+    /// Resets the count of premature attempts back to zero.
     pub fn reset_premature(&mut self) {
         self.premature_attempts = 0;
     }
 
+    /// Resets the count of prerequisite violations back to zero.
     pub fn reset_prereq_violations(&mut self) {
         self.prereq_violations = 0;
     }
 
+    /// Generates a summary hint text of the pending required steps.
     pub fn summary_hint(&self) -> String {
         self.tracker.summary_hint()
     }
 
+    /// Returns the number of recorded premature terminal tool attempts.
     pub fn premature_attempts(&self) -> i32 {
         self.premature_attempts
     }
 
+    /// Returns true if the premature attempt count exceeds the allowed limit.
     pub fn premature_exhausted(&self) -> bool {
         self.premature_attempts > self.max_premature_attempts
     }
 
+    /// Returns the number of recorded prerequisite violations.
     pub fn prereq_violations(&self) -> i32 {
         self.prereq_violations
     }
 
+    /// Returns true if the prerequisite violation count exceeds the allowed limit.
     pub fn prereq_exhausted(&self) -> bool {
         self.prereq_violations > self.max_prereq_violations
     }

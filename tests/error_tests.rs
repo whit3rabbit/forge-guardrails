@@ -1,3 +1,5 @@
+//! Integration tests for error tests.
+
 use forge_guardrails::error::*;
 use forge_guardrails::ForgeError;
 

@@ -1,3 +1,5 @@
+//! Main entry point for the forge-guardrails-proxy standalone server binary.
+
 mod cli;
 mod client;
 mod config;

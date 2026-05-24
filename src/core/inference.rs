@@ -18,9 +18,13 @@ const TOOL_CALL_ID_WIDTH: usize = 9;
 /// Result of a single inference call.
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
+    /// The response payload received from the LLM client.
     pub response: LLMResponse,
+    /// Any new messages generated during the inference process (e.g. nudges).
     pub new_messages: Vec<Message>,
+    /// The running count of tool calls processed.
     pub tool_call_counter: i64,
+    /// The number of attempts taken to produce a valid response.
     pub attempts: i32,
 }
 

@@ -4,11 +4,14 @@ use serde_json::Value;
 /// Result of checking prerequisites against prior tool executions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrerequisiteCheck {
+    /// Whether the prerequisites are satisfied.
     pub satisfied: bool,
+    /// List of missing prerequisite step names or identifiers.
     pub missing: Vec<String>,
 }
 
 impl PrerequisiteCheck {
+    /// Returns a satisfied prerequisite check.
     pub fn satisfied() -> Self {
         Self {
             satisfied: true,
@@ -16,6 +19,7 @@ impl PrerequisiteCheck {
         }
     }
 
+    /// Returns an unsatisfied prerequisite check containing the missing steps.
     pub fn unsatisfied(missing: Vec<String>) -> Self {
         Self {
             satisfied: false,
@@ -27,8 +31,15 @@ impl PrerequisiteCheck {
 /// A prerequisite specification that can be checked against prior executions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Prerequisite {
+    /// Prerequisite satisfied solely by the occurrence of a tool call.
     NameOnly(String),
-    ArgMatched { tool: String, match_arg: String },
+    /// Prerequisite satisfied by a tool call only when specific arguments match.
+    ArgMatched {
+        /// Name of the tool.
+        tool: String,
+        /// Description or key matching parameter criteria.
+        match_arg: String,
+    },
 }
 
 /// Tracks required steps and executed tools in a workflow run.
@@ -39,6 +50,7 @@ pub struct StepTracker {
 }
 
 impl StepTracker {
+    /// Creates a new `StepTracker` with the given required steps.
     pub fn new(required_steps: Vec<String>) -> Self {
         Self {
             required_steps,

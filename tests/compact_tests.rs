@@ -1,3 +1,5 @@
+//! Integration tests for compact tests.
+
 use forge_guardrails::{
     CompactStrategy, Message, MessageMeta, MessageRole, MessageType, NoCompact,
     SlidingWindowCompact, TieredCompact,

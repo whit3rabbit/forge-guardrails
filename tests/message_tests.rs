@@ -1,3 +1,5 @@
+//! Integration tests for message tests.
+
 use forge_guardrails::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use indexmap::IndexMap;
 use serde_json::Value;

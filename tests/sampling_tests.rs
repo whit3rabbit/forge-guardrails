@@ -1,3 +1,5 @@
+//! Integration tests for sampling tests.
+
 use forge_guardrails::{
     apply_sampling_defaults, get_sampling_defaults, UnsupportedModelError, MODEL_SAMPLING_DEFAULTS,
 };

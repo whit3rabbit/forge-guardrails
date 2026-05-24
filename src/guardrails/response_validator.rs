@@ -10,8 +10,11 @@ pub type RetryNudgeFn = Box<dyn Fn(&str) -> String + Send + Sync>;
 /// Result of ResponseValidator.validate(). Exactly one of tool_calls or nudge is set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidationResult {
+    /// Validated tool calls if the validation succeeded.
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Instruction nudge if the validation failed and a retry is needed.
     pub nudge: Option<Nudge>,
+    /// Whether a retry should be performed.
     pub needs_retry: bool,
 }
 
@@ -45,6 +48,7 @@ pub struct ResponseValidator {
 }
 
 impl ResponseValidator {
+    /// Creates a new `ResponseValidator`.
     pub fn new(
         tool_names: Vec<String>,
         rescue_enabled: bool,

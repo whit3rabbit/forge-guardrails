@@ -1,3 +1,5 @@
+//! Integration tests for prompts tests.
+
 use forge_guardrails::{
     build_tool_prompt, extract_tool_call, rescue_tool_call, ParamModel, ToolSpec,
 };

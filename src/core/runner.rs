@@ -43,6 +43,7 @@ pub struct WorkflowRunner<C: LLMClient> {
 }
 
 impl<C: LLMClient> WorkflowRunner<C> {
+    /// Creates a new `WorkflowRunner`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<C>,

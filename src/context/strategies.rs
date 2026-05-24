@@ -9,6 +9,9 @@ use crate::core::message::MessageType;
 /// optional step hint. They return a new (possibly unchanged) message list
 /// and a phase indicator: 0 means no compaction, 1+ means compaction.
 pub trait CompactStrategy: Send + Sync {
+    /// Compacts the message history to fit within a token budget.
+    ///
+    /// Returns the compacted message list and a phase indicator.
     fn compact(
         &self,
         messages: &[crate::core::message::Message],
@@ -36,11 +39,14 @@ impl CompactStrategy for NoCompact {
 /// Sliding-window compaction that keeps the system prompt, user input,
 /// and the N most recent iterations.
 pub struct SlidingWindowCompact {
+    /// The number of recent workflow step iterations to protect from compaction.
     pub keep_recent: i64,
+    /// The threshold ratio (e.g. 0.75 of token budget) at which compaction is triggered.
     pub compact_threshold: f64,
 }
 
 impl SlidingWindowCompact {
+    /// Creates a new `SlidingWindowCompact` strategy protecting `keep_recent` iterations.
     pub fn new(keep_recent: i64) -> Self {
         Self {
             keep_recent,
@@ -48,6 +54,7 @@ impl SlidingWindowCompact {
         }
     }
 
+    /// Customizes the compact threshold ratio.
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.compact_threshold = threshold;
         self
@@ -87,8 +94,11 @@ impl CompactStrategy for SlidingWindowCompact {
 /// Phase 2: Phase 1 + drop all tool results.
 /// Phase 3: Phase 2 + drop reasoning and text_response (tool_call skeleton only).
 pub struct TieredCompact {
+    /// The number of recent workflow step iterations to protect from compaction.
     pub keep_recent: i64,
+    /// The baseline compact threshold ratio (e.g. 0.75 of token budget) at which compaction is triggered.
     pub compact_threshold: f64,
+    /// Explicit compact threshold ratios for each of the three progressive phases.
     pub phase_thresholds: Option<[f64; 3]>,
 }
 
@@ -96,6 +106,7 @@ pub struct TieredCompact {
 const TRUNCATION_LIMIT: usize = 200;
 
 impl TieredCompact {
+    /// Creates a new `TieredCompact` strategy protecting `keep_recent` iterations.
     pub fn new(keep_recent: i64) -> Self {
         Self {
             keep_recent,
@@ -104,11 +115,13 @@ impl TieredCompact {
         }
     }
 
+    /// Customizes the baseline compact threshold ratio.
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.compact_threshold = threshold;
         self
     }
 
+    /// Customizes individual phase threshold ratios.
     pub fn with_phase_thresholds(mut self, thresholds: [f64; 3]) -> Self {
         self.phase_thresholds = Some(thresholds);
         self

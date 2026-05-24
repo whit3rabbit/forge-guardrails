@@ -7,11 +7,14 @@ use std::process::Command;
 /// Physical memory architecture of the GPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryKind {
+    /// Dedicated/discrete graphics memory.
     Discrete,
+    /// Shared/unified system memory.
     Unified,
 }
 
 impl MemoryKind {
+    /// Return the string representation of the memory kind.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Discrete => "discrete",
@@ -23,13 +26,18 @@ impl MemoryKind {
 /// Detected GPU hardware profile.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HardwareProfile {
+    /// Name of the GPU hardware.
     pub gpu_name: String,
+    /// Total VRAM capacity in megabytes.
     pub vram_total_mb: i64,
+    /// Hardware vendor name (nvidia, apple, amd).
     pub gpu_vendor: String,
+    /// The physical memory architecture of the GPU.
     pub memory_kind: MemoryKind,
 }
 
 impl HardwareProfile {
+    /// Helper to return VRAM capacity in gigabytes.
     pub fn vram_total_gb(&self) -> f64 {
         self.vram_total_mb as f64 / 1024.0
     }

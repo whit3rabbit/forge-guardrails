@@ -30,6 +30,7 @@ pub struct ServerManager {
 }
 
 impl ServerManager {
+    /// Creates a new `ServerManager` tracking the specified backend and port.
     pub fn new(backend: &str, port: i64, models_dir: Option<&Path>) -> Self {
         Self {
             backend: backend.to_string(),
@@ -42,6 +43,7 @@ impl ServerManager {
         }
     }
 
+    /// Sets the executable path for the llamafile runtime.
     pub fn with_llamafile_runtime(mut self, path: impl AsRef<Path>) -> Self {
         self.llamafile_runtime = Some(path.as_ref().to_path_buf());
         self

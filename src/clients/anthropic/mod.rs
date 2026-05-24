@@ -30,6 +30,7 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
+    /// Creates a new `AnthropicClient` for the given model.
     pub fn new(model: impl Into<String>, api_key: Option<String>) -> Self {
         Self {
             base_url: "https://api.anthropic.com/v1".to_string(),
@@ -43,26 +44,31 @@ impl AnthropicClient {
         }
     }
 
+    /// Sets the base URL for the Anthropic API.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
     }
 
+    /// Sets the max tokens parameter for completions.
     pub fn with_max_tokens(mut self, max_tokens: i64) -> Self {
         self.max_tokens = max_tokens;
         self
     }
 
+    /// Sets the request timeout in seconds.
     pub fn with_timeout(mut self, timeout_secs: f64) -> Self {
         self.timeout_secs = timeout_secs;
         self
     }
 
+    /// Sets the maximum number of retries.
     pub fn with_max_retries(mut self, max_retries: i64) -> Self {
         self.max_retries = max_retries;
         self
     }
 
+    /// Sets the tool choice configuration.
     pub fn with_tool_choice(mut self, tool_choice: impl Into<String>) -> Self {
         self.tool_choice = Some(tool_choice.into());
         self
@@ -84,6 +90,7 @@ impl AnthropicClient {
         }
     }
 
+    /// Returns the token usage of the last request made by this client, if any.
     pub fn get_last_usage(&self) -> Option<TokenUsage> {
         self.last_usage.lock().ok().and_then(|guard| guard.clone())
     }

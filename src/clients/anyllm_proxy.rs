@@ -38,6 +38,7 @@ pub struct AnyLlmProxyClient {
 }
 
 impl AnyLlmProxyClient {
+    /// Creates a new `AnyLlmProxyClient` for the given model.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             chat_completions_url: DEFAULT_ANYLLM_PROXY_URL.to_string(),
@@ -50,21 +51,25 @@ impl AnyLlmProxyClient {
         }
     }
 
+    /// Sets the base URL for the sidecar proxy.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.chat_completions_url = normalize_chat_completions_url(&url.into());
         self
     }
 
+    /// Sets the API key used for authenticating with the proxy.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
     }
 
+    /// Sets the context token length.
     pub fn with_context_length(mut self, tokens: i64) -> Self {
         self.context_length = Some(tokens);
         self
     }
 
+    /// Sets the request timeout in seconds.
     pub fn with_timeout(mut self, timeout_secs: f64) -> Self {
         self.timeout_secs = timeout_secs;
         self
@@ -196,6 +201,7 @@ pub struct AnyLlmRuntimeClient {
 }
 
 impl AnyLlmRuntimeClient {
+    /// Creates a new `AnyLlmRuntimeClient` with the given model and underlying chat completion service.
     pub fn new(model: impl Into<String>, service: Arc<dyn ChatCompletionService>) -> Self {
         Self {
             model: model.into(),
@@ -206,14 +212,17 @@ impl AnyLlmRuntimeClient {
         }
     }
 
+    /// Creates an `AnyLlmRuntimeClient` directly from an existing runtime.
     pub fn from_runtime(model: impl Into<String>, runtime: ChatCompletionRuntime) -> Self {
         Self::new(model, Arc::new(runtime))
     }
 
+    /// Creates an `AnyLlmRuntimeClient` from a configuration object.
     pub fn from_config(model: impl Into<String>, config: anyllm_proxy::config::Config) -> Self {
         Self::from_runtime(model, ChatCompletionRuntime::from_config(config))
     }
 
+    /// Creates an `AnyLlmRuntimeClient` from a multi-provider config.
     pub fn from_multi_config(
         model: impl Into<String>,
         config: anyllm_proxy::config::MultiConfig,
@@ -221,6 +230,7 @@ impl AnyLlmRuntimeClient {
         Self::from_runtime(model, ChatCompletionRuntime::from_multi_config(config))
     }
 
+    /// Creates an `AnyLlmRuntimeClient` from a multi-provider config and custom model router.
     pub fn from_multi_config_with_model_router(
         model: impl Into<String>,
         config: anyllm_proxy::config::MultiConfig,
@@ -232,6 +242,7 @@ impl AnyLlmRuntimeClient {
         )
     }
 
+    /// Sets the context token length.
     pub fn with_context_length(mut self, tokens: i64) -> Self {
         self.context_length = Some(tokens);
         self

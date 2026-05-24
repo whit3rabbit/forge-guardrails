@@ -1,3 +1,5 @@
+//! Integration tests for parity tests.
+
 #![allow(dead_code, unused_imports)]
 
 use forge_guardrails::guardrails::ResponseValidator;

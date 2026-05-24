@@ -20,6 +20,7 @@ pub enum BudgetMode {
 }
 
 impl BudgetMode {
+    /// Returns the string representation of the budget mode.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Backend => "backend",
@@ -29,6 +30,7 @@ impl BudgetMode {
         }
     }
 
+    /// Parses a string representation into a `BudgetMode` if valid.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "backend" => Some(Self::Backend),

@@ -1,3 +1,5 @@
+//! Integration tests for client tests.
+
 use forge_guardrails::{format_tool, TokenUsage, ToolSpec};
 use serde_json::json;
 

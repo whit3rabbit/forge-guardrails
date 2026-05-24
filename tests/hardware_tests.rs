@@ -1,3 +1,5 @@
+//! Integration tests for hardware tests.
+
 use forge_guardrails::{detect_hardware, HardwareProfile, MemoryKind};
 
 // ts-001: HardwareProfile stores VRAM in MB and computes GB correctly.
