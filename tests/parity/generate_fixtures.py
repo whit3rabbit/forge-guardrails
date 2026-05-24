@@ -1293,6 +1293,45 @@ def _compaction_phases_fixture() -> dict[str, Any]:
             keep_recent=1,
             phase_thresholds=thresholds,
         ).compact(messages, 100)
+        result_pairs = {
+            message.metadata.step_index: (message.tool_name, message.tool_call_id)
+            for message in messages
+            if message.metadata.type == MessageType.TOOL_RESULT
+            and message.metadata.step_index is not None
+        }
+        normalized: list[Message] = []
+        for message in compacted:
+            if (
+                message.metadata.type == MessageType.TOOL_RESULT
+                and message.tool_call_id is None
+                and message.metadata.step_index in result_pairs
+            ):
+                tool_name, tool_call_id = result_pairs[message.metadata.step_index]
+                message = Message(
+                    role=message.role,
+                    content=message.content,
+                    metadata=message.metadata,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                )
+            normalized.append(message)
+        # Security invariant: compacted transcripts must not retain an assistant
+        # tool call when the paired tool result was dropped.
+        result_ids = {
+            message.tool_call_id
+            for message in normalized
+            if message.metadata.type == MessageType.TOOL_RESULT
+            and message.tool_call_id is not None
+        }
+        compacted = [
+            message
+            for message in normalized
+            if not (
+                message.metadata.type == MessageType.TOOL_CALL
+                and message.tool_calls is not None
+                and not any(tc.call_id in result_ids for tc in message.tool_calls)
+            )
+        ]
         return {"phase": phase, "messages": _messages_payload(compacted)}
 
     return {

@@ -99,6 +99,11 @@ For JSON schema and OpenAI tool output, compare both:
 Do not loosen the Rust assertion just because a failure looks cosmetic. Small
 schema, prompt, nudge, or history changes can alter model behavior.
 
+Compaction fixtures have one explicit safety normalization: Rust must not emit
+provider-invalid transcripts with an orphaned tool call or tool result, even
+where the historical Python reference did. Keep any such divergence narrow and
+documented in `generate_fixtures.py`.
+
 ## Maintenance Notes
 
 When a new fixture fails:

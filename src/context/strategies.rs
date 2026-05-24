@@ -84,8 +84,8 @@ impl CompactStrategy for SlidingWindowCompact {
 /// Three-phase progressive compaction strategy.
 ///
 /// Phase 1: Drop nudge messages, truncate long tool results.
-/// Phase 2: Phase 1 + drop all tool results.
-/// Phase 3: Phase 2 + drop reasoning and text_response (tool_call skeleton only).
+/// Phase 2: Phase 1 + drop old tool_call/tool_result messages.
+/// Phase 3: Phase 2 + drop old reasoning and text_response messages.
 pub struct TieredCompact {
     pub keep_recent: i64,
     pub compact_threshold: f64,
@@ -234,11 +234,9 @@ fn apply_phase1(
                 if content_len > TRUNCATION_LIMIT {
                     let truncated: String = msg.content.chars().take(TRUNCATION_LIMIT).collect();
                     let removed = content_len - TRUNCATION_LIMIT;
-                    let new_msg = crate::core::message::Message::new(
-                        msg.role,
-                        format!("{}\n[Truncated — {} chars removed]", truncated, removed),
-                        msg.metadata.clone(),
-                    );
+                    let mut new_msg = msg.clone();
+                    new_msg.content =
+                        format!("{}\n[Truncated — {} chars removed]", truncated, removed);
                     result.push(new_msg);
                 } else {
                     result.push(msg.clone());
@@ -272,6 +270,7 @@ fn apply_phase2(
             MessageType::StepNudge
             | MessageType::PrerequisiteNudge
             | MessageType::RetryNudge
+            | MessageType::ToolCall
             | MessageType::ToolResult => continue,
             _ => result.push(msg.clone()),
         }
@@ -300,6 +299,7 @@ fn apply_phase3(
             MessageType::StepNudge
             | MessageType::PrerequisiteNudge
             | MessageType::RetryNudge
+            | MessageType::ToolCall
             | MessageType::ToolResult
             | MessageType::Reasoning
             | MessageType::TextResponse => continue,

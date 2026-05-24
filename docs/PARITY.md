@@ -8,6 +8,9 @@ but Rust should not copy the whole Python eval platform.
 - Tool schema JSON and OpenAI tool formatting.
 - Prompt-injected tool text and rescue parsing.
 - Tool-call ID pairing with tool-result messages.
+- Compacted transcripts must stay provider-valid. When historical Python
+  behavior would preserve one side of a tool-call/tool-result pair, the fixture
+  generator may apply a narrow, documented safety normalization instead.
 - Retry, unknown-tool, step, and prerequisite nudge history.
 - Proxy-visible behavior for no-tools passthrough, `respond` stripping, retry
   exhaustion text, and streaming final chunks.
