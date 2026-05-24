@@ -19,6 +19,8 @@ use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 
 /// Keywords that indicate a model supports thinking/reasoning mode.
 const THINK_KEYWORDS: &[&str] = &["think", "reasoning", "r1", "deepseek", "qwq"];
+/// Maximum number of bytes allowed for a single in-flight NDJSON line.
+const MAX_OLLAMA_NDJSON_LINE_BYTES: usize = 1024 * 1024;
 
 /// Client using Ollama's native function calling via /api/chat.
 pub struct OllamaClient {
@@ -651,7 +653,12 @@ fn parse_ollama_ndjson(
                 }
             }
             match inner.next().await {
-                Some(Ok(b)) => line_buf.push_str(&String::from_utf8_lossy(&b)),
+                Some(Ok(b)) => {
+                    if let Err(e) = append_ollama_line_buf_with_limit(&mut line_buf, &b) {
+                        yield Err(e);
+                        return;
+                    }
+                }
                 Some(Err(e)) => { yield Err(StreamError::new(e.to_string())); return; }
                 None => {
                     if line_buf.trim().is_empty() {
@@ -663,6 +670,20 @@ fn parse_ollama_ndjson(
         }
     };
     stream
+}
+
+fn append_ollama_line_buf_with_limit(
+    line_buf: &mut String,
+    chunk: &[u8],
+) -> Result<(), StreamError> {
+    line_buf.push_str(&String::from_utf8_lossy(chunk));
+    if line_buf.len() > MAX_OLLAMA_NDJSON_LINE_BYTES {
+        return Err(StreamError::new(format!(
+            "Ollama stream line exceeded {} bytes without newline",
+            MAX_OLLAMA_NDJSON_LINE_BYTES
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -748,6 +769,24 @@ mod tests {
         sp.insert("temperature".into(), json!(0.9));
         let _ = c.build_options(Some(&sp));
         assert_eq!(c.build_options(None).get("temperature"), Some(&json!(0.5)));
+    }
+
+    #[test]
+    fn ndjson_line_buf_limit_allows_small_chunks() {
+        let mut line_buf = String::new();
+        let chunk = vec![b'a'; 32];
+        let result = append_ollama_line_buf_with_limit(&mut line_buf, &chunk);
+        assert!(result.is_ok());
+        assert_eq!(line_buf.len(), 32);
+    }
+
+    #[test]
+    fn ndjson_line_buf_limit_rejects_oversized_line() {
+        let mut line_buf = "a".repeat(MAX_OLLAMA_NDJSON_LINE_BYTES);
+        let result = append_ollama_line_buf_with_limit(&mut line_buf, b"b");
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("exceeded"));
     }
 
     // --- Temperature ---
