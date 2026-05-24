@@ -395,6 +395,59 @@ async fn anyllm_runtime_client_preserves_openai_fields_and_parses_usage() {
 }
 
 #[tokio::test]
+async fn anyllm_runtime_client_for_model_uses_requested_model_with_fresh_state() {
+    let mut server = mockito::Server::new_async().await;
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .match_body(mockito::Matcher::Json(json!({
+            "model": "request-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": false
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-runtime-for-model",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "request-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "routed"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let config = anyllm_multi_config(anyllm_backend_config(BackendKind::OpenAI, server.url()));
+    let base_client =
+        AnyLlmRuntimeClient::from_multi_config("base-model", config).with_context_length(8192);
+    let request_client = base_client.for_model("request-model");
+
+    let response = request_client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("runtime response");
+
+    match response {
+        LLMResponse::Text(text) => assert_eq!(text.content, "routed"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    assert_eq!(request_client.last_usage().unwrap().total_tokens, 5);
+    assert!(base_client.last_usage().is_none());
+    assert!(base_client.last_call_info().is_none());
+}
+
+#[tokio::test]
 async fn anyllm_runtime_client_parses_tool_calls() {
     let mut server = mockito::Server::new_async().await;
     let _mock = server

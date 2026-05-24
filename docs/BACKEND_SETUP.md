@@ -28,8 +28,9 @@ Reasoning-tagged models on recent llama.cpp builds may need:
 ```
 
 The Rust smoke runner accepts `--reasoning-budget` so eval JSONL records the
-intended setting. When starting llama-server outside the runner, pass the same
-flag to the server process.
+intended setting, but it does not start or reconfigure a local server process.
+When starting llama-server outside the runner, pass the same flag to that
+server process.
 
 ## llamafile
 
@@ -43,6 +44,19 @@ llamaserver default: native
 
 Both paths use `LlamafileClient`, but the mode matters for parity.
 
+Managed llamafile startup requires an explicit, trusted runtime binary path.
+Forge does not discover or execute binaries from the GGUF/model directory.
+
+```bash
+forge-guardrails-proxy \
+  --backend llamafile \
+  --gguf path/to/model.gguf \
+  --llamafile-runtime /opt/forge/bin/llamafile
+```
+
+The runtime path must be absolute, resolve to a regular file, and be
+executable on Unix platforms.
+
 ## Ollama
 
 Ollama uses `/api/chat`, not an OpenAI-compatible endpoint. Use
@@ -52,8 +66,13 @@ Rules:
 
 - `setup_backend("ollama")` requires `--model`.
 - `setup_backend("ollama")` rejects GGUF/file paths.
+- `setup_backend("llamafile")` requires `gguf_path` and an explicit
+  `llamafile_runtime`.
 - Resolved budgets should be mirrored into Ollama as `num_ctx` when the client
   is used for evals.
+- `forge-eval --backend ollama --num-ctx <N>` mirrors `<N>` into
+  `OllamaClient::set_num_ctx(Some(N))` and uses the same value for the local
+  context budget.
 
 ## Anthropic
 

@@ -10,9 +10,9 @@ use forge_guardrails::clients::base::LLMCallInfo;
 use forge_guardrails::error::ToolError;
 use forge_guardrails::workflow::ToolCallable;
 use forge_guardrails::{
-    AnthropicClient, AnyLlmProxyClient, ApiFormat, ChunkStream, ContextManager, ForgeError,
-    LLMClient, LLMResponse, LlamafileClient, Message, MessageType, NoCompact, OllamaClient,
-    SamplingParams, StreamChunk, ToolDef, ToolSpec, Workflow, WorkflowRunner,
+    AnthropicClient, AnyLlmProxyClient, ApiFormat, ChunkStream, CompactEvent, ContextManager,
+    ForgeError, LLMClient, LLMResponse, LlamafileClient, Message, MessageType, NoCompact,
+    OllamaClient, SamplingParams, StreamChunk, ToolDef, ToolSpec, Workflow, WorkflowRunner,
 };
 use indexmap::IndexMap;
 use serde_json::{json, Value};
@@ -28,6 +28,7 @@ struct Cli {
     gguf: Option<String>,
     base_url: Option<String>,
     runs: usize,
+    num_ctx: i64,
     scenarios: Vec<String>,
     stream: bool,
     output: Option<String>,
@@ -140,7 +141,7 @@ async fn run_cli(cli: Cli) -> Result<(), String> {
         }
         "ollama" => {
             let model = require_model(&cli)?;
-            let client = OllamaClient::new(model.clone());
+            let client = configured_ollama_client(&cli, &model);
             run_with_client(client, &cli, &model).await
         }
         "llamaserver" | "llamafile" => {
@@ -178,6 +179,15 @@ async fn run_cli(cli: Cli) -> Result<(), String> {
     }
 }
 
+fn configured_ollama_client(cli: &Cli, model: &str) -> OllamaClient {
+    let mut client = OllamaClient::new(model.to_string());
+    if let Some(base_url) = cli.base_url.as_deref() {
+        client = client.with_base_url(base_url);
+    }
+    client.set_num_ctx(Some(cli.num_ctx));
+    client
+}
+
 async fn run_with_client<C: LLMClient + 'static>(
     client: C,
     cli: &Cli,
@@ -200,10 +210,17 @@ async fn run_with_client<C: LLMClient + 'static>(
             let scenario = build_scenario(scenario_name, ablation.use_required_steps)?;
             let emitted: Arc<StdMutex<Vec<Message>>> = Arc::new(StdMutex::new(Vec::new()));
             let emitted_cb = emitted.clone();
+            let compactions: Arc<StdMutex<Vec<CompactEvent>>> = Arc::new(StdMutex::new(Vec::new()));
+            let compactions_cb = compactions.clone();
             let context = Arc::new(Mutex::new(ContextManager::new(
                 Box::new(NoCompact),
-                8192,
-                None,
+                cli.num_ctx,
+                Some(Box::new(move |event: &CompactEvent| {
+                    compactions_cb
+                        .lock()
+                        .expect("compaction capture lock")
+                        .push(event.clone());
+                })),
                 None,
                 None,
             )));
@@ -233,6 +250,7 @@ async fn run_with_client<C: LLMClient + 'static>(
             let elapsed = start.elapsed().as_secs_f64();
             let iterations = client.calls() - before_calls;
             let messages = emitted.lock().expect("message capture lock").clone();
+            let compaction_events = compactions.lock().expect("compaction capture lock").len();
             let row = row_for_result(
                 &cli.backend,
                 model,
@@ -244,6 +262,7 @@ async fn run_with_client<C: LLMClient + 'static>(
                 elapsed,
                 result,
                 &messages,
+                compaction_events,
             );
             write_row(cli.output.as_deref(), &row)?;
         }
@@ -264,6 +283,7 @@ fn row_for_result(
     elapsed: f64,
     result: Result<Value, ForgeError>,
     messages: &[Message],
+    compaction_events: usize,
 ) -> Value {
     let captured_args = scenario
         .capture
@@ -295,6 +315,12 @@ fn row_for_result(
     };
     let stats = message_stats(messages);
     let (tool_sequence, tool_args) = tool_trace(messages);
+    let ideal_iterations = scenario.workflow.required_steps.len() as i32 + 1;
+    let wasted_calls = if completeness {
+        json!((iterations - ideal_iterations).max(0))
+    } else {
+        Value::Null
+    };
 
     json!({
         "impl": "rust",
@@ -310,9 +336,13 @@ fn row_for_result(
         "success": success,
         "accuracy": accuracy,
         "iterations": iterations,
+        "ideal_iterations": ideal_iterations,
+        "wasted_calls": wasted_calls,
         "elapsed_s": (elapsed * 100.0).round() / 100.0,
         "error_type": error_type,
         "error_message": error_message,
+        "budget_tokens": cli.num_ctx,
+        "compaction_events": compaction_events,
         "retry_nudges": stats.retry_nudges,
         "step_nudges": stats.step_nudges,
         "tool_errors": stats.tool_errors,
@@ -700,6 +730,7 @@ where
         gguf: None,
         base_url: None,
         runs: 1,
+        num_ctx: 8192,
         scenarios: Vec::new(),
         stream: false,
         output: None,
@@ -723,6 +754,12 @@ where
                 cli.runs = raw
                     .parse::<usize>()
                     .map_err(|_| format!("invalid --runs value: {raw}"))?;
+            }
+            "--num-ctx" => {
+                let raw = take_one(&values, &mut index, "--num-ctx")?;
+                cli.num_ctx = raw
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid --num-ctx value: {raw}"))?;
             }
             "--scenario" => {
                 cli.scenarios = take_many(&values, &mut index, "--scenario")?;
@@ -748,6 +785,9 @@ where
 
     if cli.runs == 0 {
         return Err("--runs must be at least 1".to_string());
+    }
+    if cli.num_ctx <= 0 {
+        return Err("--num-ctx must be at least 1".to_string());
     }
     parse_ablation(&cli.ablation)?;
     Ok(cli)
@@ -791,12 +831,13 @@ fn print_help() {
            --gguf PATH\n\
            --base-url URL\n\
            --runs N\n\
+           --num-ctx TOKENS (default: 8192; also sent as Ollama num_ctx)\n\
            --scenario NAME [NAME ...]\n\
            --stream\n\
            --ablation reforged|no_rescue|no_nudge|no_steps|no_recovery|no_compact|bare\n\
            --output PATH\n\
            --mode native|prompt|auto\n\
-           --reasoning-budget TOKENS\n\
+           --reasoning-budget TOKENS (metadata only; start local server with the same flag)\n\
            --anthropic-api-key KEY"
     );
 }
@@ -826,12 +867,41 @@ mod tests {
             vec!["basic_2step".to_string(), "sequential_3step".to_string()]
         );
         assert!(cli.stream);
+        assert_eq!(cli.num_ctx, 8192);
+    }
+
+    #[test]
+    fn parses_num_ctx() {
+        let cli = parse(&["--num-ctx", "16384"]);
+        assert_eq!(cli.num_ctx, 16384);
     }
 
     #[test]
     fn rejects_zero_runs() {
         let err = parse_args(["--runs".to_string(), "0".to_string()]).unwrap_err();
         assert!(err.contains("at least 1"));
+    }
+
+    #[test]
+    fn rejects_zero_num_ctx() {
+        let err = parse_args(["--num-ctx".to_string(), "0".to_string()]).unwrap_err();
+        assert!(err.contains("at least 1"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_ollama_client_sets_num_ctx() {
+        let cli = parse(&[
+            "--backend",
+            "ollama",
+            "--model",
+            "llama3",
+            "--base-url",
+            "http://127.0.0.1:11434",
+            "--num-ctx",
+            "4096",
+        ]);
+        let client = configured_ollama_client(&cli, "llama3");
+        assert_eq!(client.get_context_length().await.unwrap(), Some(4096));
     }
 
     #[test]
@@ -846,5 +916,29 @@ mod tests {
         let scenario = build_scenario("basic_2step", true).expect("scenario");
         assert_eq!(scenario.workflow.required_steps, vec!["get_country_info"]);
         assert!(scenario.workflow.terminal_tools.contains("summarize"));
+    }
+
+    #[test]
+    fn row_includes_budget_and_batch_compat_fields() {
+        let cli = parse(&["--num-ctx", "16384"]);
+        let scenario = build_scenario("basic_2step", true).expect("scenario");
+        let row = row_for_result(
+            "openai-proxy",
+            "test-model",
+            "reforged",
+            &cli,
+            &scenario,
+            1,
+            4,
+            1.234,
+            Ok(json!(null)),
+            &[],
+            2,
+        );
+
+        assert_eq!(row["budget_tokens"], json!(16384));
+        assert_eq!(row["ideal_iterations"], json!(2));
+        assert_eq!(row["wasted_calls"], json!(2));
+        assert_eq!(row["compaction_events"], json!(2));
     }
 }

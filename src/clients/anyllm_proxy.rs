@@ -20,7 +20,10 @@ use crate::clients::base::{
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 
-/// Default anyllm_proxy OpenAI-compatible chat completions endpoint.
+/// Default anyllm_proxy sidecar chat completions endpoint.
+///
+/// This is an upstream hop used by `AnyLlmProxyClient`, not the public
+/// forge-guardrails proxy listen port.
 pub const DEFAULT_ANYLLM_PROXY_URL: &str = "http://127.0.0.1:3000/v1/chat/completions";
 
 /// LLM client that forwards guarded OpenAI-format calls to anyllm_proxy.
@@ -232,6 +235,20 @@ impl AnyLlmRuntimeClient {
     pub fn with_context_length(mut self, tokens: i64) -> Self {
         self.context_length = Some(tokens);
         self
+    }
+
+    /// Reuse the same anyllm runtime service with a different requested model.
+    ///
+    /// Usage and call metadata are intentionally fresh per clone so request
+    /// observers do not read state from a previous model route.
+    pub fn for_model(&self, model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            service: self.service.clone(),
+            context_length: self.context_length,
+            last_usage: Arc::new(Mutex::new(None)),
+            last_call_info: Arc::new(Mutex::new(None)),
+        }
     }
 
     fn build_request(
@@ -561,6 +578,30 @@ fn parse_args_string(args: &str) -> IndexMap<String, Value> {
     }
 }
 
+const MAX_STREAM_TOOL_CALLS: usize = 128;
+
+fn checked_stream_tool_call_index(
+    index: u32,
+    accumulated_len: usize,
+) -> Result<usize, StreamError> {
+    let Ok(index) = usize::try_from(index) else {
+        return Err(StreamError::new("tool call index cannot fit in usize"));
+    };
+    if index >= MAX_STREAM_TOOL_CALLS {
+        return Err(StreamError::new(format!(
+            "tool call index {} exceeds limit {}",
+            index, MAX_STREAM_TOOL_CALLS
+        )));
+    }
+    if index > accumulated_len {
+        return Err(StreamError::new(format!(
+            "non-contiguous tool call index {} in stream chunk",
+            index
+        )));
+    }
+    Ok(index)
+}
+
 fn parse_openai_sse(
     resp: reqwest::Response,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
@@ -626,8 +667,17 @@ fn parse_openai_sse(
                     }
                     if let Some(tool_calls) = choice.delta.tool_calls {
                         for tc in tool_calls {
-                            let index = tc.index as usize;
-                            while accumulated_tools.len() <= index {
+                            let index = match checked_stream_tool_call_index(
+                                tc.index,
+                                accumulated_tools.len(),
+                            ) {
+                                Ok(index) => index,
+                                Err(e) => {
+                                    yield Err(e);
+                                    return;
+                                }
+                            };
+                            if index == accumulated_tools.len() {
                                 accumulated_tools.push((String::new(), String::new(), String::new()));
                             }
                             if let Some(id) = tc.id {
@@ -700,8 +750,17 @@ fn parse_openai_chunks(
                 }
                 if let Some(tool_calls) = choice.delta.tool_calls {
                     for tc in tool_calls {
-                        let index = tc.index as usize;
-                        while accumulated_tools.len() <= index {
+                        let index = match checked_stream_tool_call_index(
+                            tc.index,
+                            accumulated_tools.len(),
+                        ) {
+                            Ok(index) => index,
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
+                        };
+                        if index == accumulated_tools.len() {
                             accumulated_tools.push((String::new(), String::new(), String::new()));
                         }
                         if let Some(id) = tc.id {
@@ -801,5 +860,22 @@ mod tests {
     fn parse_args_accepts_object() {
         let args = parse_args_string(r#"{"q":"rust"}"#);
         assert_eq!(args.get("q"), Some(&json!("rust")));
+    }
+
+    #[test]
+    fn stream_tool_call_index_allows_existing_or_next_slot() {
+        assert_eq!(checked_stream_tool_call_index(0, 0).unwrap(), 0);
+        assert_eq!(checked_stream_tool_call_index(0, 1).unwrap(), 0);
+        assert_eq!(checked_stream_tool_call_index(1, 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn stream_tool_call_index_rejects_sparse_or_oversized_index() {
+        let sparse = checked_stream_tool_call_index(2, 0).unwrap_err();
+        assert!(sparse.to_string().contains("non-contiguous"));
+
+        let oversized =
+            checked_stream_tool_call_index(MAX_STREAM_TOOL_CALLS as u32, 0).unwrap_err();
+        assert!(oversized.to_string().contains("exceeds"));
     }
 }

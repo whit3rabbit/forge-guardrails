@@ -13,6 +13,10 @@ but Rust should not copy the whole Python eval platform.
   exhaustion text, and streaming final chunks.
 - Backend wire separation for OpenAI-compatible, Ollama, and Anthropic clients.
 
+Step nudge parity is covered at the workflow level. Proxy parity fixtures cover
+client-visible handler behavior only and should not become a full guarded
+workflow eval runner.
+
 ## What May Differ
 
 - Latency and wall-clock timing.
@@ -27,6 +31,9 @@ but Rust should not copy the whole Python eval platform.
 - Python evals are the live-backend oracle for large model/backend comparison.
 - Rust parity tests are the deterministic CI gate.
 - `forge-eval` is a small smoke runner for quick Rust-side checks.
+- `forge-eval --num-ctx` keeps the smoke runner context budget explicit and
+  mirrors that value into Ollama `num_ctx`; local server startup remains
+  external.
 
 The intended workflow is:
 

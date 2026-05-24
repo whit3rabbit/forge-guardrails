@@ -1,8 +1,27 @@
 # forge-guardrails
 
-A Rust implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge), produced via the [`clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill) workflow and subsequently brought to full behavioral parity with the Python reference. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the clean-room run summary and parity review.
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org/)
+[![Crates.io](https://img.shields.io/crates/v/forge-guardrails.svg)](https://crates.io/crates/forge-guardrails)
+[![CI](https://github.com/whit3rabbit/forge-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/forge-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-`forge-guardrails` provides foundation types and runtime components for reliable LLM tool-calling workflows. It focuses on structured agent loops, response validation, retry nudges, prerequisite enforcement, context compaction, backend adapters, and an OpenAI-compatible proxy/server surface.
+A Rust implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge), produced via the [`clean-room-skill`](https://github.com/whit3rabbit/clean-room-skill) workflow and subsequently verified for full behavioral parity with the Python reference. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the clean-room run summary and parity review.
+
+A reliability layer for self-hosted LLM tool-calling. You give forge a set of tools; the model calls whichever it wants in whatever order. Workflow structure is opt-in — `required_steps`, `prerequisites`, and `terminal_tool` let you constrain the loop when you need to, but forge's guardrails (rescue parsing, retry nudges, response validation) apply with zero required steps too.
+
+**What forge-guardrails isn't:**
+- **Not an agent orchestrator.** Forge sits inside one agentic loop and makes its tool calls reliable. Multi-agent graphs, DAG planners, and cross-agent coordination are out of scope.
+- **Not a coding harness.** Forge is domain-agnostic. If you're building a coding agent, [proxy mode](#proxy-server) lifts your existing harness with forge's guardrails — no rewrite.
+
+**Three ways to use it:**
+
+- **Proxy server** — Drop-in OpenAI-compatible and Anthropic-compatible proxy (`forge-guardrails-proxy` binary) that sits between any client and a local model server. Applies guardrails transparently. Also accepts Anthropic Messages API requests at `POST /v1/messages`, translated through `anyllm_translate`.
+
+- **WorkflowRunner** — Define tools, pick a backend, run structured agent loops. Forge manages the full lifecycle: system prompts, tool execution, context compaction, and guardrails. **SlotWorker** adds priority-queued access to a shared inference slot with auto-preemption — for multi-agent architectures where specialist workflows share a GPU slot. Best when you're building on forge directly.
+
+- **Guardrails middleware** — Use forge's reliability stack inside your own orchestration loop. You control the loop; forge validates responses, rescues malformed tool calls, and enforces required steps.
+
+Supports Ollama, llama-server (llama.cpp), Llamafile, Anthropic, and anyllm-routed OpenAI-compatible upstreams as backends.
 
 > Status: experimental. Behavioral parity with the Python reference has been verified through the parity test suite. Review for production hardening before deployment — see [Known review areas](#known-review-areas-before-release).
 
@@ -16,229 +35,280 @@ This repository was produced as a clean-room migration of the original Python Fo
 
 This repository is not affiliated with, endorsed by, or maintained by the original Forge author unless stated elsewhere. Keep attribution to the original project and preserve license notices when redistributing.
 
-## What this is
+## Requirements
 
-`forge-guardrails` is a Rust library for building agentic tool-calling loops around LLM backends.
+- Rust 1.95+
+- A running LLM backend (see below)
 
-It includes:
+## Install
 
-- workflow definitions with tools, required steps, prerequisites, and terminal tools
-- guardrails for response validation, retry nudges, step enforcement, and error tracking
-- typed message and streaming abstractions
-- context-window management and compaction strategies
-- backend clients for Anthropic, Llamafile / llama-server-compatible APIs, and Ollama
-- anyllm-routed OpenAI-compatible upstreams for optional provider and local eval paths
-- sampling defaults for common model families
-- a synthetic `respond` tool for forcing small models onto the tool channel
-- OpenAI-compatible message conversion, proxy helpers, and HTTP server components
-- a slot worker for serialized access to shared inference capacity
-
-## What this is not
-
-This is also not a full multi-agent orchestration framework. It provides the lower-level pieces for one guarded LLM workflow loop and related proxy/server integration.
-
-## Crate metadata
+Add to your `Cargo.toml`:
 
 ```toml
-[package]
-name = "forge-guardrails"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-description = "Foundation types for an LLM-agent workflow framework"
+[dependencies]
+forge-guardrails = "0.1"
 ```
 
-## Major modules
+For development:
 
-```text
-docs/
-  CLEANROOM.md              Clean-room run summary, parity review, and attribution
-src/
-  backends/                 Anthropic, Llamafile, and Ollama adapters
-  guardrails/               Validator, step enforcer, nudges, error tracking
-  prompts/                  Tool-prompt builders and rescue parsers
-  client.rs                 LLMClient trait, API format helpers, token usage
-  compact.rs                NoCompact, SlidingWindowCompact, TieredCompact
-  context.rs                ContextManager, compaction callbacks, thresholds
-  error.rs                  ForgeError and backend/workflow error types
-  handler.rs                OpenAI-compatible request handler
-  hardware.rs               Hardware and context-budget helpers
-  http_server.rs            Lightweight HTTP server wrapper
-  inference.rs              Shared inference, validation, folding, serialization
-  message.rs                Message, role, metadata, and tool-call types
-  nudges.rs                 Corrective nudge text for guardrail failures
-  proxy.rs                  OpenAI conversion and proxy response helpers
-  respond.rs                Synthetic respond tool
-  runner.rs                 WorkflowRunner orchestration loop
-  sampling.rs               Model sampling defaults
-  server.rs                 Backend lifecycle and budget setup
-  slot_worker.rs            Serialized / queued inference slot worker
-  steps.rs                  Step tracking and prerequisite checks
-  streaming.rs              Stream chunks and LLM response union
-  tool_spec.rs              Tool schema model
-  workflow.rs               ToolDef and Workflow model
-tests/
-  *_tests.rs                Unit and integration-style tests
+```bash
+git clone https://github.com/whit3rabbit/forge-rs.git
+cd forge-rs
+cargo build
 ```
 
-## Supported backends
+The `forge/` submodule contains the Python reference for fixture generation and parity checks. Initialize it with:
 
-The library exposes backend clients for:
+```bash
+git submodule update --init --recursive
+```
 
-- Anthropic Messages API
-- Llamafile / llama-server-style OpenAI-compatible chat APIs
-- Ollama chat API
-- anyllm-routed OpenAI-compatible chat APIs, including optional local eval endpoints
+### Backend setup (pick one)
 
-Backend support is exposed through the shared `LLMClient` trait, plus common response types such as `LLMResponse`, `TextResponse`, `ToolCall`, `StreamChunk`, and `TokenUsage`.
+**llama-server** (recommended — top eval configs all run on llama-server):
 
-## macOS / Apple Silicon backends
+Recommended model: [`mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf`](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) (bartowski / HuggingFace)
 
-Apple Silicon is supported through the same backends. Ollama can be installed with Homebrew or the official macOS download. llama.cpp / llama-server can be installed with Homebrew or a Metal-enabled release build. llamafile works on macOS as a downloaded binary after `chmod +x`.
+```bash
+# Install from https://github.com/ggml-org/llama.cpp/releases
+llama-server -m path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
+```
 
-Managed llama.cpp and llamafile startup passes `-ngl 999`; on macOS that uses Metal rather than CUDA, so no NVIDIA driver setup is required. Apple Silicon uses unified memory shared with the OS. Automatic Ollama context budgets use the existing Rust VRAM tiers: less than 24 GB gets 4096 tokens, 24 GB to 47 GB gets 32768 tokens, and 48 GB or more gets 262144 tokens.
+**Ollama** (alternative — easier setup):
+```bash
+# Install from https://ollama.com/download
+ollama pull ministral-3:8b-instruct-2512-q4_K_M
+```
 
-MLX is supported as an optional macOS eval path through an OpenAI-compatible
-server such as `mlx_lm.server`, routed by `AnyLlmRuntimeClient` or
-`AnyLlmProxyClient`. It is not a managed `ServerManager` backend and is not a
-Python-parity target. Prefer llama-server for parity runs; use MLX when the
-goal is local Apple Silicon throughput or comparing MLX-format models. Treat
-GGUF-on-MLX as experimental and server/model dependent: MLX's normal `mlx-lm`
-path is MLX-compatible Hugging Face repos or local converted models, while
-GGUF support has narrower quantization and architecture coverage than
-llama.cpp.
+**Anthropic** (API, no local GPU needed):
+```bash
+export ANTHROPIC_API_KEY=sk-...
+```
 
-## Public API surface
+See [Backend Setup](docs/BACKEND_SETUP.md) for full instructions.
 
-The crate re-exports the main building blocks from `src/lib.rs`, including:
+## Quick Start
+
+Start llama-server (in a separate shell). Download the recommended model from [HuggingFace](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) first:
+
+```bash
+llama-server -m path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
+```
+
+Then use the `WorkflowRunner` in your Rust code:
 
 ```rust
 use forge_guardrails::{
-    AnthropicClient,
-    LlamafileClient,
-    OllamaClient,
-    LLMClient,
-    WorkflowRunner,
-    Workflow,
-    ToolDef,
-    ToolSpec,
-    ContextManager,
-    NoCompact,
-    SlidingWindowCompact,
-    TieredCompact,
-    Guardrails,
-    StepEnforcer,
-    ErrorTracker,
-    LLMResponse,
-    StreamChunk,
-    ToolCall,
+    Workflow, ToolDef, ToolSpec, ParamModel,
+    WorkflowRunner, LlamafileClient,
+    ContextManager, TieredCompact,
 };
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = LlamafileClient::new("path/to/model.gguf")
+        .with_mode("native");
+
+    let ctx = ContextManager::new(
+        Box::new(TieredCompact::new(2)),
+        8192,
+    );
+
+    let workflow = Workflow {
+        name: "weather".into(),
+        description: "Look up weather for a city.".into(),
+        tools: HashMap::new(), // populate with ToolDef entries
+        required_steps: vec![],
+        terminal_tool: Some("get_weather".into()),
+        system_prompt_template: "You are a helpful assistant. Use the available tools.".into(),
+        prerequisites: vec![],
+    };
+
+    let runner = WorkflowRunner::new(client, ctx);
+    runner.run(&workflow, "What's the weather in Paris?", None).await?;
+    Ok(())
+}
 ```
 
-## Development
+For multi-step workflows, multi-turn conversations, and backend auto-management, see [Eval Guide](docs/EVAL_GUIDE.md) and [Backend Setup](docs/BACKEND_SETUP.md).
 
-Clone the repository and run the test suite:
+## Proxy Server
+
+Drop-in OpenAI-compatible (and Anthropic-compatible) proxy that sits between any client and a local model server. Point your client at the proxy and forge applies its guardrails transparently.
+
+This is the path for **using forge with an existing harness** (opencode, Continue, aider, Cline, anything that speaks the OpenAI chat-completions schema). No rewrite.
 
 ```bash
-git clone <repo-url>
-cd forge-guardrails
-cargo test
+# External mode — you manage the backend, forge proxies it.
+cargo run --bin forge-guardrails-proxy -- \
+  --backend-url http://localhost:8080 \
+  --port 8081
+
+# Managed mode — forge starts the backend and proxy together.
+cargo run --bin forge-guardrails-proxy -- \
+  --backend llamaserver \
+  --gguf path/to/model.gguf \
+  --port 8081
 ```
 
-Run formatting and lint checks before submitting changes:
+Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`.
 
-```bash
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
+**Backend compatibility:**
 
-## Usage modes
+- **Managed mode** spins up the backend for you. Supported backends: `llamaserver`, `llamafile`, `ollama` (use `--gguf` for GGUF-based backends, or `--model` for Ollama).
+- **External mode** is backend-agnostic — forge talks `POST /v1/chat/completions` to whatever you point `--backend-url` at, as long as it speaks the OpenAI schema. Tool calls must come back in OpenAI `tool_calls` format or in one of forge's rescue-parsed formats (Mistral `[TOOL_CALLS]`, Qwen `<tool_call>` XML, fenced JSON).
+- **Env-routed mode** remains a Rust extension for Docker/provider routing. If neither `--backend-url` nor `--backend` is passed, the binary uses existing anyllm/provider env vars such as `PROXY_CONFIG`, `OPENAI_BASE_URL`, and `BACKEND`.
 
-### 1. Workflow runner
+This proxy does not enforce inbound authentication. Do not expose it publicly without a reverse proxy, network policy, or another auth layer.
 
-Use `WorkflowRunner` when you want the library to manage the LLM loop: system prompt construction, message folding, validation, retries, tool execution, context compaction, and terminal-tool detection.
+### What proxy mode fortifies
 
-This is the direct library integration path for Rust applications that want Forge-like workflow behavior.
+On every `POST /v1/chat/completions`, forge applies (in order):
 
-### 2. Guardrails components
+1. **Response validation** — each tool call in the model's response is checked against the `tools` array in the request. Calls to unknown tool names or with malformed shapes are caught before the response returns to your client.
+2. **Rescue parsing** — when the model emits tool calls in the wrong format (JSON in a code fence, Mistral's `[TOOL_CALLS]name{args}`, Qwen's `<tool_call>...\</tool_call>` XML), forge extracts the structured call and re-emits it in the canonical OpenAI `tool_calls` schema.
+3. **Retry loop with error tracking** — if validation fails, forge retries inference up to `--max-retries` (default 3) with a corrective tool-result message on the canonical channel, rather than returning a malformed response.
+4. **Synthetic `respond` tool injection** — when tools are present in the request, forge injects a synthetic `respond` tool the model calls instead of producing bare text. The `respond` call is stripped from the outbound response — the client sees a normal text response (`finish_reason: "stop"`) and never knows the tool exists. Essential for small local models (~8B) that can't reliably choose between text and tool calls.
 
-Use the guardrail primitives directly when you already own the orchestration loop but want validation and policy enforcement.
+### What proxy mode does *not* do
 
-Relevant pieces include:
+Proxy mode is single-shot per request; some forge features need multi-turn workflow state that the OpenAI chat-completions schema doesn't carry:
 
-- `ResponseValidator`
-- `StepEnforcer`
-- `StepTracker`
-- `ErrorTracker`
-- `retry_nudge`
-- `step_nudge`
-- `prerequisite_nudge`
-- `unknown_tool_nudge`
+- **Prerequisite enforcement and step-ordering** — these need a workflow definition spanning turns. Available in `WorkflowRunner`.
+- **Context compaction and session memory** — proxy mode forwards the inbound message list as-is; managing the rolling window is the client's job.
+- **VRAM-aware budget detection** — opt in with `--budget-mode forge-full` or `--budget-mode forge-fast`; otherwise proxy uses the backend's reported budget. Env-routed mode can also use `FORGE_CONTEXT_TOKENS`.
 
-### 3. OpenAI-compatible proxy/server layer
+### Useful flags
 
-Use the proxy and HTTP server pieces when you need an OpenAI-compatible request/response boundary around a backend.
+| Flag | Default | Purpose |
+|---|---|---|
+| `--backend-url URL` | — | External OpenAI-compatible backend |
+| `--backend {llamaserver,llamafile,ollama}` | — | Managed backend type |
+| `--model MODEL` | — | Model name, required for `ollama` |
+| `--gguf PATH` | — | GGUF path, required for `llamaserver` / `llamafile` |
+| `--backend-port N` | `8080` | Managed backend port |
+| `--host HOST` | `127.0.0.1` | Proxy bind host in CLI mode |
+| `--port N` | `8081` | Proxy bind port |
+| `--max-retries N` | `3` | Retry budget per validation failure |
+| `--no-rescue` | rescue on | Disable rescue parsing |
+| `--budget-mode {backend,manual,forge-full,forge-fast}` | `backend` | Context budget source |
+| `--budget-tokens N` | — | Manual token budget |
+| `--serialize` / `--no-serialize` | auto | Force request serialization |
+| `--extra-flags -- FLAG VALUE ...` | — | Pass additional flags to the managed backend |
 
-Relevant pieces include:
+### Useful environment variables (Docker / env-routed mode)
 
-- `openai_to_messages`
-- `tool_calls_to_openai`
-- `text_response_to_openai`
-- `text_to_sse_events`
-- `tool_calls_to_sse_events`
-- `handle_chat_completions`
-- `HTTPServer`
-- `ServerManager`
-- `setup_backend`
+| Variable | Default | Purpose |
+|---|---|---|
+| `FORGE_HOST` | `0.0.0.0` | Bind address |
+| `FORGE_PORT` / `PORT` / `LISTEN_PORT` | `8081` | Listen port |
+| `FORGE_MODEL` / `SMALL_MODEL` | `gpt-4o-mini` | Default model |
+| `FORGE_CONTEXT_TOKENS` | `128000` | Token budget |
+| `FORGE_MAX_RETRIES` | `3` | Retry budget per validation failure |
+| `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |
+| `FORGE_SERIALIZE_REQUESTS` | `false` | Force request serialization |
+| `BACKEND` | `openai` | anyllm provider id or first-party backend |
+| `OPENAI_BASE_URL` | — | Route to a local OpenAI-compatible backend |
+| `OPENAI_API_KEY` | — | API key forwarded to the upstream |
 
-The HTTP server also accepts Anthropic Messages API requests at
-`POST /v1/messages`. Those requests are translated with `anyllm_translate`,
-run through the same guarded OpenAI-compatible handler used by
-`POST /v1/chat/completions`, then translated back to Anthropic responses.
+Existing anyllm env and config are still honored, including provider API keys, `PROXY_CONFIG`, `BIG_MODEL`, `SMALL_MODEL`, and LiteLLM aliases such as `LITELLM_CONFIG`.
 
-### Docker proxy
+### Docker
 
-The `forge-guardrails-proxy` binary runs Forge as an OpenAI-compatible and
-Anthropic-compatible guardrail proxy. It preserves the inbound request `model`
-for upstream anyllm routing, so the same container can serve plain env-based
-backends or a `PROXY_CONFIG` model router.
+You can run the Forge proxy as a Docker container. Expose only the Forge proxy port (`8081`) to clients. The optional anyllm sidecar is a private upstream hop, not the public proxy URL, and is not enabled by default.
 
-Build and run locally:
+Build the image locally:
 
 ```bash
 docker build -t forge-guardrails:local .
-docker run --rm -p 3000:3000 \
-  -e OPENAI_API_KEY=sk-... \
-  forge-guardrails:local
-curl http://localhost:3000/health
 ```
 
-Route to a local OpenAI-compatible backend such as Ollama:
+After publishing, replace `forge-guardrails:local` in these examples with `followthewhit3rabbit/forge-guardrails:latest`.
+
+Run with OpenAI through the in-process anyllm runtime:
 
 ```bash
-docker run --rm -p 3000:3000 \
-  -e OPENAI_BASE_URL=http://host.docker.internal:11434/v1 \
-  -e OPENAI_API_KEY=dummy \
+docker run --rm -p 8081:8081 \
+  -e OPENAI_API_KEY=sk-... \
+  -e FORGE_MODEL=gpt-4o-mini \
   forge-guardrails:local
 ```
 
-Useful runtime env vars:
+Start Ollama on the host in another terminal:
 
-- `FORGE_HOST`, default `0.0.0.0`
-- `FORGE_PORT`, fallback `PORT`, fallback `LISTEN_PORT`, default `3000`
-- `FORGE_MODEL`, fallback `SMALL_MODEL`, default `gpt-4o-mini`
-- `FORGE_CONTEXT_TOKENS`, default `128000`
-- `FORGE_MAX_RETRIES`, default `3`
-- `FORGE_RESCUE_ENABLED`, default `true`
-- `FORGE_SERIALIZE_REQUESTS`, default `false`
+```bash
+ollama pull qwen2.5-coder:14b
+ollama serve
+```
 
-Existing anyllm env and config are still honored, including `BACKEND`,
-provider API keys, `OPENAI_BASE_URL`, `PROXY_CONFIG`, `BIG_MODEL`,
-`SMALL_MODEL`, and LiteLLM aliases such as `LITELLM_CONFIG`.
+Then run the proxy container:
 
-This proxy does not enforce inbound authentication. Do not expose it publicly
-without a reverse proxy, network policy, or another auth layer.
+```bash
+docker run --rm -p 8081:8081 \
+  -e BACKEND=ollama \
+  -e OPENAI_BASE_URL=http://host.docker.internal:11434/v1 \
+  -e OPENAI_API_KEY=dummy \
+  -e FORGE_MODEL=qwen2.5-coder:14b \
+  forge-guardrails:local
+```
+
+Start llama-server on the host in another terminal:
+
+```bash
+llama-server \
+  -m /path/to/model.gguf \
+  --jinja \
+  --host 0.0.0.0 \
+  --port 8080
+```
+
+Then run the proxy container:
+
+```bash
+docker run --rm -p 8081:8081 \
+  -e OPENAI_BASE_URL=http://host.docker.internal:8080/v1 \
+  -e OPENAI_API_KEY=dummy \
+  -e FORGE_MODEL=local-llama \
+  forge-guardrails:local
+```
+
+On Linux Docker engines that do not define `host.docker.internal`, add:
+
+```bash
+--add-host=host.docker.internal:host-gateway
+```
+
+Smoke the running proxy:
+
+```bash
+curl http://localhost:8081/health
+
+curl http://localhost:8081/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"qwen2.5-coder:14b","messages":[{"role":"user","content":"Say ok"}],"stream":false}'
+```
+
+OpenAI-compatible clients should use:
+
+```text
+base_url: http://localhost:8081/v1
+api_key: dummy
+model: qwen2.5-coder:14b
+```
+
+Claude Code can use the same Docker proxy through Forge's Anthropic-compatible endpoint:
+
+```bash
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8081
+export ANTHROPIC_AUTH_TOKEN=dummy
+export ANTHROPIC_MODEL=qwen2.5-coder:14b
+
+claude --model qwen2.5-coder:14b
+```
+
+Do not add `/v1` to `ANTHROPIC_BASE_URL`; Claude Code sends Anthropic Messages requests and Forge serves those at `/v1/messages`. If you want Claude Code's model picker to query Forge's `/v1/models` endpoint, set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`.
 
 Publish to Docker Hub as `followthewhit3rabbit/forge-guardrails`:
 
@@ -252,12 +322,200 @@ docker buildx build \
   --push .
 ```
 
+## Backends
+
+| Backend | Best for | Native FC? |
+|---------|----------|------------|
+| **Ollama** | Easiest setup, model management built-in | Yes |
+| **llama-server** | Best performance, full control | Yes (with `--jinja`) |
+| **Llamafile** | Single binary, zero dependencies | No (prompt-injected) |
+| **Anthropic** | Frontier baseline, hybrid workflows | Yes |
+| **anyllm runtime** | In-process provider routing, OpenAI-compatible | Provider-dependent |
+| **anyllm sidecar** | Separate process; admin UI, cache, metrics | Provider-dependent |
+
+See [Backend Setup](docs/BACKEND_SETUP.md) for installation details.
+
+## macOS / Apple Silicon
+
+Apple Silicon is supported through all backends. Ollama can be installed with Homebrew or the official macOS download. llama.cpp / llama-server can be installed with Homebrew or a Metal-enabled release build. Llamafile works on macOS as a downloaded binary after `chmod +x`.
+
+Managed llama.cpp and llamafile startup passes `-ngl 999`; on macOS that uses Metal rather than CUDA. Automatic Ollama context budgets use Rust VRAM tiers: <24 GB → 4096 tokens, 24–47 GB → 32768 tokens, ≥48 GB → 262144 tokens.
+
+MLX is supported as an optional eval path on macOS through an OpenAI-compatible server such as `mlx_lm.server`, routed by `AnyLlmRuntimeClient` or `AnyLlmProxyClient`. It is not a managed `ServerManager` backend. Prefer llama-server for parity runs; treat GGUF-on-MLX as experimental.
+
+```bash
+uv tool install mlx-lm
+mlx_lm.server --model mlx-community/Llama-3.2-3B-Instruct-4bit --port 8080
+```
+
+## Running Tests
+
+```bash
+cargo test
+```
+
+```bash
+# Parity suite only (requires the Python golden fixture)
+cargo test --test parity_tests
+
+# With coverage (requires cargo-llvm-cov)
+cargo llvm-cov --all-targets
+```
+
+Regenerate the Python golden fixture after intentional reference-behavior changes:
+
+```bash
+uv run --project forge python tests/parity/generate_fixtures.py
+```
+
+## Eval Harness
+
+The eval harness measures how reliably a model + backend combo navigates multi-step tool-calling workflows. See [Eval Guide](docs/EVAL_GUIDE.md) for full CLI reference.
+
+```bash
+# Python oracle against a running Rust proxy
+python scripts/eval_openai_proxy.py \
+  --base-url http://127.0.0.1:8081/v1 \
+  --model test-model \
+  --runs 10 \
+  --stream \
+  --scenario basic_2step sequential_3step error_recovery \
+  --output eval_results_rust_proxy.jsonl
+
+# Native Rust smoke runner
+cargo run --bin forge-eval -- \
+  --backend openai-proxy \
+  --base-url http://127.0.0.1:8081/v1 \
+  --model test-model \
+  --runs 3 \
+  --scenario basic_2step \
+  --stream
+```
+
+The Rust smoke runner supports `basic_2step`, `sequential_3step`, and `error_recovery` scenarios and emits JSONL for quick CI/smoke checks.
+
+## Project Structure
+
+```
+src/
+  lib.rs                     Public API re-exports
+  error.rs                   ForgeError hierarchy
+  server.rs                  setup_backend(), ServerManager, BudgetMode
+  core/
+    message.rs               Message, MessageRole, MessageType, MessageMeta, ToolCallInfo
+    tool_spec.rs             ToolSpec, ToolDef, ParamModel — tool schema and callable defs
+    workflow.rs              Workflow model, terminal tools, prerequisites
+    steps.rs                 StepTracker, step tracking and required-step state
+    inference.rs             run_inference() — shared front half (compact, fold, validate, retry)
+    runner.rs                WorkflowRunner — the agentic loop
+    slot_worker.rs           SlotWorker — priority-queued slot access
+  guardrails/
+    guardrails.rs            Guardrails facade — applies the full stack in foreign loops
+    nudge.rs                 Nudge dataclass
+    response_validator.rs    ResponseValidator, ValidationResult
+    step_enforcer.rs         StepEnforcer, StepCheck, StepPrerequisite
+    error_tracker.rs         ErrorTracker
+  clients/
+    base.rs                  LLMClient trait, ChunkType, StreamChunk, LLMCallInfo, TokenUsage
+    sampling.rs              Model sampling defaults, MODEL_SAMPLING_DEFAULTS
+    anthropic/               AnthropicClient (frontier baseline, native FC)
+    llamafile/               LlamafileClient (native FC or prompt-injected)
+    ollama/                  OllamaClient (native FC)
+    anyllm_proxy.rs          AnyLlmRuntimeClient, AnyLlmProxyClient
+  context/
+    manager.rs               ContextManager, CompactEvent
+    strategies.rs            NoCompact, TieredCompact, SlidingWindowCompact
+    hardware.rs              HardwareProfile, detect_hardware()
+  prompts/
+    mod.rs                   Tool prompt builders (prompt-injected path)
+    nudges.rs                Retry and step-enforcement nudge templates
+    parse_strategies.rs      Rescue parsing: Mistral, Qwen, fenced JSON
+  tools/
+    respond.rs               Synthetic respond tool (respond_tool(), respond_spec())
+  proxy/
+    handler.rs               Request handler — bridge between HTTP and run_inference
+    proxy.rs                 OpenAI messages ↔ forge Messages conversion, SSE helpers
+    server.rs                HTTPServer — axum HTTP/SSE server
+  bin/
+    forge-guardrails-proxy.rs  CLI proxy entry point
+    forge-eval.rs              Native Rust eval smoke runner
+tests/
+  parity/                    Python-generated golden fixtures for Rust parity tests
+  parity_tests.rs            Rust assertions against python_golden.json
+  engine_tests.rs            WorkflowRunner / inference integration tests
+  guardrails_tests.rs        Guardrails and step enforcement tests
+  compact_tests.rs           Compaction strategy tests
+  context_tests.rs           ContextManager tests
+  *_tests.rs                 Unit and integration tests per subsystem
+scripts/
+  eval_openai_proxy.py       Python eval oracle wrapper for Rust proxy checks
+docs/
+  CLEANROOM.md               Clean-room run summary and parity review
+  PARITY.md                  Parity contract and subsystem alignment status
+  EVAL_GUIDE.md              Eval harness CLI reference
+  BACKEND_SETUP.md           Backend installation and server setup
+```
+
+## Public API Surface
+
+The crate re-exports the main building blocks from `src/lib.rs`:
+
+```rust
+use forge_guardrails::{
+    // Backends
+    AnthropicClient, LlamafileClient, OllamaClient,
+    AnyLlmRuntimeClient, AnyLlmProxyClient,
+    // Client trait and types
+    LLMClient, LLMResponse, StreamChunk, TextResponse, ToolCall, TokenUsage,
+    // Workflow
+    WorkflowRunner, Workflow, ToolDef, ToolSpec, ParamModel,
+    // Context
+    ContextManager, NoCompact, SlidingWindowCompact, TieredCompact,
+    // Guardrails
+    Guardrails, StepEnforcer, ErrorTracker, ResponseValidator,
+    // Step tracking
+    StepTracker, SlotWorker,
+    // Prompts and nudges
+    retry_nudge, step_nudge, prerequisite_nudge, unknown_tool_nudge,
+    rescue_tool_call, build_tool_prompt,
+    // Proxy / server
+    handle_chat_completions, handle_anthropic_messages,
+    HTTPServer, ServerManager, setup_backend,
+};
+```
+
+## Usage Modes
+
+### 1. Workflow runner
+
+Use `WorkflowRunner` when you want the library to manage the LLM loop: system prompt construction, message folding, validation, retries, tool execution, context compaction, and terminal-tool detection.
+
+### 2. Guardrails middleware
+
+Use the guardrail primitives directly when you already own the orchestration loop but want validation and policy enforcement.
+
+Relevant pieces:
+
+- `Guardrails` — composable facade for the full stack
+- `ResponseValidator` / `ValidationResult`
+- `StepEnforcer` / `StepCheck` / `StepPrerequisite`
+- `ErrorTracker`
+- `retry_nudge`, `step_nudge`, `prerequisite_nudge`, `unknown_tool_nudge`
+
+### 3. OpenAI-compatible proxy / server layer
+
+Use the proxy and HTTP server pieces when you need an OpenAI-compatible request/response boundary around a backend.
+
+Relevant pieces:
+
+- `openai_to_messages`, `tool_calls_to_openai`, `text_response_to_openai`
+- `text_to_sse_events`, `tool_calls_to_sse_events`
+- `handle_chat_completions`, `handle_anthropic_messages`
+- `HTTPServer`, `ServerManager`, `setup_backend`
+
 ### 4. anyllm runtime and sidecar integration
 
-Use `AnyLlmRuntimeClient` when you want in-process anyllm provider routing
-without handing HTTP route ownership to anyllm. Build it from
-`anyllm_proxy::runtime::ChatCompletionRuntime`, `Config`, or `MultiConfig`;
-Forge still owns interception, validation, nudging, and tool-call execution.
+Use `AnyLlmRuntimeClient` for in-process anyllm provider routing (no HTTP overhead; Forge still owns interception and nudging):
 
 ```rust
 use forge_guardrails::AnyLlmRuntimeClient;
@@ -269,8 +527,7 @@ let client = AnyLlmRuntimeClient::from_multi_config(
 .with_context_length(128_000);
 ```
 
-Use `AnyLlmProxyClient` when you prefer to run `anyllm_proxy` as a separate
-sidecar process.
+Use `AnyLlmProxyClient` when you prefer to run `anyllm_proxy` as a separate sidecar process. The sidecar URL is an upstream hop from Forge to anyllm, not the public client-facing Forge proxy URL. Keep the sidecar private and expose only the Forge proxy unless you intentionally need direct anyllm access.
 
 ```rust
 use forge_guardrails::AnyLlmProxyClient;
@@ -281,96 +538,17 @@ let client = AnyLlmProxyClient::new("gpt-4o-mini")
     .with_context_length(128_000);
 ```
 
-Run `anyllm_proxy` separately for its provider catalog, routing, config files,
-admin UI, cache, metrics, and batch surfaces. Point `AnyLlmProxyClient` at the
-sidecar. Clients can call forge-guardrails through either OpenAI
-`/v1/chat/completions` or Anthropic `/v1/messages`; forge still performs the
-guarded interception before any request reaches the sidecar.
+Both clients expose provider observability through `LLMClient::last_call_info()`.
 
-Both anyllm clients expose provider observability through
-`LLMClient::last_call_info()`. The runtime client reports selected backend,
-mapped model, backend kind, provider id, degradation warnings, rate limits, and
-estimated cost from anyllm pricing when usage is available. The sidecar client
-captures response headers such as `x-anyllm-degradation`, `x-anyllm-cache`,
-Anthropic rate-limit headers, and optional `x-anyllm-cost-usd`; otherwise it
-uses response usage and anyllm pricing for a best-effort cost estimate. Token
-counts remain available separately through `last_usage()`.
+## Testing Scope
 
-Do not embed anyllm's HTTP router for guarded traffic. That path owns request
-handling and can bypass Forge guardrails. The runtime client uses anyllm's
-OpenAI-native Chat Completions runtime, so provider-specific OpenAI-compatible
-fields such as `seed`, `top_k`, `min_p`, `repeat_penalty`, and
-`chat_template_kwargs` are preserved for compatible backends.
+- 487+ passing tests across 16 test files
+- Deterministic parity suite against `tests/parity/fixtures/python_golden.json`
+- 0 contamination incidents in the clean-room run
 
-### Live backend smoke recipes
+Keep tests deterministic where possible. Backend integration tests use mock servers (via `mockito`) unless they intentionally qualify a live backend.
 
-These checks are manual. Keep CI on mock servers unless a test is explicitly
-qualifying a live local backend.
-
-For llama-server native function calling, start llama.cpp with Jinja tool
-templates enabled:
-
-```bash
-llama-server -m path/to/Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
-```
-
-Use `LlamafileClient::new(path).with_mode("native")` against
-`http://localhost:8080/v1`. For prompt-injected fallback on the same server,
-start without `--jinja` if desired and use `.with_mode("prompt")`.
-
-For Ollama Python-parity behavior, use the dedicated native client path:
-
-```bash
-ollama pull ministral-3:8b-instruct-2512-q4_K_M
-curl http://localhost:11434/api/chat -d '{
-  "model": "ministral-3:8b-instruct-2512-q4_K_M",
-  "messages": [{"role": "user", "content": "What is 2+2?"}],
-  "tools": [{"type": "function", "function": {"name": "calc", "description": "Math", "parameters": {"type": "object", "properties": {"expr": {"type": "string"}}, "required": ["expr"]}}}],
-  "stream": false
-}'
-```
-
-For generic OpenAI-compatible routing, configure anyllm with backend URLs such
-as `http://localhost:8080/v1` for llama-server or
-`http://localhost:11434/v1` for Ollama, then pass the resulting
-`MultiConfig` to `AnyLlmRuntimeClient`. If routing by virtual model name is
-needed, use `AnyLlmRuntimeClient::from_multi_config_with_model_router(...)`.
-
-For optional MLX eval on macOS, run an OpenAI-compatible MLX server and route
-it through anyllm as an `OpenAI` backend:
-
-```bash
-uv tool install mlx-lm
-mlx_lm.server --model mlx-community/Llama-3.2-3B-Instruct-4bit --port 8080
-curl localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"mlx-community/Llama-3.2-3B-Instruct-4bit","messages":[{"role":"user","content":"Say ok"}],"max_tokens":16}'
-```
-
-Use `http://localhost:8080/v1` as the anyllm backend URL and keep Forge in
-front of the request. Unless a specific MLX server/model combination is
-qualified for native tool calls, evaluate it with Forge's prompt/rescue
-guardrails rather than treating it as equivalent to llama-server `--jinja`.
-
-For sidecar/admin/cache/metrics use, run `anyllm_proxy` separately and point
-`AnyLlmProxyClient` at that sidecar. The guarded request path remains:
-external client -> Forge `HTTPServer` or `handle_chat_completions` ->
-`AnyLlmProxyClient` -> anyllm sidecar -> provider.
-
-## Testing scope
-
-Initial clean-room run metrics (see [`docs/CLEANROOM.md`](docs/CLEANROOM.md)):
-
-- 487 passing tests
-- 27 Rust source files
-- 13 Rust test files
-- 0 contamination incidents
-
-After the clean-room phase, a full parity review against the Python reference established behavioral alignment across all major subsystems. The ongoing regression gate is `cargo test --test parity_tests`.
-
-Keep tests deterministic where possible. Backend integration tests should use mock servers unless they intentionally qualify a live backend.
-
-## Known review areas before release
+## Known Review Areas Before Release
 
 The implementation should be reviewed for protocol correctness and production hardening before publication or deployment. Behavioral parity with the Python reference is covered by the parity test suite; the following areas need additional protocol and integration review:
 
@@ -382,7 +560,19 @@ The implementation should be reviewed for protocol correctness and production ha
 - backend startup ordering and context-budget discovery
 - serialization behavior for OpenAI, Ollama, and Anthropic formats
 
-## Relationship to upstream Forge
+## Python Parity
+
+The parity suite compares Rust behavior to synthetic golden outputs generated by the Python reference submodule. The source of truth for fixture generation is `tests/parity/generate_fixtures.py`; the checked-in output is `tests/parity/fixtures/python_golden.json`; Rust assertions live in `tests/parity_tests.rs`.
+
+When updating parity behavior:
+1. Add or update the Python fixture first.
+2. Regenerate `tests/parity/fixtures/python_golden.json`.
+3. Add or update the matching Rust assertion in `tests/parity_tests.rs`.
+4. Run `cargo test --test parity_tests` before broader repo gates.
+
+See [docs/PARITY.md](docs/PARITY.md) for the full parity contract.
+
+## Relationship to Upstream Forge
 
 The upstream Forge project is a Python reliability layer for self-hosted LLM tool-calling and multi-step agentic workflows. This repository is a Rust implementation inspired by that project's behavior — not a direct source translation — and has been verified for full behavioral parity with the Python reference through the parity test suite.
 
@@ -392,17 +582,13 @@ Use the upstream repository for the original Python implementation, documentatio
 
 - <https://github.com/antoinezambelli/forge>
 
+The forge guardrail framework and ablation study are published as:
 
-The initial Rust implementation was produced using the Clean Room workflow as a deliberate test of that skill. The workflow separates source-reading roles from clean implementation roles and produces durable behavioral artifacts before any code is written. After the clean-room phase concluded, a full parity review was conducted against the Python reference to establish complete alignment.
-
-See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full clean-room run summary and parity review narrative.
-
-For the workflow itself, installation instructions, boundary model, and CLI/runtime details:
-
-- <https://github.com/whit3rabbit/clean-room-skill>
+> Zambelli, A. *Forge: A Reliability Layer for Self-Hosted LLM Tool-Calling.*
+> [https://doi.org/10.1145/3786335.3813193](https://doi.org/10.1145/3786335.3813193)
 
 ## License
 
-MIT. See `LICENSE` if present in the repository.
+[MIT](LICENSE) — Rust implementation copyright (c) 2025-2026 whit3rabbit.
 
 The upstream Forge project is separately licensed by its author as MIT as well. Preserve upstream attribution and review license compatibility before redistribution.

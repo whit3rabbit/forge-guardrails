@@ -101,16 +101,12 @@ class OpenAIProxyClient:
         import httpx
 
         body = self._body(messages, tools, sampling, stream=True)
+        self.last_usage = None
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream("POST", self.base_url, json=body) as response:
                 response.raise_for_status()
-                async for chunk in _parse_openai_sse(response):
-                    if chunk.type == ChunkType.FINAL:
-                        if isinstance(chunk.response, TextResponse):
-                            self.last_usage = None
-                        yield chunk
-                    else:
-                        yield chunk
+                async for chunk in _parse_openai_sse(response, self._record_usage):
+                    yield chunk
 
     async def get_context_length(self) -> int | None:
         return None
@@ -191,7 +187,7 @@ def _parse_args(raw: Any) -> dict[str, Any]:
     return {}
 
 
-async def _parse_openai_sse(response: Any):
+async def _parse_openai_sse(response: Any, record_usage: Any):
     content = ""
     tool_parts: dict[int, dict[str, Any]] = {}
 
@@ -203,7 +199,16 @@ async def _parse_openai_sse(response: Any):
         if payload == "[DONE]":
             break
         data = json.loads(payload)
-        choice = (data.get("choices") or [{}])[0]
+
+        usage = data.get("usage")
+        if usage:
+            record_usage(usage)
+
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+
+        choice = choices[0]
         delta = choice.get("delta") or {}
 
         if "content" in delta:
@@ -289,8 +294,16 @@ def _result_row(
         or terminal_args.get("findings")
         or ""
     )
+    ideal_iterations = scenario.ideal_iterations or (
+        len(scenario.workflow.required_steps) + 1
+    )
+    wasted_calls = (
+        max(0, result.iterations_used - ideal_iterations)
+        if result.completeness
+        else None
+    )
 
-    return {
+    row = {
         "impl": "rust-proxy-oracle",
         "model": model,
         "backend": "openai-proxy",
@@ -315,10 +328,19 @@ def _result_row(
         "tool_args": tool_args,
         "final_text": final_text,
         "raw_response_on_failure": result.error_message if not result.completeness else None,
-        "ideal_iterations": scenario.ideal_iterations
-        or (len(scenario.workflow.required_steps) + 1),
+        "ideal_iterations": ideal_iterations,
+        "wasted_calls": wasted_calls,
         "compaction_events": len(result.compaction_events),
     }
+    stream_retries = getattr(result, "stream_retries", 0)
+    if stream_retries:
+        row["stream_retries"] = stream_retries
+    input_tokens = getattr(result, "input_tokens", 0)
+    output_tokens = getattr(result, "output_tokens", 0)
+    if input_tokens or output_tokens:
+        row["input_tokens"] = input_tokens
+        row["output_tokens"] = output_tokens
+    return row
 
 
 async def main_async(args: argparse.Namespace) -> None:

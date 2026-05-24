@@ -38,3 +38,11 @@ Icon?
 repomix-output.xml
 .syntext/
 .synrepo/
+
+# AI agent / IDE configs (local only)
+.agents/
+.claude/
+.codex/
+
+# LLM Models
+*.gguf

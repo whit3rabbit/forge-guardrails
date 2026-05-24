@@ -938,7 +938,9 @@
               "role": "tool",
               "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[Truncated \u2014 50 chars removed]",
               "type": "tool_result",
-              "step_index": 0
+              "step_index": 0,
+              "tool_name": "run",
+              "tool_call_id": "call_0"
             },
             {
               "role": "assistant",
@@ -971,7 +973,9 @@
               "role": "tool",
               "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[Truncated \u2014 50 chars removed]",
               "type": "tool_result",
-              "step_index": 1
+              "step_index": 1,
+              "tool_name": "run",
+              "tool_call_id": "call_1"
             },
             {
               "role": "assistant",
@@ -1043,21 +1047,6 @@
             },
             {
               "role": "assistant",
-              "content": "",
-              "type": "tool_call",
-              "step_index": 0,
-              "tool_calls": [
-                {
-                  "name": "run",
-                  "args": {
-                    "x": 0
-                  },
-                  "call_id": "call_0"
-                }
-              ]
-            },
-            {
-              "role": "assistant",
               "content": "text",
               "type": "text_response",
               "step_index": 0
@@ -1067,21 +1056,6 @@
               "content": "thinking",
               "type": "reasoning",
               "step_index": 1
-            },
-            {
-              "role": "assistant",
-              "content": "",
-              "type": "tool_call",
-              "step_index": 1,
-              "tool_calls": [
-                {
-                  "name": "run",
-                  "args": {
-                    "x": 1
-                  },
-                  "call_id": "call_1"
-                }
-              ]
             },
             {
               "role": "assistant",
@@ -1144,36 +1118,6 @@
               "role": "user",
               "content": "usr",
               "type": "user_input"
-            },
-            {
-              "role": "assistant",
-              "content": "",
-              "type": "tool_call",
-              "step_index": 0,
-              "tool_calls": [
-                {
-                  "name": "run",
-                  "args": {
-                    "x": 0
-                  },
-                  "call_id": "call_0"
-                }
-              ]
-            },
-            {
-              "role": "assistant",
-              "content": "",
-              "type": "tool_call",
-              "step_index": 1,
-              "tool_calls": [
-                {
-                  "name": "run",
-                  "args": {
-                    "x": 1
-                  },
-                  "call_id": "call_1"
-                }
-              ]
             },
             {
               "role": "assistant",

@@ -1,0 +1,9 @@
+.git/
+.synrepo/
+.syntext/
+target/
+forge/
+.DS_Store
+.agents/
+.claude/
+.codex/
