@@ -5,10 +5,13 @@
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clients::base::{TextResponse, TokenUsage, ToolCall};
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::tools::respond::RESPOND_TOOL_NAME;
+
+static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Generate a random-ish completion ID.
 fn generate_completion_id() -> String {
@@ -17,7 +20,8 @@ fn generate_completion_id() -> String {
 
 /// Generate a random-ish call ID.
 fn generate_call_id() -> String {
-    format!("call_{}", uuid_prefix())
+    let id = CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("call_{id:016x}")
 }
 
 /// Short hex prefix for IDs (8 chars).
@@ -161,7 +165,12 @@ pub fn tool_calls_to_openai_with_usage(
     let content: Option<String> = reasoning;
 
     for (i, tc) in calls.iter().enumerate() {
-        let call_id = generate_call_id();
+        let call_id = tc
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(generate_call_id);
         let args_json = serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string());
         let mut func_map = Map::new();
         func_map.insert("name".into(), json!(tc.tool));
@@ -274,7 +283,12 @@ pub fn tool_calls_to_sse_events_with_usage(
     // Tool call deltas.
     let mut tc_deltas = Vec::new();
     for (i, tc) in calls.iter().enumerate() {
-        let call_id = generate_call_id();
+        let call_id = tc
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(generate_call_id);
         let args_json = serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string());
         let mut func_map = Map::new();
         func_map.insert("name".into(), json!(tc.tool));
@@ -689,6 +703,32 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_to_openai_preserves_existing_call_id() {
+        let calls = vec![ToolCall::new("search", IndexMap::new()).with_id("call_keep")];
+        let result = tool_calls_to_openai(&calls, "test-model");
+        assert_eq!(
+            result["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_keep"
+        );
+    }
+
+    #[test]
+    fn tool_calls_to_openai_fallback_ids_are_unique() {
+        let calls: Vec<ToolCall> = (0..256)
+            .map(|_| ToolCall::new("search", IndexMap::new()))
+            .collect();
+        let result = tool_calls_to_openai(&calls, "test-model");
+        let ids: std::collections::HashSet<String> = result["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|call| call["id"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(ids.len(), calls.len());
+    }
+
+    #[test]
     fn text_response_to_openai_basic() {
         let resp = TextResponse::new("Hello world");
         let result = text_response_to_openai(&resp, "test-model");
@@ -710,6 +750,16 @@ mod tests {
         // All share the same completion ID.
         assert_eq!(events[0]["id"], events[1]["id"]);
         assert_eq!(events[1]["id"], events[2]["id"]);
+    }
+
+    #[test]
+    fn sse_tool_calls_preserves_existing_call_id() {
+        let calls = vec![ToolCall::new("search", IndexMap::new()).with_id("call_keep")];
+        let events = tool_calls_to_sse_events(&calls, "model");
+        assert_eq!(
+            events[0]["choices"][0]["delta"]["tool_calls"][0]["id"],
+            "call_keep"
+        );
     }
 
     #[test]

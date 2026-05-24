@@ -3,6 +3,9 @@
 
 use crate::context::hardware::estimate_tokens_heuristic;
 use crate::context::strategies::CompactStrategy;
+use crate::core::message::{Message, ToolCallInfo};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Immutable record of a compaction event.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,18 +32,33 @@ pub type OnCompactFn = Box<dyn Fn(&CompactEvent) + Send + Sync>;
 /// Callback type for threshold warnings. Returns an optional warning string.
 pub type OnThresholdFn = Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync>;
 
+#[derive(Debug, Clone, Copy)]
+struct StoredTokenCount {
+    count: i64,
+    messages_fingerprint: Option<u64>,
+}
+
+impl StoredTokenCount {
+    fn matches(self, messages_fingerprint: u64) -> bool {
+        self.messages_fingerprint
+            .map(|fingerprint| fingerprint == messages_fingerprint)
+            .unwrap_or(true)
+    }
+}
+
 /// Central context budget tracker.
 ///
 /// Wraps a compaction strategy and provides token estimation, threshold
-/// checking, and compaction triggering. Tracks a stored token count that
-/// overrides the heuristic when set via `update_token_count`.
+/// checking, and compaction triggering. Tracks a stored token count scoped to
+/// the last observed message list when possible.
 pub struct ContextManager {
     strategy: Box<dyn CompactStrategy>,
     budget_tokens: i64,
     on_compact: Option<OnCompactFn>,
     context_thresholds: Option<Vec<f64>>,
     on_context_threshold: Option<OnThresholdFn>,
-    stored_token_count: Option<i64>,
+    stored_token_count: Option<StoredTokenCount>,
+    last_observed_messages_fingerprint: Option<u64>,
     fired_thresholds: Vec<bool>,
 }
 
@@ -69,6 +87,7 @@ impl ContextManager {
             context_thresholds: sorted_thresholds,
             on_context_threshold,
             stored_token_count: None,
+            last_observed_messages_fingerprint: None,
             fired_thresholds: fired,
         }
     }
@@ -80,21 +99,44 @@ impl ContextManager {
 
     /// Estimate token count for messages.
     ///
-    /// Returns the stored count if `update_token_count` was called, otherwise
-    /// falls back to the character-count heuristic.
-    pub fn estimate_tokens(&self, messages: &[crate::core::message::Message]) -> i64 {
+    /// Returns the stored count if `update_token_count` was called for this
+    /// message list, otherwise falls back to the character-count heuristic.
+    pub fn estimate_tokens(&self, messages: &[Message]) -> i64 {
+        let fingerprint = message_fingerprint(messages);
         match self.stored_token_count {
-            Some(count) => count,
-            None => estimate_tokens_heuristic(messages),
+            Some(stored) if stored.matches(fingerprint) => stored.count,
+            _ => estimate_tokens_heuristic(messages),
         }
     }
 
     /// Store an actual token count from the backend.
     ///
-    /// Subsequent `estimate_tokens` calls return this value until the next
-    /// update.
+    /// The count is tied to the most recent message list observed by
+    /// `maybe_compact` or `check_thresholds`. If no message list has been
+    /// observed, the count remains unscoped for backwards compatibility.
     pub fn update_token_count(&mut self, count: i64) {
-        self.stored_token_count = Some(count);
+        self.stored_token_count = Some(StoredTokenCount {
+            count,
+            messages_fingerprint: self.last_observed_messages_fingerprint,
+        });
+    }
+
+    fn estimate_current_tokens(&mut self, messages: &[Message]) -> i64 {
+        let fingerprint = self.observe_messages(messages);
+        match self.stored_token_count {
+            Some(stored) if stored.matches(fingerprint) => stored.count,
+            Some(_) => {
+                self.stored_token_count = None;
+                estimate_tokens_heuristic(messages)
+            }
+            None => estimate_tokens_heuristic(messages),
+        }
+    }
+
+    fn observe_messages(&mut self, messages: &[Message]) -> u64 {
+        let fingerprint = message_fingerprint(messages);
+        self.last_observed_messages_fingerprint = Some(fingerprint);
+        fingerprint
     }
 
     /// Apply compaction if the strategy deems it necessary.
@@ -103,11 +145,11 @@ impl ContextManager {
     /// or a new list when compaction occurs (phase > 0).
     pub fn maybe_compact<'a>(
         &mut self,
-        messages: &'a [crate::core::message::Message],
+        messages: &'a [Message],
         step_index: i64,
         step_hint: Option<&str>,
-    ) -> std::borrow::Cow<'a, [crate::core::message::Message]> {
-        let tokens_before = self.estimate_tokens(messages);
+    ) -> std::borrow::Cow<'a, [Message]> {
+        let tokens_before = self.estimate_current_tokens(messages);
         let (compacted, phase) = self
             .strategy
             .compact(messages, self.budget_tokens, step_hint);
@@ -142,19 +184,18 @@ impl ContextManager {
     ///
     /// Returns `None` when thresholds or callback are not configured,
     /// budget is zero/negative, or no threshold is newly crossed.
-    pub fn check_thresholds(
-        &mut self,
-        messages: &[crate::core::message::Message],
-    ) -> Option<String> {
-        let thresholds = self.context_thresholds.as_ref()?;
-        let callback = self.on_context_threshold.as_ref()?;
+    pub fn check_thresholds(&mut self, messages: &[Message]) -> Option<String> {
+        if self.context_thresholds.is_none() || self.on_context_threshold.is_none() {
+            return None;
+        }
 
         if self.budget_tokens <= 0 {
             return None;
         }
 
-        let tokens = self.estimate_tokens(messages);
+        let tokens = self.estimate_current_tokens(messages);
         let pct = tokens as f64 / self.budget_tokens as f64;
+        let thresholds = self.context_thresholds.as_ref()?;
 
         // Reset thresholds where usage has dropped below them.
         for (i, &threshold) in thresholds.iter().enumerate() {
@@ -176,7 +217,50 @@ impl ContextManager {
         let idx = fired_idx?;
 
         self.fired_thresholds[idx] = true;
+        let callback = self.on_context_threshold.as_ref()?;
         callback(tokens, self.budget_tokens, pct)
+    }
+}
+
+fn message_fingerprint(messages: &[Message]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    messages.len().hash(&mut hasher);
+    for message in messages {
+        message.role.hash(&mut hasher);
+        message.content.hash(&mut hasher);
+        message.metadata.msg_type.hash(&mut hasher);
+        message.metadata.step_index.hash(&mut hasher);
+        message.metadata.original_type.hash(&mut hasher);
+        message.metadata.token_estimate.hash(&mut hasher);
+        message.tool_name.hash(&mut hasher);
+        message.tool_call_id.hash(&mut hasher);
+        hash_tool_calls(&message.tool_calls, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_tool_calls(tool_calls: &Option<Vec<ToolCallInfo>>, hasher: &mut DefaultHasher) {
+    match tool_calls {
+        Some(calls) => {
+            true.hash(hasher);
+            calls.len().hash(hasher);
+            for call in calls {
+                call.name.hash(hasher);
+                call.call_id.hash(hasher);
+                match &call.args {
+                    Some(args) => {
+                        true.hash(hasher);
+                        args.len().hash(hasher);
+                        for (key, value) in args {
+                            key.hash(hasher);
+                            value.to_string().hash(hasher);
+                        }
+                    }
+                    None => false.hash(hasher),
+                }
+            }
+        }
+        None => false.hash(hasher),
     }
 }
 

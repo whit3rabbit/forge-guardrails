@@ -96,6 +96,38 @@ fn update_token_count_overrides() {
     assert_eq!(mgr.estimate_tokens(&msgs), 500);
 }
 
+#[test]
+fn update_token_count_applies_to_same_observed_messages() {
+    let msgs = vec![user_msg("small")];
+    let mut mgr = ContextManager::new(Box::new(NoCompact), 1000, None, None, None);
+    let _ = mgr.maybe_compact(&msgs, 0, None);
+
+    mgr.update_token_count(500);
+
+    assert_eq!(mgr.estimate_tokens(&msgs), 500);
+}
+
+#[test]
+fn stored_token_count_is_ignored_after_message_mutation() {
+    let mut msgs = vec![user_msg("small")];
+    let callback: Box<dyn Fn(i64, i64, f64) -> Option<String> + Send + Sync> =
+        Box::new(|tokens, _, _| Some(format!("tokens={tokens}")));
+    let mut mgr = ContextManager::new(
+        Box::new(NoCompact),
+        1000,
+        None,
+        Some(vec![0.5]),
+        Some(callback),
+    );
+    let _ = mgr.maybe_compact(&msgs, 0, None);
+    mgr.update_token_count(800);
+
+    msgs.push(user_msg("changed"));
+
+    assert!(mgr.check_thresholds(&msgs).is_none());
+    assert!(mgr.estimate_tokens(&msgs) < 500);
+}
+
 // ts-043: maybe_compact returns original list reference when phase 0.
 #[test]
 fn maybe_compact_returns_original_on_phase0() {
