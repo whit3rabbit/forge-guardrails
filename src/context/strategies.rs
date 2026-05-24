@@ -272,6 +272,7 @@ fn apply_phase2(
             MessageType::StepNudge
             | MessageType::PrerequisiteNudge
             | MessageType::RetryNudge
+            | MessageType::ToolCall
             | MessageType::ToolResult => continue,
             _ => result.push(msg.clone()),
         }
@@ -300,6 +301,7 @@ fn apply_phase3(
             MessageType::StepNudge
             | MessageType::PrerequisiteNudge
             | MessageType::RetryNudge
+            | MessageType::ToolCall
             | MessageType::ToolResult
             | MessageType::Reasoning
             | MessageType::TextResponse => continue,

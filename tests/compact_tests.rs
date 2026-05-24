@@ -595,7 +595,7 @@ fn per_phase_thresholds_phase3() {
 }
 
 #[test]
-fn test_compaction_preserves_tool_call_skeletons_after_dropping_results() {
+fn test_compaction_drops_tool_calls_and_results_together() {
     use forge_guardrails::ToolCallInfo;
     use indexmap::IndexMap;
 
@@ -640,11 +640,10 @@ fn test_compaction_preserves_tool_call_skeletons_after_dropping_results() {
         }
     }
 
-    assert_eq!(call_ids.len(), 4);
-    assert_eq!(
-        result_ids,
+    let expected: std::collections::HashSet<String> =
         ["tc_0002".to_string(), "tc_0003".to_string()]
             .into_iter()
-            .collect()
-    );
+            .collect();
+    assert_eq!(call_ids, expected);
+    assert_eq!(result_ids, expected);
 }
