@@ -179,15 +179,17 @@ on proxy port `8081`, waits for `/health`, runs the Rust `forge-eval` smoke
 runner, runs the Python oracle wrapper, writes JSONL/report artifacts under
 `target/local-eval/<timestamp>/`, and stops the proxy on exit or failure.
 
-The release suite runs normal scenarios with an `8192` process budget. It
-restarts the proxy for compaction scenarios that require scenario-specific
-budgets: `compaction_chain_p1=3600`, `compaction_chain_p2=2200`, and
-`compaction_chain_p3=1536`.
+The release suite runs the published leaderboard scenarios with an `8192`
+process budget and compares local results against the published
+`Ministral-3-8B-Instruct-2512-Q8_0 LS/N [reforged]` row in
+`forge/docs/results/raw/native-vs-prompt.md`. Compaction-chain scenarios are
+not part of that published leaderboard; run them only when explicitly needed
+with `--include-compaction-chain`.
 
 Manual Python oracle against a running Rust proxy:
 
 ```bash
-uv run --project forge python scripts/eval_openai_proxy.py \
+env -u VIRTUAL_ENV uv run --project forge python scripts/eval_openai_proxy.py \
   --base-url http://127.0.0.1:8081/v1 \
   --model test-model \
   --runs 10 \
@@ -214,9 +216,10 @@ The Rust smoke runner supports only the initial small scenario set:
 quick CI/smoke checks and should not grow into a reporting dashboard.
 
 For release benchmarking, Python eval scenarios and Python scoring/reporting
-are the source of truth. Do not require exact live JSONL or generated text
-parity. Compare scenario coverage, success/accuracy, guardrail counters, and
-report output. Latency, token counts, generated IDs, JSON key order outside
+are used to score Rust proxy output, then the result is compared with the
+published Forge leaderboard. Do not require exact live JSONL or generated text
+parity. Compare scenario coverage, aggregate score/completeness, and published
+baseline tolerance. Latency, token counts, generated IDs, JSON key order outside
 schema tests, provider metadata, and stochastic final wording are not release
 gates.
 

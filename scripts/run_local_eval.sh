@@ -5,7 +5,8 @@ DEFAULT_GGUF="mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf"
 DEFAULT_PROXY_PORT="8081"
 DEFAULT_BACKEND_PORT="8080"
 DEFAULT_BUDGET_TOKENS="8192"
-DEFAULT_MODEL="test-model"
+DEFAULT_MODEL="Ministral-3-8B-Instruct-2512-Q8_0"
+DEFAULT_PUBLISHED_BACKEND_MODE="LS/N"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -14,6 +15,10 @@ SUITE="smoke"
 RUNS="1"
 GGUF="$DEFAULT_GGUF"
 MODEL="$DEFAULT_MODEL"
+PUBLISHED_MODEL=""
+PUBLISHED_BACKEND_MODE="$DEFAULT_PUBLISHED_BACKEND_MODE"
+SKIP_PUBLISHED_COMPARE=0
+INCLUDE_COMPACTION_CHAIN=0
 PROXY_PORT="${FORGE_PROXY_PORT:-${PROXY_PORT:-$DEFAULT_PROXY_PORT}}"
 BACKEND_PORT="${FORGE_BACKEND_PORT:-${BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 HEALTH_TIMEOUT="180"
@@ -41,6 +46,10 @@ Options:
   --gguf PATH               GGUF path (default: $DEFAULT_GGUF)
   --output-dir DIR          Output directory (default: target/local-eval/<timestamp>)
   --model MODEL             Model name sent to the proxy (default: $DEFAULT_MODEL)
+  --published-model MODEL   Published baseline model (default: --model)
+  --published-mode LS/N|LS/P Published baseline row (default: $DEFAULT_PUBLISHED_BACKEND_MODE)
+  --skip-published-compare  Do not compare release results to published results
+  --include-compaction-chain Also run compaction-chain scenarios after published scenarios
   --proxy-port PORT         Proxy port (default: $DEFAULT_PROXY_PORT)
   --backend-port PORT       Managed llama-server port (default: $DEFAULT_BACKEND_PORT)
   --health-timeout SECONDS  Seconds to wait for /health (default: 180)
@@ -88,7 +97,7 @@ have_python_runner() {
 
 run_python_stdin() {
   if command -v uv >/dev/null 2>&1; then
-    (cd "$REPO_ROOT" && uv run --project forge python - "$@")
+    (cd "$REPO_ROOT" && env -u VIRTUAL_ENV uv run --project forge python - "$@")
   elif [[ -x "$REPO_ROOT/forge/.venv/bin/python" ]]; then
     (cd "$REPO_ROOT" && "$REPO_ROOT/forge/.venv/bin/python" - "$@")
   else
@@ -98,7 +107,7 @@ run_python_stdin() {
 
 run_python_script() {
   if command -v uv >/dev/null 2>&1; then
-    (cd "$REPO_ROOT" && uv run --project forge python "$@")
+    (cd "$REPO_ROOT" && env -u VIRTUAL_ENV uv run --project forge python "$@")
   elif [[ -x "$REPO_ROOT/forge/.venv/bin/python" ]]; then
     (cd "$REPO_ROOT" && "$REPO_ROOT/forge/.venv/bin/python" "$@")
   else
@@ -132,7 +141,7 @@ elif kind == "release-normal":
     names = [
         scenario.name
         for scenario in ALL_SCENARIOS
-        if scenario.name not in process_budget_compaction
+        if not scenario.name.startswith("compaction_chain_")
     ]
 else:
     raise SystemExit(f"unknown scenario set: {kind}")
@@ -254,12 +263,57 @@ run_python_report() {
 
   log "Generating Python report -> $report"
   if command -v uv >/dev/null 2>&1; then
-    (cd "$REPO_ROOT/forge" && uv run python -m tests.eval.report "$output" --include-partial >"$report")
+    (cd "$REPO_ROOT/forge" && env -u VIRTUAL_ENV uv run python -m tests.eval.report "$output" --include-partial 2>&1) | tee "$report"
   elif [[ -x "$REPO_ROOT/forge/.venv/bin/python" ]]; then
-    (cd "$REPO_ROOT/forge" && "$REPO_ROOT/forge/.venv/bin/python" -m tests.eval.report "$output" --include-partial >"$report")
+    (cd "$REPO_ROOT/forge" && "$REPO_ROOT/forge/.venv/bin/python" -m tests.eval.report "$output" --include-partial 2>&1) | tee "$report"
   else
-    (cd "$REPO_ROOT/forge" && "$PYTHON_BIN" -m tests.eval.report "$output" --include-partial >"$report")
+    (cd "$REPO_ROOT/forge" && "$PYTHON_BIN" -m tests.eval.report "$output" --include-partial 2>&1) | tee "$report"
   fi
+}
+
+run_published_compare() {
+  local output compare_report published_model
+  output="$OUTPUT_DIR/python_oracle.jsonl"
+  compare_report="$OUTPUT_DIR/published_compare.txt"
+  published_model="${PUBLISHED_MODEL:-$MODEL}"
+  [[ -f "$output" ]] || return 0
+
+  log "Comparing against published baseline -> $compare_report"
+  local cmd=(
+    scripts/compare_published_eval.py "$output"
+    --model "$published_model"
+    --backend-mode "$PUBLISHED_BACKEND_MODE"
+    --local-model "$MODEL"
+  )
+  set +e
+  run_python_script "${cmd[@]}" 2>&1 | tee "$compare_report"
+  local status=${PIPESTATUS[0]}
+  set -e
+  return "$status"
+}
+
+write_metadata() {
+  local metadata
+  metadata="$OUTPUT_DIR/local_eval_metadata.txt"
+  cat >"$metadata" <<EOF
+suite=$SUITE
+runs=$RUNS
+stream=$STREAM
+gguf=$GGUF
+model=$MODEL
+published_model=${PUBLISHED_MODEL:-$MODEL}
+published_backend_mode=$PUBLISHED_BACKEND_MODE
+proxy_url=http://127.0.0.1:${PROXY_PORT}/v1
+managed_backend_url=http://127.0.0.1:${BACKEND_PORT}/v1
+managed_backend=llamaserver
+eval_target_backend=openai-proxy
+normal_budget_tokens=$DEFAULT_BUDGET_TOKENS
+compaction_chain_p1_budget_tokens=3600
+compaction_chain_p2_budget_tokens=2200
+compaction_chain_p3_budget_tokens=1536
+include_compaction_chain=$INCLUDE_COMPACTION_CHAIN
+EOF
+  log "Metadata: $metadata"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -283,6 +337,22 @@ while [[ $# -gt 0 ]]; do
     --model)
       MODEL="$(next_arg "$1" "${2:-}")"
       shift 2
+      ;;
+    --published-model)
+      PUBLISHED_MODEL="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --published-mode)
+      PUBLISHED_BACKEND_MODE="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --skip-published-compare)
+      SKIP_PUBLISHED_COMPARE=1
+      shift
+      ;;
+    --include-compaction-chain)
+      INCLUDE_COMPACTION_CHAIN=1
+      shift
       ;;
     --proxy-port)
       PROXY_PORT="$(next_arg "$1" "${2:-}")"
@@ -317,6 +387,13 @@ case "$SUITE" in
     die "--suite must be smoke or release"
     ;;
 esac
+case "$PUBLISHED_BACKEND_MODE" in
+  LS/N|LS/P)
+    ;;
+  *)
+    die "--published-mode must be LS/N or LS/P"
+    ;;
+esac
 valid_positive_int "$RUNS" || die "--runs must be a positive integer"
 valid_positive_int "$PROXY_PORT" || die "--proxy-port must be a positive integer"
 valid_positive_int "$BACKEND_PORT" || die "--backend-port must be a positive integer"
@@ -338,6 +415,7 @@ trap 'exit 129' HUP
 
 log "Output directory: $OUTPUT_DIR"
 log "Suite: $SUITE, runs: $RUNS, stream: $STREAM"
+write_metadata
 
 start_proxy "$DEFAULT_BUDGET_TOKENS" "budget_${DEFAULT_BUDGET_TOKENS}"
 run_rust_smoke
@@ -349,22 +427,30 @@ else
   normal_scenarios=($(scenario_names release-normal))
   run_python_oracle "$DEFAULT_BUDGET_TOKENS" "${normal_scenarios[@]}"
 
-  stop_proxy
-  start_proxy "3600" "compaction_chain_p1"
-  run_python_oracle "3600" "compaction_chain_p1"
+  if [[ "$INCLUDE_COMPACTION_CHAIN" == "1" ]]; then
+    stop_proxy
+    start_proxy "3600" "compaction_chain_p1"
+    run_python_oracle "3600" "compaction_chain_p1"
 
-  stop_proxy
-  start_proxy "2200" "compaction_chain_p2"
-  run_python_oracle "2200" "compaction_chain_p2"
+    stop_proxy
+    start_proxy "2200" "compaction_chain_p2"
+    run_python_oracle "2200" "compaction_chain_p2"
 
-  stop_proxy
-  start_proxy "1536" "compaction_chain_p3"
-  run_python_oracle "1536" "compaction_chain_p3"
+    stop_proxy
+    start_proxy "1536" "compaction_chain_p3"
+    run_python_oracle "1536" "compaction_chain_p3"
+  fi
 fi
 
 run_python_report
+if [[ "$SUITE" == "release" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
+  run_published_compare
+fi
 
 log "Local eval complete"
 log "Rust smoke:    $OUTPUT_DIR/rust_smoke.jsonl"
 log "Python oracle: $OUTPUT_DIR/python_oracle.jsonl"
 log "Python report: $OUTPUT_DIR/python_report.txt"
+if [[ "$SUITE" == "release" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
+  log "Published cmp: $OUTPUT_DIR/published_compare.txt"
+fi

@@ -361,8 +361,23 @@ async def main_async(args: argparse.Namespace) -> None:
     )
 
     output = Path(args.output) if args.output else None
-    for scenario in scenarios:
+    total_runs = len(scenarios) * args.runs
+    completed_runs = 0
+    print(
+        f"Python oracle: {len(scenarios)} scenarios x {args.runs} runs "
+        f"({total_runs} total)",
+        file=sys.stderr,
+        flush=True,
+    )
+    for scenario_index, scenario in enumerate(scenarios, 1):
         for run_idx in range(1, args.runs + 1):
+            ordinal = completed_runs + 1
+            print(
+                f"[{ordinal}/{total_runs}] {scenario.name} "
+                f"run {run_idx}/{args.runs}...",
+                file=sys.stderr,
+                flush=True,
+            )
             result = await run_scenario(client, scenario, config, ablation=ablation)
             row = _result_row(
                 result,
@@ -379,6 +394,21 @@ async def main_async(args: argparse.Namespace) -> None:
                     handle.write(line + "\n")
             else:
                 print(line)
+            completed_runs += 1
+            if not result.completeness:
+                status = f"FAIL ({result.error_type})"
+            elif result.accuracy is False:
+                status = "OK (incorrect)"
+            else:
+                status = "OK"
+            print(
+                f"[{completed_runs}/{total_runs}] {scenario.name} "
+                f"run {run_idx}/{args.runs}: {status}, "
+                f"{result.iterations_used} iterations, "
+                f"{result.elapsed_seconds:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
