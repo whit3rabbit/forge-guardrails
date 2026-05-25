@@ -18,7 +18,7 @@ When using the Forge proxy, client requests to `/v1/chat/completions` (OpenAI fo
   "properties": {
     "required_steps": {
       "type": "array",
-      "description": "An ordered or unordered list of tool names that the LLM must execute before completing the workflow.",
+      "description": "An unordered list of tool names that must have successful tool results before any terminal tool is accepted.",
       "items": {
         "type": "string"
       },
@@ -31,6 +31,11 @@ When using the Forge proxy, client requests to `/v1/chat/completions` (OpenAI fo
         "type": "string"
       },
       "default": ["respond"]
+    },
+    "return_raw_on_guardrail_failure": {
+      "type": "boolean",
+      "description": "Debug compatibility switch. When true, guarded tool-call validation failures return the last rejected raw model text as a normal assistant response after retries are exhausted. Defaults to false, which returns an upstream error.",
+      "default": false
     }
   },
   "additionalProperties": false
@@ -46,6 +51,8 @@ struct ProxyStepContract {
     terminal_tools: Vec<String>,
 }
 ```
+
+`return_raw_on_guardrail_failure` is parsed separately as a boolean request flag. It is not part of `ProxyStepContract`.
 
 ### Example OpenAI Request Payload with `_forge`
 
@@ -76,16 +83,19 @@ struct ProxyStepContract {
   ],
   "_forge": {
     "required_steps": ["get_weather"],
-    "terminal_tools": ["respond"]
+    "terminal_tools": ["respond"],
+    "return_raw_on_guardrail_failure": false
   }
 }
 ```
 
-### Execution Lifecyle and Interception
+### Execution Lifecycle and Interception
 1. **Extraction:** The proxy parses the `_forge` object during request ingestion.
-2. **Validation:** The proxy validates that all tools in `required_steps` and `terminal_tools` exist in the request's `tools` array (with the exception of `respond`, which is auto-injected by the proxy).
+2. **Validation:** The proxy validates that all tools in `required_steps` and `terminal_tools` exist in the effective tool set. `respond` is reserved by Forge and is auto-injected into guarded tool requests.
 3. **Stripping:** The `_forge` field is **stripped** from the payload before forwarding the request to the upstream LLM client to ensure provider compatibility.
-4. **Enforcement:** The step enforcer monitors the ongoing message trajectory to ensure all `required_steps` are invoked before a `terminal_tool` is executed.
+4. **Enforcement:** The step enforcer monitors the message trajectory to ensure all `required_steps` have successful tool results before a `terminal_tool` is accepted.
+
+`required_steps` are not strict sequence constraints. They are completion gates before terminal tools. Use workflow prerequisites outside proxy mode when one non-terminal tool must depend on another non-terminal tool.
 
 ---
 
@@ -94,7 +104,9 @@ struct ProxyStepContract {
 Forge uses a clean, Pydantic-compatible JSON Schema representation for defining tools and their arguments.
 
 ### The `respond` Terminal Tool
-The proxy automatically injects a reserved terminal tool named `respond` if one is not already provided by the client. This tool is defined in [respond.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/tools/respond.rs) and allows the LLM to output final textual content inside a structured tool call.
+The proxy automatically injects a reserved terminal tool named `respond` when tools are present. This tool is defined in [respond.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/tools/respond.rs) and allows the LLM to output final textual content inside a structured tool call.
+
+Client-defined tools named `respond` are rejected. Silent replacement would change the caller's schema and semantics.
 
 #### Response Tool Specification
 ```json
@@ -132,6 +144,17 @@ Tool parameters are parsed into a recursive tree structure defined by the `Param
 | **Array** | `ParamModel::Array` | `description`, `required`, `items` (boxed `ParamModel`) |
 | **Unsupported** | `ParamModel::Unsupported` | `type_name` |
 
+OpenAI-compatible function tools may omit `function.parameters` for no-argument tools. Forge treats an omitted schema as:
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+Malformed schemas are still rejected. If `function.parameters` is present, it must be a JSON object schema with `"type": "object"`.
+
 ---
 
 ## 3. Sampling vs. Passthrough Parameter Schema
@@ -160,6 +183,16 @@ Common passthrough fields include:
 - `stop`: List of stop sequences
 - `response_format`: JSON Schema/object settings
 - `tool_choice`: String or tool choice specification
+- `stream_options`: Object containing OpenAI streaming options
+
+### Streaming Usage Schema
+For OpenAI-compatible streaming responses, Forge follows this usage policy:
+
+- If `stream_options.include_usage` is `true`, usage appears only on the final SSE chunk.
+- If `stream_options.include_usage` is absent or `false`, usage is omitted from all SSE chunks.
+- Non-streaming responses continue to include a `usage` object.
+
+This applies to no-tools passthrough streams and synthesized guarded streams. Guarded tool requests are buffered until validation finishes before SSE chunks are emitted.
 
 ---
 
@@ -187,3 +220,26 @@ To ensure tracking consistency across LLM turns, tool calls and tool results mus
 - **Tool Result:** Has `role: "tool"` and contains a matching `tool_call_id` that maps back to the corresponding `call_id`.
 
 If the client or LLM supplies empty tool call IDs, the proxy automatically generates fallback IDs (e.g., `call_1`, `call_2`) to maintain pairing logic.
+
+### Tool Result Status Metadata
+Proxy step reconstruction can only trust successful client-owned tool results. Tool result messages can include private Forge metadata:
+
+```json
+{
+  "role": "tool",
+  "tool_call_id": "call_get_weather",
+  "name": "get_weather",
+  "content": "72F and clear",
+  "_forge": {
+    "tool_status": "ok"
+  }
+}
+```
+
+`_forge.tool_status` values:
+
+| Value | Meaning |
+| :--- | :--- |
+| `"ok"` | Count the matching prior assistant tool call as a completed required step. |
+| Any other string | Do not count the tool result as a completed required step. |
+| Omitted | Count the result unless the content looks like an error, such as `[ToolError]`, `error:`, `failed`, `exception`, or `timeout`. |

@@ -1112,7 +1112,7 @@ mod tests {
         let body = serde_json::to_vec(&json!({
             "messages": [{"role": "user", "content": "hi"}],
             "model": "test",
-            "tools": [{"type": "function", "function": {"name": "search"}}]
+            "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "array"}}}]
         }))
         .unwrap();
         let (status, _ct, _headers, body_str) = srv
@@ -1125,7 +1125,7 @@ mod tests {
             )
             .await;
         assert_eq!(status, 400);
-        assert!(body_str.contains("missing function.parameters"));
+        assert!(body_str.contains("function.parameters must have type 'object'"));
     }
 
     #[tokio::test]

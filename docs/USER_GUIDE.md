@@ -19,13 +19,13 @@ Each mode trades control for convenience. `WorkflowRunner` handles everything; t
 | Validation + rescue parsing | Yes | Yes | Yes |
 | Retry nudges | Yes | Yes | Yes |
 | Respond tool | Caller adds | Auto-injected | Caller adds |
-| Step enforcement | Yes | No | Yes (caller wires) |
+| Step enforcement | Yes | Limited (`_forge`) | Yes (caller wires) |
 | Prerequisites | Yes | No | Yes (caller wires) |
 | Max iterations | Yes | Bounded by max_retries | Caller's responsibility |
 | Context compaction | Yes | Yes | Caller wires `ContextManager` |
 | Context threshold warnings | Yes | No | Caller wires `ContextManager` |
 | Cancellation | Between iterations | Between retries | Caller's responsibility |
-| Streaming (token-by-token) | Yes | Post-hoc SSE | Caller's responsibility |
+| Streaming (token-by-token) | Yes | No-tools live; tools buffered SSE | Caller's responsibility |
 | Tool execution | Yes | No (client executes) | No (caller executes) |
 | Callbacks (on_message, on_compact) | Yes | No | No |
 
@@ -82,17 +82,21 @@ let client = LlamafileClient::new("path/to/model.gguf")
 
 **Best for:** Adding guardrails to existing tools without modifying them. Works with any tool that speaks the OpenAI-compatible API — no per-client wrappers needed.
 
-**Reliability note:** The proxy automatically injects a synthetic `respond` tool when tools are present in the request. The model calls `respond(message="...")` instead of producing bare text, keeping it in tool-calling mode where forge's full guardrail stack applies. The `respond` call is stripped from the outbound response — the client sees a normal text response and never knows the tool exists. Guiding the model to a tool is a must. See [ADR-013](decisions/013-text-response-intent.md) for the full analysis.
+**Reliability note:** The proxy automatically injects a synthetic `respond` tool when tools are present in the request. The model calls `respond(message="...")` instead of producing bare text, keeping it in tool-calling mode where forge's full guardrail stack applies. The `respond` call is stripped from the outbound response — the client sees a normal text response and never knows the tool exists. Client tools named `respond` are rejected because the name is reserved by forge. Guiding the model to a tool is a must. See [ADR-013](decisions/013-text-response-intent.md) for the full analysis.
+
+Guarded tool-call validation failures return an upstream error by default after retries are exhausted. For debug compatibility, a request can set `_forge.return_raw_on_guardrail_failure: true` to return the rejected raw model text as a normal assistant message.
 
 #### Proxy design boundaries
 
 The proxy is intentionally bare-bones: it applies response-quality guardrails without requiring workflow knowledge. The following features are available in `WorkflowRunner` but not in the proxy, by design:
 
-- **Step enforcement and prerequisites.** These require workflow structure (required steps, terminal tool, tool dependencies) that doesn't exist in the OpenAI chat completions API. The proxy receives tool definitions per request but has no concept of workflow progression. If you need step enforcement, use `WorkflowRunner` or the middleware directly.
+- **Step enforcement.** The OpenAI chat completions API has no standard workflow contract, but the proxy accepts a forge extension: `_forge.required_steps` and `_forge.terminal_tools`. Required steps are unordered completion gates: every required tool must have a successful tool result before any terminal tool is allowed. Use tool prerequisites in `WorkflowRunner` or middleware when one non-terminal tool must happen before another. Prior proxy tool results are treated as successful when `_forge.tool_status` is `"ok"`; without that metadata, obvious error text such as `[ToolError]`, `error:`, `failed`, `exception`, or `timeout` is not counted as success.
+
+- **Prerequisites.** Tool dependencies require workflow structure that does not exist in the OpenAI chat completions API. If you need prerequisites, use `WorkflowRunner` or the middleware directly.
 
 - **Max iterations.** The proxy calls `run_inference` once per request. Each call is bounded at `max_retries + 1` LLM attempts (default 4). There is no outer loop — a runaway model cannot loop indefinitely. This is sufficient for the proxy's single-request model.
 
-- **Real streaming.** The proxy accepts `stream=true` and returns SSE events, but the full inference completes before SSE conversion. Token-by-token streaming during inference would require validating partial responses, which is incompatible with guardrails that need complete responses (rescue parsing, retry nudges). The guardrail-first design is the proxy's value proposition.
+- **Real streaming.** No-tools passthrough streams live from the backend. Tool-using guarded requests accept `stream=true` and return SSE events, but client output is buffered until validation completes. Token-by-token client streaming during guarded inference would require validating partial responses, which is incompatible with guardrails that need complete responses (rescue parsing, retry nudges). The guardrail-first design is the proxy's value proposition. Streaming usage is emitted only on the final chunk, and only when `stream_options.include_usage` is `true`.
 
 - **Context threshold warnings.** The proxy is stateless — the client sends the full conversation history in every request and decides what to include. Context pressure is the client's concern. Compaction still fires when the budget is exceeded.
 

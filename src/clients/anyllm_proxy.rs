@@ -764,87 +764,93 @@ fn parse_openai_sse(
         let mut accumulated_tools: Vec<(String, String, String)> = Vec::new();
 
         loop {
-            let chunk = match inner.next().await {
-                Some(Ok(bytes)) => bytes,
-                Some(Err(e)) => {
-                    yield Err(StreamError::new(e.to_string()));
-                    return;
+            let raw = if let Some(raw) = take_sse_line(&mut line_buf) {
+                raw
+            } else {
+                match inner.next().await {
+                    Some(Ok(bytes)) => {
+                        line_buf.push_str(&String::from_utf8_lossy(&bytes));
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        yield Err(StreamError::new(e.to_string()));
+                        return;
+                    }
+                    None if line_buf.is_empty() => break,
+                    None => {
+                        let raw = std::mem::take(&mut line_buf);
+                        raw.trim_end_matches('\r').to_string()
+                    }
                 }
-                None => break,
             };
 
-            line_buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(newline_pos) = line_buf.find('\n') {
-                let raw = line_buf[..newline_pos].trim_end_matches('\r').to_string();
-                line_buf = line_buf[newline_pos + 1..].to_string();
-                let Some(data) = raw.strip_prefix("data: ") else {
-                    continue;
-                };
-                if data == "[DONE]" {
-                    let final_response = final_stream_response(
-                        &accumulated_text,
-                        &accumulated_reasoning,
-                        &accumulated_tools,
-                    );
-                    yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
-                    return;
+            let Some(data) = sse_data_value(&raw) else {
+                continue;
+            };
+            if data == "[DONE]" {
+                let final_response = final_stream_response(
+                    &accumulated_text,
+                    &accumulated_reasoning,
+                    &accumulated_tools,
+                );
+                yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
+                return;
+            }
+
+            let evt: anyllm_translate::openai::ChatCompletionChunk = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            record_usage_cell(&last_usage, evt.usage.as_ref());
+            record_usage_details_cell(
+                &last_usage_details,
+                usage_details_from_openai_usage(evt.usage.as_ref()),
+            );
+            let cost_model = default_cost_model.as_deref().unwrap_or(&evt.model);
+            observe_stream_call_info(
+                &last_call_info,
+                &evt.model,
+                cost_model,
+                evt.usage.as_ref(),
+            );
+
+            for choice in evt.choices {
+                if let Some(reasoning) = choice.delta.reasoning_content {
+                    accumulated_reasoning.push_str(&reasoning);
                 }
-
-                let evt: anyllm_translate::openai::ChatCompletionChunk = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                record_usage_cell(&last_usage, evt.usage.as_ref());
-                record_usage_details_cell(
-                    &last_usage_details,
-                    usage_details_from_openai_usage(evt.usage.as_ref()),
-                );
-                let cost_model = default_cost_model.as_deref().unwrap_or(&evt.model);
-                observe_stream_call_info(
-                    &last_call_info,
-                    &evt.model,
-                    cost_model,
-                    evt.usage.as_ref(),
-                );
-
-                for choice in evt.choices {
-                    if let Some(reasoning) = choice.delta.reasoning_content {
-                        accumulated_reasoning.push_str(&reasoning);
-                    }
-                    if let Some(content) = choice.delta.content {
-                        accumulated_text.push_str(&content);
-                        yield Ok(StreamChunk::new(ChunkType::TextDelta).with_content(content));
-                    }
-                    if let Some(tool_calls) = choice.delta.tool_calls {
-                        for tc in tool_calls {
-                            let index = match checked_stream_tool_call_index(
-                                tc.index,
-                                accumulated_tools.len(),
-                            ) {
-                                Ok(index) => index,
-                                Err(e) => {
-                                    yield Err(e);
-                                    return;
-                                }
-                            };
-                            if index == accumulated_tools.len() {
-                                accumulated_tools.push((String::new(), String::new(), String::new()));
+                if let Some(content) = choice.delta.content {
+                    accumulated_text.push_str(&content);
+                    yield Ok(StreamChunk::new(ChunkType::TextDelta).with_content(content));
+                }
+                if let Some(tool_calls) = choice.delta.tool_calls {
+                    for tc in tool_calls {
+                        let index = match checked_stream_tool_call_index(
+                            tc.index,
+                            accumulated_tools.len(),
+                        ) {
+                            Ok(index) => index,
+                            Err(e) => {
+                                yield Err(e);
+                                return;
                             }
-                            if let Some(id) = tc.id {
-                                if !id.is_empty() {
-                                    accumulated_tools[index].0 = id;
+                        };
+                        if index == accumulated_tools.len() {
+                            accumulated_tools.push((String::new(), String::new(), String::new()));
+                        }
+                        if let Some(id) = tc.id {
+                            if !id.is_empty() {
+                                accumulated_tools[index].0 = id;
+                            }
+                        }
+                        if let Some(function) = tc.function {
+                            if let Some(name) = function.name {
+                                if !name.is_empty() {
+                                    accumulated_tools[index].1 = name;
                                 }
                             }
-                            if let Some(function) = tc.function {
-                                if let Some(name) = function.name {
-                                    if !name.is_empty() {
-                                        accumulated_tools[index].1 = name;
-                                    }
-                                }
-                                if let Some(args) = function.arguments {
-                                    accumulated_tools[index].2.push_str(&args);
-                                }
+                            if let Some(args) = function.arguments {
+                                accumulated_tools[index].2.push_str(&args);
                             }
                         }
                     }
@@ -859,6 +865,21 @@ fn parse_openai_sse(
         );
         yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
     }
+}
+
+fn take_sse_line(line_buf: &mut String) -> Option<String> {
+    let newline_pos = line_buf.find('\n')?;
+    let mut raw: String = line_buf.drain(..=newline_pos).collect();
+    raw.pop();
+    while raw.ends_with('\r') {
+        raw.pop();
+    }
+    Some(raw)
+}
+
+fn sse_data_value(raw: &str) -> Option<&str> {
+    let value = raw.strip_prefix("data:")?;
+    Some(value.trim_start())
 }
 
 fn parse_openai_chunks(
@@ -1019,6 +1040,28 @@ mod tests {
     }
 
     #[test]
+    fn sse_data_value_accepts_optional_single_space() {
+        assert_eq!(sse_data_value("data:{\"ok\":true}"), Some("{\"ok\":true}"));
+        assert_eq!(sse_data_value("data: {\"ok\":true}"), Some("{\"ok\":true}"));
+        assert_eq!(
+            sse_data_value("data:  {\"ok\":true}"),
+            Some("{\"ok\":true}")
+        );
+        assert_eq!(sse_data_value("event: message"), None);
+    }
+
+    #[test]
+    fn take_sse_line_keeps_buffered_tail() {
+        let mut line_buf = "data: first\r\ndata: second".to_string();
+        assert_eq!(
+            take_sse_line(&mut line_buf),
+            Some("data: first".to_string())
+        );
+        assert_eq!(line_buf, "data: second");
+        assert_eq!(take_sse_line(&mut line_buf), None);
+    }
+
+    #[test]
     fn stream_tool_call_index_allows_existing_or_next_slot() {
         assert_eq!(checked_stream_tool_call_index(0, 0).unwrap(), 0);
         assert_eq!(checked_stream_tool_call_index(0, 1).unwrap(), 0);
@@ -1033,5 +1076,22 @@ mod tests {
         let oversized =
             checked_stream_tool_call_index(MAX_STREAM_TOOL_CALLS as u32, 0).unwrap_err();
         assert!(oversized.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn estimate_cost_usd_uses_per_token_pricing_units() {
+        let usage = anyllm_translate::openai::ChatUsage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 1_000_000,
+            total_tokens: 2_000_000,
+            ..Default::default()
+        };
+
+        let cost = estimate_cost_usd(Some("claude-3-haiku-20240307"), Some(&usage))
+            .expect("known model has pricing");
+
+        // anyllm_proxy::cost::price_for_model returns USD per token. For
+        // Claude 3 Haiku this is $0.25/M input and $1.25/M output.
+        assert!((cost - 1.50).abs() < 1e-10);
     }
 }

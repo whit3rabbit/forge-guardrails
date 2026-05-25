@@ -1540,11 +1540,15 @@ async fn python_golden_proxy_retry_exhausted_raw_text_matches() {
     ]));
     let context = proxy_context();
     let max_retries = case["input"]["max_retries"].as_i64().unwrap() as i32;
+    let mut body = case["input"]["body"].clone();
+    body.as_object_mut().expect("body object").insert(
+        "_forge".to_string(),
+        json!({"return_raw_on_guardrail_failure": true}),
+    );
 
-    let response =
-        handle_chat_completions(&case["input"]["body"], &client, &context, max_retries, true)
-            .await
-            .expect("proxy response");
+    let response = handle_chat_completions(&body, &client, &context, max_retries, true)
+        .await
+        .expect("proxy response");
 
     match response {
         HandlerResult::Response(value) => {
@@ -1592,11 +1596,15 @@ async fn python_golden_proxy_rescue_failure_raw_text_matches() {
     )]));
     let context = proxy_context();
     let max_retries = case["input"]["max_retries"].as_i64().unwrap() as i32;
+    let mut body = case["input"]["body"].clone();
+    body.as_object_mut().expect("body object").insert(
+        "_forge".to_string(),
+        json!({"return_raw_on_guardrail_failure": true}),
+    );
 
-    let response =
-        handle_chat_completions(&case["input"]["body"], &client, &context, max_retries, true)
-            .await
-            .expect("proxy response");
+    let response = handle_chat_completions(&body, &client, &context, max_retries, true)
+        .await
+        .expect("proxy response");
 
     match response {
         HandlerResult::Response(value) => {

@@ -48,6 +48,9 @@ pub enum HandlerResult {
 const FORGE_EXTENSION_FIELD: &str = "_forge";
 const FORGE_REQUIRED_STEPS_FIELD: &str = "required_steps";
 const FORGE_TERMINAL_TOOLS_FIELD: &str = "terminal_tools";
+const FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD: &str = "return_raw_on_guardrail_failure";
+const FORGE_TOOL_STATUS_FIELD: &str = "tool_status";
+const FORGE_TOOL_STATUS_OK: &str = "ok";
 const PROXY_STEP_INDEX: i64 = 0;
 
 #[derive(Debug, Clone)]
@@ -209,13 +212,8 @@ fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDet
 }
 
 fn extract_proxy_step_contract(body: &Value) -> Result<Option<ProxyStepContract>, HandlerError> {
-    let Some(forge) = body.get(FORGE_EXTENSION_FIELD) else {
+    let Some(forge_obj) = forge_object(body)? else {
         return Ok(None);
-    };
-    let Some(forge_obj) = forge.as_object() else {
-        return Err(HandlerError::BadRequest(format!(
-            "{FORGE_EXTENSION_FIELD} must be an object"
-        )));
     };
 
     let required_steps =
@@ -314,10 +312,48 @@ fn validate_proxy_name_list(field: &str, values: &[String]) -> Result<(), Handle
     Ok(())
 }
 
+fn forge_object(body: &Value) -> Result<Option<&serde_json::Map<String, Value>>, HandlerError> {
+    let Some(forge) = body.get(FORGE_EXTENSION_FIELD) else {
+        return Ok(None);
+    };
+    forge.as_object().map(Some).ok_or_else(|| {
+        HandlerError::BadRequest(format!("{FORGE_EXTENSION_FIELD} must be an object"))
+    })
+}
+
+fn extract_forge_bool_field(body: &Value, field: &str) -> Result<bool, HandlerError> {
+    let Some(forge_obj) = forge_object(body)? else {
+        return Ok(false);
+    };
+    let Some(value) = forge_obj.get(field) else {
+        return Ok(false);
+    };
+    value.as_bool().ok_or_else(|| {
+        HandlerError::BadRequest(format!("{FORGE_EXTENSION_FIELD}.{field} must be a boolean"))
+    })
+}
+
+fn extract_stream_include_usage(body: &Value) -> Result<bool, HandlerError> {
+    let Some(stream_options) = body.get("stream_options") else {
+        return Ok(false);
+    };
+    let Some(stream_options_obj) = stream_options.as_object() else {
+        return Err(HandlerError::BadRequest(
+            "stream_options must be an object".to_string(),
+        ));
+    };
+    let Some(include_usage) = stream_options_obj.get("include_usage") else {
+        return Ok(false);
+    };
+    include_usage.as_bool().ok_or_else(|| {
+        HandlerError::BadRequest("stream_options.include_usage must be a boolean".to_string())
+    })
+}
+
 /// Main handler for /v1/chat/completions.
 ///
 /// When no tools are present, passes through to backend directly (no guardrails).
-/// When tools are present, injects a respond tool if not already provided,
+/// When tools are present, injects Forge's reserved respond tool,
 /// runs inference with validation/retry, then strips respond() calls from output.
 ///
 /// Sampling fields are extracted per-request and passed as a dict (or None);
@@ -364,6 +400,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         .get("stream")
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
+    let stream_include_usage = extract_stream_include_usage(body)?;
 
     let tools_raw = match body.get("tools") {
         Some(Value::Array(tools)) => tools.clone(),
@@ -375,6 +412,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         None => Vec::new(),
     };
     let step_contract = extract_proxy_step_contract(body)?;
+    let return_raw_on_guardrail_failure =
+        extract_forge_bool_field(body, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD)?;
 
     let sampling = extract_sampling(body);
     let passthrough = extract_passthrough(body);
@@ -405,6 +444,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             request_options,
             model_name,
             stream,
+            stream_include_usage,
         )
         .await
         .map_err(HandlerError::Upstream);
@@ -431,7 +471,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             3,
             2,
         );
-        record_completed_proxy_tool_results(&internal_msgs, &mut enforcer);
+        record_completed_proxy_tool_results(messages, &internal_msgs, &mut enforcer);
         enforcer
     });
 
@@ -463,6 +503,12 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             Ok(Some(result)) => result,
             Ok(None) => break LLMResponse::Text(TextResponse::new("")),
             Err(crate::error::ForgeError::ToolCall(err)) => {
+                if !return_raw_on_guardrail_failure {
+                    return Err(HandlerError::Upstream(format!(
+                        "model failed guarded tool-call validation after retries: {}",
+                        err
+                    )));
+                }
                 let raw = err.raw_response.unwrap_or_default();
                 let usage = client.last_usage();
                 let usage_details = client.last_usage_details();
@@ -471,6 +517,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     &raw,
                     model_name,
                     stream,
+                    stream_include_usage,
                     usage.as_ref(),
                     usage_details.as_ref(),
                 ));
@@ -535,6 +582,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             text,
             model_name,
             stream,
+            stream_include_usage,
             usage.as_ref(),
             usage_details.as_ref(),
         ),
@@ -548,6 +596,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     &text,
                     model_name,
                     stream,
+                    stream_include_usage,
                     usage.as_ref(),
                     usage_details.as_ref(),
                 )
@@ -557,6 +606,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     &real_calls,
                     model_name,
                     stream,
+                    stream_include_usage,
                     usage.as_ref(),
                     usage_details.as_ref(),
                 )
@@ -567,9 +617,13 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     Ok(handler_result)
 }
 
-fn record_completed_proxy_tool_results(messages: &[Message], enforcer: &mut StepEnforcer) {
+fn record_completed_proxy_tool_results(
+    raw_messages: &[Value],
+    messages: &[Message],
+    enforcer: &mut StepEnforcer,
+) {
     let mut pending_tool_calls: IndexMap<String, ToolCallInfo> = IndexMap::new();
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message.role {
             MessageRole::Assistant => {
                 let Some(tool_calls) = &message.tool_calls else {
@@ -583,6 +637,10 @@ fn record_completed_proxy_tool_results(messages: &[Message], enforcer: &mut Step
                 let Some(call_id) = &message.tool_call_id else {
                     continue;
                 };
+                let raw_message = raw_messages.get(index);
+                if !proxy_tool_result_succeeded(raw_message, &message.content) {
+                    continue;
+                }
                 if let Some(call) = pending_tool_calls.get(call_id) {
                     enforcer.record(&call.name, call.args.as_ref());
                 }
@@ -590,6 +648,29 @@ fn record_completed_proxy_tool_results(messages: &[Message], enforcer: &mut Step
             _ => {}
         }
     }
+}
+
+fn proxy_tool_result_succeeded(raw_message: Option<&Value>, content: &str) -> bool {
+    if let Some(status) = raw_message
+        .and_then(|m| m.get(FORGE_EXTENSION_FIELD))
+        .and_then(Value::as_object)
+        .and_then(|forge| forge.get(FORGE_TOOL_STATUS_FIELD))
+        .and_then(Value::as_str)
+    {
+        return status == FORGE_TOOL_STATUS_OK;
+    }
+
+    !looks_like_failed_proxy_tool_result(content)
+}
+
+fn looks_like_failed_proxy_tool_result(content: &str) -> bool {
+    let normalized = content.trim().to_ascii_lowercase();
+    normalized.starts_with("[toolerror]")
+        || normalized.starts_with("error:")
+        || normalized.contains("\nerror:")
+        || normalized.contains("failed")
+        || normalized.contains("exception")
+        || normalized.contains("timeout")
 }
 
 fn synthetic_respond_tool_call(text: &TextResponse) -> ToolCall {
@@ -693,9 +774,17 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
     options: LLMRequestOptions,
     model_name: &str,
     stream: bool,
+    stream_include_usage: bool,
 ) -> Result<HandlerResult, String> {
     if stream {
-        return run_passthrough_stream(client, serialized, options, model_name).await;
+        return run_passthrough_stream(
+            client,
+            serialized,
+            options,
+            model_name,
+            stream_include_usage,
+        )
+        .await;
     }
 
     let response = client
@@ -710,6 +799,7 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
             &text,
             model_name,
             stream,
+            stream_include_usage,
             usage.as_ref(),
             usage_details.as_ref(),
         )),
@@ -719,6 +809,7 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
                 "",
                 model_name,
                 stream,
+                stream_include_usage,
                 usage.as_ref(),
                 usage_details.as_ref(),
             ))
@@ -731,6 +822,7 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
     serialized: &[Value],
     options: LLMRequestOptions,
     model_name: &str,
+    include_usage: bool,
 ) -> Result<HandlerResult, String> {
     let mut backend_stream = client
         .send_stream_with_options(serialized.to_vec(), None, options)
@@ -778,14 +870,18 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
                             None,
                         ));
                     }
-                    let usage = client.last_usage();
-                    let usage_details = client.last_usage_details();
-                    let usage_json = usage.as_ref().map(|u| {
-                        crate::proxy::proxy::usage_to_openai_json_with_details(
-                            Some(u),
-                            usage_details.as_ref(),
-                        )
-                    });
+                    let usage_json = if include_usage {
+                        let usage = client.last_usage();
+                        let usage_details = client.last_usage_details();
+                        usage.as_ref().map(|u| {
+                            crate::proxy::proxy::usage_to_openai_json_with_details(
+                                Some(u),
+                                usage_details.as_ref(),
+                            )
+                        })
+                    } else {
+                        None
+                    };
                     yield Ok(crate::proxy::proxy::final_sse_event(
                         &completion_id,
                         &model_name,
@@ -809,15 +905,18 @@ fn text_response_result(
     text: &TextResponse,
     model_name: &str,
     stream: bool,
+    stream_include_usage: bool,
     usage: Option<&TokenUsage>,
     usage_details: Option<&LLMUsageDetails>,
 ) -> HandlerResult {
     if stream {
+        let (usage, usage_details) =
+            cloned_stream_usage(stream_include_usage, usage, usage_details);
         HandlerResult::StreamBody(text_events_stream(
             text.content.clone(),
             model_name.to_string(),
-            usage.cloned(),
-            usage_details.cloned(),
+            usage,
+            usage_details,
         ))
     } else {
         HandlerResult::Response(text_response_to_openai_with_usage_details(
@@ -833,15 +932,18 @@ fn text_content_result(
     content: &str,
     model_name: &str,
     stream: bool,
+    stream_include_usage: bool,
     usage: Option<&TokenUsage>,
     usage_details: Option<&LLMUsageDetails>,
 ) -> HandlerResult {
     if stream {
+        let (usage, usage_details) =
+            cloned_stream_usage(stream_include_usage, usage, usage_details);
         HandlerResult::StreamBody(text_events_stream(
             content.to_string(),
             model_name.to_string(),
-            usage.cloned(),
-            usage_details.cloned(),
+            usage,
+            usage_details,
         ))
     } else {
         let text = TextResponse::new(content);
@@ -858,17 +960,27 @@ fn tool_calls_result(
     calls: &[ToolCall],
     model_name: &str,
     stream: bool,
+    stream_include_usage: bool,
     usage: Option<&TokenUsage>,
     usage_details: Option<&LLMUsageDetails>,
 ) -> HandlerResult {
     if calls.is_empty() {
-        text_content_result("", model_name, stream, usage, usage_details)
+        text_content_result(
+            "",
+            model_name,
+            stream,
+            stream_include_usage,
+            usage,
+            usage_details,
+        )
     } else if stream {
+        let (usage, usage_details) =
+            cloned_stream_usage(stream_include_usage, usage, usage_details);
         HandlerResult::StreamBody(tool_call_events_stream(
             calls.to_vec(),
             model_name.to_string(),
-            usage.cloned(),
-            usage_details.cloned(),
+            usage,
+            usage_details,
         ))
     } else {
         HandlerResult::Response(tool_calls_to_openai_with_usage_details(
@@ -877,6 +989,18 @@ fn tool_calls_result(
             usage,
             usage_details,
         ))
+    }
+}
+
+fn cloned_stream_usage(
+    include_usage: bool,
+    usage: Option<&TokenUsage>,
+    usage_details: Option<&LLMUsageDetails>,
+) -> (Option<TokenUsage>, Option<LLMUsageDetails>) {
+    if include_usage {
+        (usage.cloned(), usage_details.cloned())
+    } else {
+        (None, None)
     }
 }
 
@@ -983,8 +1107,12 @@ pub fn filter_respond(calls: &[ToolCall]) -> Vec<ToolCall> {
 /// Convert LLM response to OpenAI format (streaming or non-streaming).
 pub fn process_response(response: &LLMResponse, model_name: &str, stream: bool) -> HandlerResult {
     match response {
-        LLMResponse::ToolCalls(calls) => tool_calls_result(calls, model_name, stream, None, None),
-        LLMResponse::Text(text) => text_response_result(text, model_name, stream, None, None),
+        LLMResponse::ToolCalls(calls) => {
+            tool_calls_result(calls, model_name, stream, false, None, None)
+        }
+        LLMResponse::Text(text) => {
+            text_response_result(text, model_name, stream, false, None, None)
+        }
     }
 }
 
@@ -1013,7 +1141,9 @@ pub fn parse_tool_specs(tools: &[Value]) -> Result<Vec<ToolSpec>, HandlerError> 
             )));
         }
         if name == RESPOND_TOOL_NAME {
-            continue;
+            return Err(HandlerError::BadRequest(format!(
+                "tool name '{RESPOND_TOOL_NAME}' is reserved by Forge; use a different tool name"
+            )));
         }
         if !seen.insert(name.to_string()) {
             return Err(HandlerError::BadRequest(format!(
@@ -1025,11 +1155,10 @@ pub fn parse_tool_specs(tools: &[Value]) -> Result<Vec<ToolSpec>, HandlerError> 
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let schema = func.get("parameters").cloned().ok_or_else(|| {
-            HandlerError::BadRequest(format!(
-                "tools[{index}] ('{name}') missing function.parameters"
-            ))
-        })?;
+        let schema = func
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
         let schema_obj = schema.as_object().ok_or_else(|| {
             HandlerError::BadRequest(format!(
                 "tools[{index}] ('{name}') function.parameters must be an object schema"
@@ -1181,6 +1310,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_tool_specs_accepts_missing_parameters_as_no_args() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "ping",
+                "description": "Ping"
+            }
+        })];
+        let specs = parse_tool_specs(&tools).expect("missing parameters is no-arg tool");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "ping");
+        assert_eq!(
+            specs[0].get_json_schema(),
+            json!({"type": "object", "properties": {}})
+        );
+    }
+
+    #[test]
     fn parse_tool_specs_rejects_malformed_tools() {
         let cases = [
             (
@@ -1190,10 +1337,6 @@ mod tests {
             (
                 json!({"type": "function", "function": {"name": "", "parameters": {"type": "object", "properties": {}}}}),
                 "must not be empty",
-            ),
-            (
-                json!({"type": "function", "function": {"name": "search"}}),
-                "missing function.parameters",
             ),
             (
                 json!({"type": "function", "function": {"name": "search", "parameters": {"type": "array"}}}),
@@ -1223,6 +1366,20 @@ mod tests {
         ];
         let err = parse_tool_specs(&tools).expect_err("duplicate rejected");
         assert!(err.message().contains("duplicates tool 'search'"));
+    }
+
+    #[test]
+    fn parse_tool_specs_rejects_reserved_respond_name() {
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "respond",
+                "description": "Client-owned respond",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        })];
+        let err = parse_tool_specs(&tools).expect_err("reserved name rejected");
+        assert!(err.message().contains("tool name 'respond' is reserved"));
     }
 
     #[test]
@@ -1582,6 +1739,45 @@ mod tests {
         assert!(!passthrough.contains_key("temperature"));
         assert!(!passthrough.contains_key("_forge"));
         assert!(options.inbound_anthropic_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_no_tools_stream_usage_requires_include_usage_and_is_final_only() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        });
+        let client = Arc::new(MockOptionsClient::new(Some(TokenUsage::new(11, 5, 16))));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let events = collect_stream_events(
+            handle_chat_completions(&body, &client, &ctx, 3, true)
+                .await
+                .expect("handler result"),
+        )
+        .await;
+
+        let usage_events: Vec<&Value> = events
+            .iter()
+            .filter(|event| event.get("usage").is_some())
+            .collect();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0]["choices"][0]["finish_reason"], "stop");
+        assert_eq!(usage_events[0]["usage"]["total_tokens"], 16);
+
+        let body_without_usage = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "stream": true
+        });
+        let events = collect_stream_events(
+            handle_chat_completions(&body_without_usage, &client, &ctx, 3, true)
+                .await
+                .expect("handler result"),
+        )
+        .await;
+        assert!(events.iter().all(|event| event.get("usage").is_none()));
     }
 
     #[tokio::test]
@@ -2516,6 +2712,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_required_steps_ignore_failed_prior_tool_result_history() {
+        let mut respond_args = IndexMap::new();
+        respond_args.insert("message".into(), json!("too soon"));
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", respond_args)]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_list_accounts", IndexMap::new())]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "audit account"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_list",
+                        "type": "function",
+                        "function": {"name": "legacy_list_accounts", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_list",
+                    "name": "legacy_list_accounts",
+                    "content": "[ToolError] timeout"
+                }
+            ],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "_forge": {
+                "required_steps": ["legacy_list_accounts"],
+                "terminal_tools": ["respond"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                assert_eq!(
+                    v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                    "legacy_list_accounts"
+                );
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let sent = client.sent_messages();
+        assert_eq!(sent.len(), 2);
+        let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
+        assert!(second_wire.contains("[StepEnforcementError]"));
+    }
+
+    #[tokio::test]
+    async fn proxy_required_steps_ignore_non_ok_prior_tool_status() {
+        let mut respond_args = IndexMap::new();
+        respond_args.insert("message".into(), json!("too soon"));
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", respond_args)]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_list_accounts", IndexMap::new())]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "audit account"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_list",
+                        "type": "function",
+                        "function": {"name": "legacy_list_accounts", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_list",
+                    "name": "legacy_list_accounts",
+                    "content": "ACC-12345",
+                    "_forge": {"tool_status": "error"}
+                }
+            ],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "_forge": {
+                "required_steps": ["legacy_list_accounts"],
+                "terminal_tools": ["respond"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                assert_eq!(
+                    v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                    "legacy_list_accounts"
+                );
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[tokio::test]
     async fn proxy_required_steps_block_premature_real_terminal_tool() {
         let mut terminal_args = IndexMap::new();
         terminal_args.insert("report".into(), json!("too soon"));
@@ -2637,7 +2947,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_retries_exhausted_returns_text() {
+    async fn handle_retries_exhausted_errors_by_default() {
         let body = json!({
             "messages": [{"role": "user", "content": "hi"}],
             "model": "test-model",
@@ -2647,13 +2957,11 @@ mod tests {
         let client = Arc::new(MockAlwaysTextClient);
         let ctx = Arc::new(Mutex::new(dummy_ctx()));
         let result = handle_chat_completions(&body, &client, &ctx, 2, true).await;
-        match result.unwrap() {
-            HandlerResult::Response(v) => {
-                assert_eq!(v["choices"][0]["message"]["content"], "always text");
-                assert_eq!(v["choices"][0]["finish_reason"], "stop");
-            }
-            _ => panic!("expected Response"),
-        }
+        let err = result.expect_err("guardrail failure should surface as upstream error");
+        assert!(matches!(err, HandlerError::Upstream(_)));
+        assert!(err
+            .message()
+            .contains("model failed guarded tool-call validation after retries"));
     }
 
     struct MockTextSequenceClient {
@@ -2716,12 +3024,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_retries_exhausted_returns_raw_response() {
+    async fn handle_retries_exhausted_raw_response_requires_opt_in() {
         let body = json!({
             "messages": [{"role": "user", "content": "hi"}],
             "model": "test-model",
             "stream": false,
             "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}]
+        });
+        let client = Arc::new(MockTextSequenceClient::new(vec!["first bad", "raw final"]));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_chat_completions(&body, &client, &ctx, 1, true).await;
+        let err = result.expect_err("default rejects raw fallback");
+        assert!(matches!(err, HandlerError::Upstream(_)));
+
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}],
+            "_forge": {"return_raw_on_guardrail_failure": true}
         });
         let client = Arc::new(MockTextSequenceClient::new(vec!["first bad", "raw final"]));
         let ctx = Arc::new(Mutex::new(dummy_ctx()));
@@ -2741,7 +3062,8 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "model": "test-model",
             "stream": true,
-            "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}]
+            "tools": [{"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}],
+            "_forge": {"return_raw_on_guardrail_failure": true}
         });
         let client = Arc::new(MockTextSequenceClient::new(vec!["first bad", "raw final"]));
         let ctx = Arc::new(Mutex::new(dummy_ctx()));

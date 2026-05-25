@@ -59,9 +59,10 @@ fn respond_callable(args: Vec<String>) -> Result<String, ToolResolutionError> {
             return Ok(value.to_string());
         }
     }
-    // Fallback: return the first arg as-is (handles cases where
-    // the calling convention passes just the value)
-    Ok(args[0].clone())
+    Err(
+        ToolResolutionError::new("respond tool requires a message argument")
+            .with_tool_name(RESPOND_TOOL_NAME),
+    )
 }
 
 /// Return a complete ToolDef for the respond tool.
@@ -140,5 +141,12 @@ mod tests {
     fn respond_callable_empty_returns_empty() {
         let result = respond_callable(vec![]);
         assert_eq!(result.unwrap(), "");
+    }
+
+    #[test]
+    fn respond_callable_rejects_malformed_nonempty_args() {
+        let err = respond_callable(vec!["hello world".to_string()]).unwrap_err();
+        assert_eq!(err.tool_name.as_deref(), Some(RESPOND_TOOL_NAME));
+        assert!(err.message.contains("message argument"));
     }
 }

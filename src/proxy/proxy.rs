@@ -430,17 +430,12 @@ pub(crate) fn text_to_sse_event_iter_with_usage_details<'a>(
         if let Some(chunk) = chunks.next() {
             let include_role = !emitted_content;
             emitted_content = true;
-            let usage = if include_role {
-                usage_json.as_ref()
-            } else {
-                None
-            };
             return Some(text_delta_sse_event(
                 &completion_id,
                 model,
                 chunk,
                 include_role,
-                usage,
+                None,
             ));
         }
 
@@ -480,13 +475,7 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
         if step == 0 {
             step = 1;
             if let Some(ref r) = reasoning {
-                return Some(text_delta_sse_event(
-                    &completion_id,
-                    model,
-                    r,
-                    true,
-                    usage_json.as_ref(),
-                ));
+                return Some(text_delta_sse_event(&completion_id, model, r, true, None));
             }
         }
 
@@ -520,7 +509,7 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
             }
             delta.insert("tool_calls".into(), json!(tc_deltas));
 
-            let mut event = json!({
+            let event = json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": 0,
@@ -531,11 +520,6 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
                     "finish_reason": Value::Null
                 }]
             });
-            if reasoning.is_none() {
-                if let Some(ref usage_value) = usage_json {
-                    event["usage"] = usage_value.clone();
-                }
-            }
             return Some(event);
         }
 
@@ -1129,8 +1113,27 @@ mod tests {
         assert_eq!(response["usage"]["total_tokens"], 16);
 
         let events = text_to_sse_events_with_usage("counted", "model", 0, Some(&usage));
-        assert_eq!(events[0]["usage"]["prompt_tokens"], 11);
+        assert!(events[0].get("usage").is_none());
         assert_eq!(events.last().unwrap()["usage"]["total_tokens"], 16);
+        let usage_events = events
+            .iter()
+            .filter(|event| event.get("usage").is_some())
+            .count();
+        assert_eq!(usage_events, 1);
+    }
+
+    #[test]
+    fn sse_tool_calls_emit_usage_only_on_final_chunk() {
+        let usage = TokenUsage::new(11, 5, 16);
+        let calls = vec![ToolCall::new("search", IndexMap::new()).with_reasoning("hmm")];
+        let events: Vec<Value> =
+            tool_calls_to_sse_event_iter_with_usage(&calls, "model", Some(&usage)).collect();
+
+        assert_eq!(events.len(), 3);
+        assert!(events[0].get("usage").is_none());
+        assert!(events[1].get("usage").is_none());
+        assert_eq!(events[2]["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(events[2]["usage"]["total_tokens"], 16);
     }
 
     #[test]

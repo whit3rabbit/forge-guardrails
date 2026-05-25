@@ -309,9 +309,9 @@ async fn anyllm_proxy_client_parses_tool_calls() {
 async fn anyllm_proxy_client_records_stream_headers_and_cost() {
     let mut server = mockito::Server::new_async().await;
     let sse = concat!(
-        "data: {\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
-        "data: [DONE]\n\n"
+        "data:{\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+        "data:{\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+        "data:[DONE]\n\n"
     );
     let _mock = server
         .mock("POST", "/v1/chat/completions")
@@ -357,6 +357,42 @@ async fn anyllm_proxy_client_records_stream_headers_and_cost() {
     assert_eq!(info.cache_status.as_deref(), Some("hit"));
     assert_eq!(info.rate_limits.requests_remaining.as_deref(), Some("12"));
     assert_eq!(info.estimated_cost_usd, Some(0.0042));
+}
+
+#[tokio::test]
+async fn anyllm_proxy_client_processes_final_unterminated_sse_line() {
+    let mut server = mockito::Server::new_async().await;
+    let sse = concat!(
+        "data: {\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+        "data:{\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}"
+    );
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse)
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini").with_base_url(server.url());
+    let mut stream = client
+        .send_stream(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("sidecar stream starts");
+
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        chunks.push(chunk.expect("stream chunk"));
+    }
+
+    assert_eq!(chunks[0].chunk_type, ChunkType::TextDelta);
+    assert_eq!(chunks[0].content, "hi");
+    assert_eq!(chunks.last().unwrap().chunk_type, ChunkType::Final);
+    assert_eq!(client.last_usage().unwrap().total_tokens, 5);
 }
 
 #[tokio::test]
