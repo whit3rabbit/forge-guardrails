@@ -28,6 +28,16 @@ BACKEND_PORT="${FORGE_BACKEND_PORT:-${BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 HEALTH_TIMEOUT="180"
 STREAM=1
 OUTPUT_DIR=""
+CLASSIFIER_DIR="${FORGE_CLASSIFIER_DIR:-}"
+CLASSIFIER_MODE="${FORGE_CLASSIFIER_MODE:-shadow}"
+if [[ -n "${FORGE_CLASSIFIER_MODEL:-}" ]]; then
+  CLASSIFIER_MODEL="$FORGE_CLASSIFIER_MODEL"
+elif [[ "${FORGE_CLASSIFIER_USE_QUANTIZED:-}" =~ ^(0|false|no|off)$ ]]; then
+  CLASSIFIER_MODEL="full"
+else
+  CLASSIFIER_MODEL="quantized"
+fi
+DOWNLOAD_CLASSIFIER=0
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
 elif command -v python >/dev/null 2>&1; then
@@ -61,11 +71,17 @@ Options:
   --backend-port PORT       Managed llama-server port (default: $DEFAULT_BACKEND_PORT)
   --health-timeout SECONDS  Seconds to wait for /health (default: 180)
   --no-stream               Disable streaming eval requests
+  --classifier-dir DIR      Enable local ONNX classifier artifact directory
+  --classifier-mode MODE    disabled|shadow|advisory|enforce (default: $CLASSIFIER_MODE)
+  --classifier-model MODEL  quantized|full (default: $CLASSIFIER_MODEL)
+  --download-classifier     Download classifier artifacts before running
   -h, --help                Show this help
 
 Examples:
   $(basename "$0") --suite smoke --runs 1
   $(basename "$0") --suite release --runs 10
+  $(basename "$0") --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
+  $(basename "$0") --suite release --runs 10 --download-classifier
 EOF
 }
 
@@ -85,6 +101,44 @@ valid_positive_int() {
       ;;
   esac
   (( 10#$1 > 0 ))
+}
+
+expand_path() {
+  case "$1" in
+    \~)
+      printf '%s\n' "$HOME"
+      ;;
+    \~/*)
+      printf '%s/%s\n' "$HOME" "${1#~/}"
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+canonical_dir() {
+  local path
+  path="$(resolve_local_path "$1")"
+  [[ -d "$path" ]] || die "directory not found: $path"
+  (cd "$path" && pwd -P)
+}
+
+resolve_local_path() {
+  local path
+  path="$(expand_path "$1")"
+  case "$path" in
+    /*)
+      printf '%s\n' "$path"
+      ;;
+    *)
+      printf '%s/%s\n' "$REPO_ROOT" "$path"
+      ;;
+  esac
+}
+
+classifier_enabled() {
+  [[ -n "$CLASSIFIER_DIR" && "$CLASSIFIER_MODE" != "disabled" ]]
 }
 
 next_arg() {
@@ -197,6 +251,48 @@ wait_for_health() {
   die "proxy did not become healthy within ${HEALTH_TIMEOUT}s"
 }
 
+download_classifier_artifacts() {
+  local output_dir
+  command -v cargo >/dev/null 2>&1 || die "cargo is required for --download-classifier"
+
+  if [[ -z "$CLASSIFIER_DIR" ]]; then
+    CLASSIFIER_DIR="$REPO_ROOT/target/classifier-artifacts/onnx"
+  fi
+
+  CLASSIFIER_DIR="$(resolve_local_path "$CLASSIFIER_DIR")"
+  if [[ "$(basename "$CLASSIFIER_DIR")" == "onnx" ]]; then
+    output_dir="$(dirname "$CLASSIFIER_DIR")"
+  else
+    output_dir="$CLASSIFIER_DIR"
+    CLASSIFIER_DIR="$CLASSIFIER_DIR/onnx"
+  fi
+
+  log "Downloading classifier artifacts -> $CLASSIFIER_DIR"
+  (cd "$REPO_ROOT" && cargo run --features classifier --bin download-classifier -- \
+    --output-dir "$output_dir" \
+    --classifier-model "$CLASSIFIER_MODEL")
+}
+
+prepare_classifier_binaries() {
+  classifier_enabled || return 0
+  command -v cargo >/dev/null 2>&1 || die "cargo is required when --classifier-dir is set"
+
+  CLASSIFIER_DIR="$(canonical_dir "$CLASSIFIER_DIR")"
+  [[ -f "$CLASSIFIER_DIR/artifact_manifest.json" ]] || die "classifier artifact_manifest.json missing in $CLASSIFIER_DIR"
+  [[ -f "$CLASSIFIER_DIR/tokenizer.json" ]] || die "classifier tokenizer.json missing in $CLASSIFIER_DIR"
+  case "$CLASSIFIER_MODEL" in
+    quantized)
+      [[ -f "$CLASSIFIER_DIR/model_quantized.onnx" ]] || die "classifier model_quantized.onnx missing in $CLASSIFIER_DIR"
+      ;;
+    full)
+      [[ -f "$CLASSIFIER_DIR/model.onnx" ]] || die "classifier model.onnx missing in $CLASSIFIER_DIR"
+      ;;
+  esac
+
+  log "Building classifier-enabled proxy/eval binaries"
+  (cd "$REPO_ROOT" && cargo build --features classifier --bin forge-guardrails-proxy --bin forge-eval)
+}
+
 start_proxy() {
   local budget label
   budget="$1"
@@ -204,13 +300,25 @@ start_proxy() {
   CURRENT_PROXY_LOG="$OUTPUT_DIR/proxy_${label}.log"
 
   log "Starting proxy with budget_tokens=$budget"
-  FORGE_PROXY_PORT="$PROXY_PORT" \
-    FORGE_BACKEND_PORT="$BACKEND_PORT" \
-    "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" \
-      --mode "$PROXY_BACKEND_MODE" \
-      --budget-mode manual \
-      --budget-tokens "$budget" \
-      >"$CURRENT_PROXY_LOG" 2>&1 &
+  local env_args=(
+    "FORGE_PROXY_PORT=$PROXY_PORT"
+    "FORGE_BACKEND_PORT=$BACKEND_PORT"
+  )
+  local proxy_args=(
+    --mode "$PROXY_BACKEND_MODE"
+    --budget-mode manual
+    --budget-tokens "$budget"
+  )
+  if classifier_enabled; then
+    env_args+=("FORGE_PROXY_BIN=$REPO_ROOT/target/debug/forge-guardrails-proxy")
+    proxy_args+=(
+      --classifier-dir "$CLASSIFIER_DIR"
+      --classifier-mode "$CLASSIFIER_MODE"
+      --classifier-model "$CLASSIFIER_MODEL"
+    )
+  fi
+  env "${env_args[@]}" "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" "${proxy_args[@]}" \
+    >"$CURRENT_PROXY_LOG" 2>&1 &
   PROXY_PID="$!"
   wait_for_health "$PROXY_PID"
 }
@@ -222,8 +330,12 @@ run_rust_smoke() {
   scenarios=($(scenario_names smoke))
 
   log "Running Rust smoke eval -> $output"
-  local cmd=(
-    cargo run --bin forge-eval --
+  local cmd=(cargo run)
+  if classifier_enabled; then
+    cmd+=(--features classifier)
+  fi
+  cmd+=(--bin forge-eval --)
+  cmd+=(
     --backend openai-proxy
     --base-url "http://127.0.0.1:${PROXY_PORT}/v1"
     --model "$MODEL"
@@ -234,6 +346,13 @@ run_rust_smoke() {
   )
   if [[ "$STREAM" == "1" ]]; then
     cmd+=(--stream)
+  fi
+  if classifier_enabled; then
+    cmd+=(
+      --classifier-dir "$CLASSIFIER_DIR"
+      --classifier-mode "$CLASSIFIER_MODE"
+      --classifier-model "$CLASSIFIER_MODEL"
+    )
   fi
   (cd "$REPO_ROOT" && "${cmd[@]}")
 }
@@ -312,8 +431,13 @@ run_published_compare() {
 }
 
 write_metadata() {
-  local metadata
+  local classifier_enabled_value metadata
   metadata="$OUTPUT_DIR/local_eval_metadata.txt"
+  if classifier_enabled; then
+    classifier_enabled_value=1
+  else
+    classifier_enabled_value=0
+  fi
   cat >"$metadata" <<EOF
 suite=$SUITE
 runs=$RUNS
@@ -335,6 +459,10 @@ compaction_chain_p1_budget_tokens=3600
 compaction_chain_p2_budget_tokens=2200
 compaction_chain_p3_budget_tokens=1536
 include_compaction_chain=$INCLUDE_COMPACTION_CHAIN
+classifier_enabled=$classifier_enabled_value
+classifier_dir=$CLASSIFIER_DIR
+classifier_mode=$CLASSIFIER_MODE
+classifier_model=$CLASSIFIER_MODEL
 EOF
   log "Metadata: $metadata"
 }
@@ -402,6 +530,22 @@ while [[ $# -gt 0 ]]; do
       STREAM=0
       shift
       ;;
+    --classifier-dir)
+      CLASSIFIER_DIR="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --classifier-mode)
+      CLASSIFIER_MODE="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --classifier-model)
+      CLASSIFIER_MODEL="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --download-classifier)
+      DOWNLOAD_CLASSIFIER=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -440,6 +584,20 @@ case "$PUBLISHED_BACKEND_MODE" in
     die "--published-mode must be LS/N or LS/P"
     ;;
 esac
+case "$CLASSIFIER_MODE" in
+  disabled|shadow|advisory|enforce)
+    ;;
+  *)
+    die "--classifier-mode must be disabled, shadow, advisory, or enforce"
+    ;;
+esac
+case "$CLASSIFIER_MODEL" in
+  quantized|full)
+    ;;
+  *)
+    die "--classifier-model must be quantized or full"
+    ;;
+esac
 valid_positive_int "$RUNS" || die "--runs must be a positive integer"
 valid_positive_int "$PROXY_PORT" || die "--proxy-port must be a positive integer"
 valid_positive_int "$BACKEND_PORT" || die "--backend-port must be a positive integer"
@@ -454,6 +612,11 @@ fi
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
 
+if [[ "$DOWNLOAD_CLASSIFIER" == "1" ]]; then
+  download_classifier_artifacts
+fi
+prepare_classifier_binaries
+
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -461,6 +624,11 @@ trap 'exit 129' HUP
 
 log "Output directory: $OUTPUT_DIR"
 log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, proxy_backend_mode: $PROXY_BACKEND_MODE"
+if classifier_enabled; then
+  log "Classifier: dir=$CLASSIFIER_DIR, mode=$CLASSIFIER_MODE, model=$CLASSIFIER_MODEL"
+else
+  log "Classifier: disabled"
+fi
 write_metadata
 
 start_proxy "$DEFAULT_BUDGET_TOKENS" "budget_${DEFAULT_BUDGET_TOKENS}"

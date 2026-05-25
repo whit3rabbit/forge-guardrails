@@ -9,6 +9,11 @@ use crate::cli::Cli;
 use crate::scenarios::SmokeScenario;
 use crate::startup::default_mode;
 
+pub(crate) struct ClassifierReport<'a> {
+    pub(crate) mode: &'a str,
+    pub(crate) scores: &'a [Value],
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn row_for_result(
     backend: &str,
@@ -22,6 +27,7 @@ pub(crate) fn row_for_result(
     result: Result<Value, ForgeError>,
     messages: &[Message],
     compaction_events: usize,
+    classifier_report: Option<ClassifierReport<'_>>,
 ) -> Value {
     let captured_args = scenario
         .capture
@@ -63,7 +69,7 @@ pub(crate) fn row_for_result(
         Value::Null
     };
 
-    json!({
+    let mut row = json!({
         "impl": "rust",
         "model": model,
         "backend": backend,
@@ -95,7 +101,11 @@ pub(crate) fn row_for_result(
         "final_text": final_text,
         "raw_response_on_failure": raw_response,
         "reasoning_budget": cli.reasoning_budget,
-    })
+    });
+    if let Some(report) = classifier_report {
+        add_classifier_fields(&mut row, report);
+    }
+    row
 }
 
 pub(crate) fn write_row(output: Option<&str>, row: &Value) -> Result<(), String> {
@@ -216,6 +226,46 @@ fn error_kind(err: &ForgeError) -> &'static str {
     }
 }
 
+fn add_classifier_fields(row: &mut Value, report: ClassifierReport<'_>) {
+    let max_score = report.scores.iter().max_by(|left, right| {
+        let left_conf = left
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NEG_INFINITY);
+        let right_conf = right
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NEG_INFINITY);
+        left_conf.total_cmp(&right_conf)
+    });
+    let model_version = report
+        .scores
+        .iter()
+        .find_map(|score| score.get("model_version").and_then(Value::as_str));
+
+    if let Some(obj) = row.as_object_mut() {
+        obj.insert("classifier_enabled".to_string(), json!(true));
+        obj.insert("classifier_mode".to_string(), json!(report.mode));
+        obj.insert(
+            "classifier_model_version".to_string(),
+            model_version.map_or(Value::Null, |value| json!(value)),
+        );
+        obj.insert("classifier_scores".to_string(), json!(report.scores));
+        obj.insert(
+            "classifier_max_confidence".to_string(),
+            max_score
+                .and_then(|score| score.get("confidence").cloned())
+                .unwrap_or(Value::Null),
+        );
+        obj.insert(
+            "classifier_predicted_label".to_string(),
+            max_score
+                .and_then(|score| score.get("label").cloned())
+                .unwrap_or(Value::Null),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +292,7 @@ mod tests {
             Ok(json!(null)),
             &[],
             2,
+            None,
         );
 
         assert_eq!(row["budget_tokens"], json!(16384));
@@ -250,5 +301,47 @@ mod tests {
         assert_eq!(row["compaction_events"], json!(2));
         assert_eq!(row["missing_required_steps"], json!(["get_country_info"]));
         assert_eq!(row["required_step_mismatch"], json!(true));
+        assert!(row.get("classifier_enabled").is_none());
+    }
+
+    #[test]
+    fn row_includes_classifier_fields_only_when_reported() {
+        let cli = parse(&[]);
+        let scenario = build_scenario("basic_2step", true).expect("scenario");
+        let scores = vec![json!({
+            "tool": "report",
+            "label": "wrong_tool_semantic",
+            "confidence": 0.997,
+            "action": "shadow_only",
+            "latency_ms": 3.8,
+            "model_version": "test-model"
+        })];
+        let row = row_for_result(
+            "openai-proxy",
+            "test-model",
+            "reforged",
+            &cli,
+            &scenario,
+            1,
+            2,
+            0.5,
+            Ok(json!(null)),
+            &[],
+            0,
+            Some(ClassifierReport {
+                mode: "shadow",
+                scores: &scores,
+            }),
+        );
+
+        assert_eq!(row["classifier_enabled"], json!(true));
+        assert_eq!(row["classifier_mode"], json!("shadow"));
+        assert_eq!(row["classifier_model_version"], json!("test-model"));
+        assert_eq!(
+            row["classifier_predicted_label"],
+            json!("wrong_tool_semantic")
+        );
+        assert_eq!(row["classifier_max_confidence"], json!(0.997));
+        assert_eq!(row["classifier_scores"], json!(scores));
     }
 }

@@ -157,3 +157,41 @@ baseline. Do not use the skipped `LS/N` behavior to explain an `LS/P` warning.
 
 Run live evals manually against real backends. CI should stay deterministic
 unless a job is explicitly marked as live-backend integration.
+
+## ONNX Classifier Shadow Runs
+
+Download the local classifier artifact once:
+
+```bash
+cargo run --features classifier --bin download-classifier -- --classifier-model quantized
+```
+
+Then run the same local release eval with the classifier loaded by the proxy:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classifier-dir target/classifier-artifacts/onnx
+```
+
+The shortcut below downloads the quantized artifact first when needed:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 --download-classifier
+```
+
+For a side-by-side comparison, keep output directories explicit:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --output-dir target/local-eval/release-baseline
+
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classifier-dir target/classifier-artifacts/onnx \
+  --output-dir target/local-eval/release-onnx-shadow
+```
+
+The classifier is shadow-only unless `--classifier-mode` is changed. In shadow
+mode it should not change completeness, success, retries, or nudges. Use the
+proxy logs and Rust smoke JSONL classifier fields to inspect classifier scores;
+use the Python oracle JSONL and reports to confirm execution behavior stayed
+unchanged.

@@ -1,9 +1,12 @@
 use super::error_tracker::ErrorTracker;
 use super::nudge::Nudge;
 use super::response_validator::{ResponseValidator, RetryNudgeFn};
+use super::scoring::{ToolCallScore, ToolCallScorer};
+use super::scoring_context::ScoringContext;
 use super::step_enforcer::{StepEnforcer, StepPrerequisite};
 use crate::clients::base::{LLMResponse, ToolCall};
 use indexmap::IndexSet;
+use std::sync::Arc;
 
 /// Action determined by Guardrails.check().
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +96,8 @@ pub struct Guardrails {
     pub step_enforcer: StepEnforcer,
     /// Designated set of terminal tools.
     pub terminal_tools: IndexSet<String>,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    last_scores: Vec<ToolCallScore>,
 }
 
 impl Guardrails {
@@ -129,12 +134,44 @@ impl Guardrails {
                 2,
             ),
             terminal_tools: terminal_set,
+            scorer: None,
+            last_scores: Vec::new(),
         }
+    }
+
+    /// Attach a tool-call scorer.
+    pub fn with_scorer(mut self, scorer: Arc<dyn ToolCallScorer>) -> Self {
+        self.scorer = Some(scorer);
+        self
+    }
+
+    /// Return classifier scores from the previous check.
+    pub fn last_scores(&self) -> &[ToolCallScore] {
+        &self.last_scores
     }
 
     /// Three-checkpoint pipeline: validation, step enforcement, then prerequisites.
     /// Returns CheckResult with action, tool_calls, nudge, and reason.
     pub fn check(&mut self, response: &LLMResponse) -> CheckResult {
+        self.check_inner(response, None)
+    }
+
+    /// Run the normal check and shadow-score successful deterministic calls.
+    pub fn check_with_scoring_context(
+        &mut self,
+        response: &LLMResponse,
+        scoring_context: &ScoringContext,
+    ) -> CheckResult {
+        self.check_inner(response, Some(scoring_context))
+    }
+
+    fn check_inner(
+        &mut self,
+        response: &LLMResponse,
+        scoring_context: Option<&ScoringContext>,
+    ) -> CheckResult {
+        self.last_scores.clear();
+
         // Checkpoint 1: Validation
         let validation = self.validator.validate(response);
         if validation.needs_retry {
@@ -172,6 +209,34 @@ impl Guardrails {
             return CheckResult::step_blocked(
                 prereq_check.nudge.expect("needs_nudge requires a nudge"),
             );
+        }
+
+        if let (Some(scorer), Some(ctx)) = (self.scorer.as_ref(), scoring_context) {
+            for call in &tool_calls {
+                match scorer.score(ctx, call) {
+                    Ok(score) => {
+                        tracing::info!(
+                            target: "forge.classifier",
+                            tool = %call.tool,
+                            label = %score.label.as_label(),
+                            confidence = score.confidence,
+                            action = %score.action.as_str(),
+                            latency_ms = score.latency_ms,
+                            model_version = %score.model_version,
+                            "tool-call classifier score"
+                        );
+                        self.last_scores.push(score);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "forge.classifier",
+                            tool = %call.tool,
+                            error = %err,
+                            "classifier scoring failed; allowing deterministic path"
+                        );
+                    }
+                }
+            }
         }
 
         CheckResult::execute(tool_calls)

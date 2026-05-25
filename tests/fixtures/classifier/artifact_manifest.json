@@ -1,0 +1,19 @@
+{
+  "artifact_schema_version": "toolcall-verifier-artifact/v1",
+  "model_kind": "text-classification-cross-encoder",
+  "base_model": "microsoft/deberta-v3-small",
+  "label_mode": "production",
+  "input_schema_version": "toolcall-verifier-input/v1",
+  "serializer": "serialize_state_v1",
+  "max_length": 1280,
+  "onnx_file": "model.onnx",
+  "quantized_onnx_file": "model_quantized.onnx",
+  "labels": [
+    "valid",
+    "wrong_tool_semantic",
+    "tool_not_needed",
+    "needs_clarification",
+    "deterministic_invalid"
+  ],
+  "created_unix": 1779735826
+}

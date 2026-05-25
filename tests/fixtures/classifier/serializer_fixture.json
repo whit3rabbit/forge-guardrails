@@ -1,0 +1,59 @@
+{
+  "input": {
+    "schema_version": "toolcall-verifier-input/v1",
+    "user_request": "Generate a sales report from the Q4 2024 dataset.",
+    "workflow_state": {
+      "required_steps": ["fetch_sales_data", "analyze_sales"],
+      "completed_steps": [],
+      "pending_steps": ["fetch_sales_data", "analyze_sales"],
+      "terminal_tools": ["report"],
+      "recent_errors": []
+    },
+    "available_tools": [
+      {
+        "name": "report",
+        "description": "Produce final report.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": ["summary"]
+        }
+      },
+      {
+        "name": "fetch_sales_data",
+        "description": "Fetch sales data.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "quarter": {
+              "type": "integer"
+            },
+            "year": {
+              "type": "integer"
+            }
+          },
+          "required": ["quarter", "year"]
+        }
+      },
+      {
+        "name": "analyze_sales",
+        "description": "Analyze sales.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "candidate_call": {
+      "name": "report",
+      "arguments": {
+        "summary": "Done."
+      }
+    }
+  },
+  "serialized": "SCHEMA_VERSION:\ntoolcall-verifier-input/v1\n\nUSER_REQUEST:\nGenerate a sales report from the Q4 2024 dataset.\n\nWORKFLOW_STATE:\nrequired_steps=['fetch_sales_data', 'analyze_sales']\ncompleted_steps=[]\npending_steps=['fetch_sales_data', 'analyze_sales']\nterminal_tools=['report']\nrecent_errors=[]\n\nAVAILABLE_TOOLS:\nreport: Produce final report.\nPARAMETERS: {\"properties\": {\"summary\": {\"type\": \"string\"}}, \"required\": [\"summary\"], \"type\": \"object\"}\n\nfetch_sales_data: Fetch sales data.\nPARAMETERS: {\"properties\": {\"quarter\": {\"type\": \"integer\"}, \"year\": {\"type\": \"integer\"}}, \"required\": [\"quarter\", \"year\"], \"type\": \"object\"}\n\nanalyze_sales: Analyze sales.\nPARAMETERS: {\"properties\": {}, \"type\": \"object\"}\n\nCANDIDATE_CALL:\n{\"arguments\": {\"summary\": \"Done.\"}, \"name\": \"report\"}"
+}

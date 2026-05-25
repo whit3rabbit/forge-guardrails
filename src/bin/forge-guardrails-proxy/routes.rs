@@ -7,9 +7,9 @@ use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    handle_anthropic_messages, handle_chat_completions, AnthropicHandlerError,
-    AnthropicHandlerResult, ContextManager, HandlerError, HandlerResult, LLMClient, NoCompact,
-    ServerManager,
+    handle_anthropic_messages_with_scorer, handle_chat_completions_with_scorer,
+    AnthropicHandlerError, AnthropicHandlerResult, ContextManager, HandlerError, HandlerResult,
+    LLMClient, NoCompact, ServerManager, ToolCallScorer,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
@@ -25,14 +25,16 @@ struct AppState {
     config: Arc<ProxyConfig>,
     client_factory: Arc<ClientFactory>,
     request_mutex: Arc<TokioMutex<()>>,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
 }
 
 pub(crate) async fn serve(
     config: ProxyConfig,
     client_factory: ClientFactory,
     managed_server: Option<ServerManager>,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
 ) -> Result<(), String> {
-    let result = serve_inner(config, client_factory).await;
+    let result = serve_inner(config, client_factory, scorer).await;
     if let Some(server) = managed_server {
         if let Err(err) = server.stop() {
             let stop_err = format!("failed to stop managed backend: {err}");
@@ -45,7 +47,11 @@ pub(crate) async fn serve(
     result
 }
 
-async fn serve_inner(config: ProxyConfig, client_factory: ClientFactory) -> Result<(), String> {
+async fn serve_inner(
+    config: ProxyConfig,
+    client_factory: ClientFactory,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+) -> Result<(), String> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|err| format!("invalid bind address: {err}"))?;
@@ -53,6 +59,7 @@ async fn serve_inner(config: ProxyConfig, client_factory: ClientFactory) -> Resu
         config: Arc::new(config.clone()),
         client_factory: Arc::new(client_factory),
         request_mutex: Arc::new(TokioMutex::new(())),
+        scorer,
     };
 
     eprintln!(
@@ -175,12 +182,13 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
         None
     };
 
-    match handle_chat_completions(
+    match handle_chat_completions_with_scorer(
         &parsed,
         &client,
         &context_manager,
         state.config.max_retries,
         state.config.rescue_enabled,
+        state.scorer.clone(),
     )
     .await
     {
@@ -218,7 +226,8 @@ async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Respo
     };
     let model = extract_model_from_value(&raw, &state.config.default_model);
     let client = Arc::new(state.client_factory.client_for_model(model));
-    anthropic_messages_with_raw_client(state.config, state.request_mutex, client, raw).await
+    anthropic_messages_with_raw_client(state.config, state.request_mutex, state.scorer, client, raw)
+        .await
 }
 
 #[cfg(test)]
@@ -246,12 +255,13 @@ async fn anthropic_messages_with_client<C: LLMClient + 'static>(
             );
         }
     };
-    anthropic_messages_with_raw_client(config, request_mutex, client, raw).await
+    anthropic_messages_with_raw_client(config, request_mutex, None, client, raw).await
 }
 
 async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
     config: Arc<ProxyConfig>,
     request_mutex: Arc<TokioMutex<()>>,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
     client: Arc<C>,
     raw: Value,
 ) -> Response {
@@ -280,13 +290,14 @@ async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
         None
     };
 
-    match handle_anthropic_messages(
+    match handle_anthropic_messages_with_scorer(
         &parsed,
         &raw,
         &client,
         &context_manager,
         config.max_retries,
         config.rescue_enabled,
+        scorer,
     )
     .await
     {
@@ -344,8 +355,9 @@ fn extract_model_from_value(value: &Value, default_model: &str) -> String {
 mod tests {
     use super::*;
     use forge_guardrails::{
-        ApiFormat, BackendError, ChunkStream, ChunkType, ContextDiscoveryError, LLMRequestOptions,
-        LLMResponse, SamplingParams, StreamChunk, StreamError, TextResponse, ToolSpec,
+        ApiFormat, BackendError, ChunkStream, ChunkType, ClassifierModelKind,
+        ContextDiscoveryError, LLMRequestOptions, LLMResponse, SamplingParams, ScorerMode,
+        StreamChunk, StreamError, TextResponse, ToolSpec,
     };
     use futures_util::StreamExt;
 
@@ -472,6 +484,9 @@ mod tests {
                 rescue_enabled: true,
                 serialize_requests: false,
                 verbose: false,
+                classifier_dir: None,
+                classifier_mode: ScorerMode::Shadow,
+                classifier_model: ClassifierModelKind::Quantized,
             }),
             client_factory: Arc::new(ClientFactory::DirectOpenAi {
                 base_url: upstream.url(),
@@ -479,6 +494,7 @@ mod tests {
                 context_tokens: 8192,
             }),
             request_mutex: Arc::new(TokioMutex::new(())),
+            scorer: None,
         };
         let body = Bytes::from(
             json!({
@@ -507,6 +523,9 @@ mod tests {
             rescue_enabled: true,
             serialize_requests: false,
             verbose: false,
+            classifier_dir: None,
+            classifier_mode: ScorerMode::Shadow,
+            classifier_model: ClassifierModelKind::Quantized,
         });
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let client = Arc::new(BinaryChannelStreamClient::new(rx));

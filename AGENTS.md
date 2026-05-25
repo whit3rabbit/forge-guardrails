@@ -207,6 +207,25 @@ Standard local release benchmark:
 scripts/run_local_eval.sh --suite release --runs 10
 ```
 
+ONNX classifier shadow comparison:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --output-dir target/local-eval/release-baseline
+
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classifier-dir target/classifier-artifacts/onnx \
+  --output-dir target/local-eval/release-onnx-shadow
+```
+
+Use `--download-classifier` to populate
+`target/classifier-artifacts/onnx` before a classifier run. The default
+classifier mode is `shadow`; keep it shadow-only for eval comparison unless the
+task explicitly asks to test advisory or enforcement behavior. ONNX classifier
+artifacts are local test data and must not be committed. Compare Python oracle
+reports for behavior, and inspect `rust_smoke.jsonl` plus proxy logs for
+classifier scores.
+
 `scripts/run_local_eval.sh` starts
 `scripts/start_llamaserver_proxy.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf`
 on proxy port `8081`, waits for `/health`, runs the Rust `forge-eval` smoke

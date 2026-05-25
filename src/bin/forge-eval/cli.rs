@@ -1,4 +1,6 @@
 use crate::ablation::parse_ablation;
+use forge_guardrails::{ClassifierModelKind, ScorerMode};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Cli {
@@ -15,6 +17,9 @@ pub(crate) struct Cli {
     pub(crate) mode: Option<String>,
     pub(crate) reasoning_budget: Option<String>,
     pub(crate) anthropic_api_key: Option<String>,
+    pub(crate) classifier_dir: Option<String>,
+    pub(crate) classifier_mode: String,
+    pub(crate) classifier_model: String,
 }
 
 pub(crate) fn parse_args<I>(args: I) -> Result<Cli, String>
@@ -35,6 +40,9 @@ where
         mode: None,
         reasoning_budget: None,
         anthropic_api_key: None,
+        classifier_dir: env_optional("FORGE_CLASSIFIER_DIR"),
+        classifier_mode: env_or("FORGE_CLASSIFIER_MODE", "shadow"),
+        classifier_model: env_classifier_model(),
     };
 
     let values: Vec<String> = args.into_iter().collect();
@@ -74,6 +82,15 @@ where
             "--anthropic-api-key" => {
                 cli.anthropic_api_key = Some(take_one(&values, &mut index, "--anthropic-api-key")?)
             }
+            "--classifier-dir" => {
+                cli.classifier_dir = Some(take_one(&values, &mut index, "--classifier-dir")?)
+            }
+            "--classifier-mode" => {
+                cli.classifier_mode = take_one(&values, &mut index, "--classifier-mode")?
+            }
+            "--classifier-model" => {
+                cli.classifier_model = take_one(&values, &mut index, "--classifier-model")?
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown flag: {flag}")),
             value => return Err(format!("unexpected argument: {value}")),
         }
@@ -87,6 +104,8 @@ where
         return Err("--num-ctx must be at least 1".to_string());
     }
     parse_ablation(&cli.ablation)?;
+    ScorerMode::from_str(&cli.classifier_mode)?;
+    ClassifierModelKind::from_str(&cli.classifier_model)?;
     Ok(cli)
 }
 
@@ -118,6 +137,34 @@ fn take_many(values: &[String], index: &mut usize, flag: &str) -> Result<Vec<Str
     }
 }
 
+fn env_optional(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    env_optional(key).unwrap_or_else(|| default.to_string())
+}
+
+fn env_classifier_model() -> String {
+    if let Some(value) = env_optional("FORGE_CLASSIFIER_MODEL") {
+        return value;
+    }
+    match std::env::var("FORGE_CLASSIFIER_USE_QUANTIZED") {
+        Ok(raw)
+            if matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ) =>
+        {
+            "full".to_string()
+        }
+        _ => "quantized".to_string(),
+    }
+}
+
 pub(crate) fn print_help() {
     println!(
         "forge-eval\n\n\
@@ -135,7 +182,10 @@ pub(crate) fn print_help() {
            --output PATH\n\
            --mode native|prompt|auto\n\
            --reasoning-budget TOKENS (metadata only; start local server with the same flag)\n\
-           --anthropic-api-key KEY"
+           --anthropic-api-key KEY\n\
+           --classifier-dir PATH\n\
+           --classifier-mode disabled|shadow|advisory|enforce (default: shadow)\n\
+           --classifier-model quantized|full (default: quantized)"
     );
 }
 
@@ -165,6 +215,9 @@ mod tests {
         );
         assert!(cli.stream);
         assert_eq!(cli.num_ctx, 8192);
+        assert_eq!(cli.classifier_dir, None);
+        assert_eq!(cli.classifier_mode, "shadow");
+        assert_eq!(cli.classifier_model, "quantized");
     }
 
     #[test]
@@ -183,5 +236,23 @@ mod tests {
     fn rejects_zero_num_ctx() {
         let err = parse_args(["--num-ctx".to_string(), "0".to_string()]).unwrap_err();
         assert!(err.contains("at least 1"));
+    }
+
+    #[test]
+    fn parses_classifier_flags() {
+        let cli = parse(&[
+            "--classifier-dir",
+            "target/classifier-artifacts/onnx",
+            "--classifier-mode",
+            "shadow",
+            "--classifier-model",
+            "quantized",
+        ]);
+        assert_eq!(
+            cli.classifier_dir.as_deref(),
+            Some("target/classifier-artifacts/onnx")
+        );
+        assert_eq!(cli.classifier_mode, "shadow");
+        assert_eq!(cli.classifier_model, "quantized");
     }
 }

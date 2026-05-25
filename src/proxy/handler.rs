@@ -12,7 +12,9 @@ use crate::context::manager::ContextManager;
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
 use crate::error::StreamError;
-use crate::guardrails::{StepCheck, StepEnforcer};
+use crate::guardrails::{
+    recent_errors_from_messages, ScoringContext, StepCheck, StepEnforcer, ToolCallScorer,
+};
 use crate::proxy::{
     extract_passthrough, extract_sampling, openai_to_messages, strip_respond_calls,
     text_response_to_openai_with_usage_details, tool_calls_to_openai_with_usage_details,
@@ -157,6 +159,29 @@ pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
     max_retries: i32,
     rescue_enabled: bool,
 ) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
+    handle_anthropic_messages_with_scorer(
+        body,
+        raw_body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        None,
+    )
+    .await
+}
+
+/// Handle /v1/messages with an optional shadow classifier scorer.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_anthropic_messages_with_scorer<C: LLMClient + 'static>(
+    body: &MessageCreateRequest,
+    raw_body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
     let config = anyllm_translate::TranslationConfig::default();
     let openai_req = anyllm_translate::translate_request(body, &config)
         .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
@@ -176,6 +201,7 @@ pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
         max_retries,
         rescue_enabled,
         Some(raw_body.clone()),
+        scorer,
     )
     .await
     .map_err(chat_error_to_anthropic)?
@@ -400,6 +426,27 @@ pub async fn handle_chat_completions<C: LLMClient + 'static>(
     max_retries: i32,
     rescue_enabled: bool,
 ) -> Result<HandlerResult, HandlerError> {
+    handle_chat_completions_with_scorer(
+        body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        None,
+    )
+    .await
+}
+
+/// Main handler with an optional shadow classifier scorer.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_chat_completions_with_scorer<C: LLMClient + 'static>(
+    body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+) -> Result<HandlerResult, HandlerError> {
     handle_chat_completions_impl(
         body,
         client,
@@ -407,6 +454,7 @@ pub async fn handle_chat_completions<C: LLMClient + 'static>(
         max_retries,
         rescue_enabled,
         None,
+        scorer,
     )
     .await
 }
@@ -419,6 +467,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     max_retries: i32,
     rescue_enabled: bool,
     inbound_anthropic_body: Option<Value>,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
 ) -> Result<HandlerResult, HandlerError> {
     let messages = body
         .get("messages")
@@ -571,6 +620,15 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
         let response = result.response;
         let Some(enforcer) = step_enforcer.as_mut() else {
+            if let LLMResponse::ToolCalls(tool_calls) = &response {
+                score_proxy_tool_calls(
+                    scorer.as_deref(),
+                    &internal_msgs,
+                    tool_calls,
+                    None,
+                    &tool_specs,
+                );
+            }
             break response;
         };
 
@@ -591,6 +649,13 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     }
                 }
 
+                score_proxy_tool_calls(
+                    scorer.as_deref(),
+                    &internal_msgs,
+                    &tool_calls,
+                    Some(enforcer),
+                    &tool_specs,
+                );
                 break LLMResponse::ToolCalls(tool_calls);
             }
             LLMResponse::Text(text) => {
@@ -812,6 +877,78 @@ fn synthetic_respond_tool_call(text: &TextResponse) -> ToolCall {
     let mut args = IndexMap::new();
     args.insert("message".to_string(), Value::String(text.content.clone()));
     ToolCall::new(RESPOND_TOOL_NAME, args)
+}
+
+fn score_proxy_tool_calls(
+    scorer: Option<&dyn ToolCallScorer>,
+    messages: &[Message],
+    tool_calls: &[ToolCall],
+    step_enforcer: Option<&StepEnforcer>,
+    tool_specs: &[ToolSpec],
+) {
+    let Some(scorer) = scorer else {
+        return;
+    };
+    let user_request = latest_proxy_user_request(messages).unwrap_or_default();
+    let recent_errors = recent_errors_from_messages(messages, 8);
+    let ctx = match step_enforcer {
+        Some(enforcer) => ScoringContext::from_step_enforcer(
+            user_request,
+            enforcer,
+            &enforcer.terminal_tools,
+            recent_errors,
+            tool_specs,
+        ),
+        None => ScoringContext::new(
+            user_request,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            proxy_terminal_tools_for_scoring(tool_specs),
+            recent_errors,
+            tool_specs,
+        ),
+    };
+
+    for call in tool_calls {
+        match scorer.score(&ctx, call) {
+            Ok(score) => {
+                tracing::info!(
+                    target: "forge.classifier",
+                    label = ?score.label,
+                    confidence = score.confidence,
+                    action = ?score.action,
+                    latency_ms = score.latency_ms,
+                    tool = %call.tool,
+                    "tool-call classifier score"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "forge.classifier",
+                    error = %err,
+                    tool = %call.tool,
+                    "classifier scoring failed; allowing deterministic path"
+                );
+            }
+        }
+    }
+}
+
+fn latest_proxy_user_request(messages: &[Message]) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.content.as_str())
+}
+
+fn proxy_terminal_tools_for_scoring(tool_specs: &[ToolSpec]) -> Vec<String> {
+    tool_specs
+        .iter()
+        .filter(|spec| spec.name == RESPOND_TOOL_NAME)
+        .map(|spec| spec.name.clone())
+        .collect()
 }
 
 fn emit_proxy_step_nudge_or_error(

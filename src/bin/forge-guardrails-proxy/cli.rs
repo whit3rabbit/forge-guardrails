@@ -102,6 +102,18 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "N")]
     pub(crate) max_retries: Option<i32>,
 
+    /// Local classifier artifact directory.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) classifier_dir: Option<String>,
+
+    /// Classifier mode.
+    #[arg(long, value_name = "disabled|shadow|advisory|enforce")]
+    pub(crate) classifier_mode: Option<String>,
+
+    /// Classifier ONNX model file.
+    #[arg(long, value_name = "quantized|full")]
+    pub(crate) classifier_model: Option<String>,
+
     /// Disable rescue parsing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_rescue: bool,
@@ -205,6 +217,9 @@ mod tests {
         assert!(!cli.serialize);
         assert!(!cli.no_serialize);
         assert!(!cli.no_rescue);
+        assert_eq!(cli.classifier_dir, None);
+        assert_eq!(cli.classifier_mode, None);
+        assert_eq!(cli.classifier_model, None);
     }
 
     #[test]
@@ -305,6 +320,24 @@ mod tests {
             cli.llamafile_runtime.as_deref(),
             Some("/opt/forge/bin/llamafile")
         );
+    }
+
+    #[test]
+    fn classifier_flags_are_parsed() {
+        let cli = parse(&[
+            "--classifier-dir",
+            "target/classifier-artifacts/onnx",
+            "--classifier-mode",
+            "shadow",
+            "--classifier-model",
+            "quantized",
+        ]);
+        assert_eq!(
+            cli.classifier_dir.as_deref(),
+            Some("target/classifier-artifacts/onnx")
+        );
+        assert_eq!(cli.classifier_mode.as_deref(), Some("shadow"));
+        assert_eq!(cli.classifier_model.as_deref(), Some("quantized"));
     }
 
     #[test]

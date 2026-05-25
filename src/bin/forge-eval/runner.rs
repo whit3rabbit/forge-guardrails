@@ -2,14 +2,16 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use forge_guardrails::{
-    CompactEvent, ContextManager, LLMClient, Message, NoCompact, StreamChunk, WorkflowRunner,
+    ClassifierModelKind, CompactEvent, ContextManager, LLMClient, Message, NoCompact, ScorerMode,
+    StreamChunk, ToolCall, ToolCallScore, ToolCallScoreFn, ToolCallScorer, WorkflowRunner,
 };
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::ablation::parse_ablation;
 use crate::cli::Cli;
 use crate::counting_client::CountingClient;
-use crate::report::{row_for_result, write_row};
+use crate::report::{row_for_result, write_row, ClassifierReport};
 use crate::scenarios::build_scenario;
 
 pub(crate) async fn run_with_client<C: LLMClient + 'static>(
@@ -28,6 +30,7 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
         cli.scenarios.clone()
     };
     let ablation = parse_ablation(&cli.ablation)?;
+    let classifier = build_classifier(cli)?;
 
     for scenario_name in &scenario_names {
         for run_idx in 1..=cli.runs {
@@ -48,7 +51,8 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 None,
                 None,
             )));
-            let runner = WorkflowRunner::new(
+            let classifier_scores: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+            let mut runner = WorkflowRunner::new(
                 client.clone(),
                 context,
                 15,
@@ -65,6 +69,17 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 ablation.rescue_enabled,
                 None,
             );
+            if let Some(scorer) = classifier.clone() {
+                let scores_cb = classifier_scores.clone();
+                let callback: Arc<ToolCallScoreFn> =
+                    Arc::new(move |call: &ToolCall, score: &ToolCallScore| {
+                        scores_cb
+                            .lock()
+                            .expect("classifier score capture lock")
+                            .push(classifier_score_json(call, score));
+                    });
+                runner = runner.with_tool_call_scorer(scorer, Some(callback));
+            }
 
             let before_calls = client.calls();
             let start = Instant::now();
@@ -75,6 +90,14 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
             let iterations = client.calls() - before_calls;
             let messages = emitted.lock().expect("message capture lock").clone();
             let compaction_events = compactions.lock().expect("compaction capture lock").len();
+            let classifier_scores = classifier_scores
+                .lock()
+                .expect("classifier score capture lock")
+                .clone();
+            let classifier_report = classifier.as_ref().map(|_| ClassifierReport {
+                mode: cli.classifier_mode.as_str(),
+                scores: classifier_scores.as_slice(),
+            });
             let row = row_for_result(
                 &cli.backend,
                 model,
@@ -87,10 +110,53 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 result,
                 &messages,
                 compaction_events,
+                classifier_report,
             );
             write_row(cli.output.as_deref(), &row)?;
         }
     }
 
     Ok(())
+}
+
+fn build_classifier(cli: &Cli) -> Result<Option<Arc<dyn ToolCallScorer>>, String> {
+    let mode = cli
+        .classifier_mode
+        .parse::<ScorerMode>()
+        .map_err(|err| err.to_string())?;
+    if mode == ScorerMode::Disabled {
+        return Ok(None);
+    }
+    let Some(dir) = cli.classifier_dir.as_deref() else {
+        return Ok(None);
+    };
+    let model_kind = cli
+        .classifier_model
+        .parse::<ClassifierModelKind>()
+        .map_err(|err| err.to_string())?;
+
+    #[cfg(feature = "classifier")]
+    {
+        let scorer =
+            forge_guardrails::OnnxToolCallScorer::from_dir_with_model(dir, Some(mode), model_kind)
+                .map_err(|err| format!("failed to load classifier artifact: {err}"))?;
+        Ok(Some(Arc::new(scorer) as Arc<dyn ToolCallScorer>))
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = (dir, model_kind);
+        Err("classifier eval requires building with --features classifier".to_string())
+    }
+}
+
+fn classifier_score_json(call: &ToolCall, score: &ToolCallScore) -> Value {
+    json!({
+        "tool": call.tool.as_str(),
+        "label": score.label.as_label().as_ref(),
+        "confidence": score.confidence,
+        "action": score.action.as_str(),
+        "latency_ms": score.latency_ms,
+        "model_version": score.model_version.as_str(),
+    })
 }

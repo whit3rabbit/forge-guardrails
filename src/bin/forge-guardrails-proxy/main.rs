@@ -33,5 +33,6 @@ fn run_main(cli: Cli) -> Result<(), String> {
         startup.config,
         startup.client_factory,
         startup.managed_server,
+        startup.scorer,
     ))
 }

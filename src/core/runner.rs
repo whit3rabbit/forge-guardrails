@@ -16,7 +16,8 @@ use crate::error::{
     ToolError, ToolExecutionError, WorkflowCancelledError,
 };
 use crate::guardrails::{
-    ErrorTracker, ResponseValidator, RetryNudgeFn, StepEnforcer, StepPrerequisite,
+    recent_errors_from_messages, ErrorTracker, ResponseValidator, RetryNudgeFn, ScoringContext,
+    StepEnforcer, StepPrerequisite, ToolCallScore, ToolCallScorer,
 };
 use crate::prompts::nudges;
 use indexmap::{IndexMap, IndexSet};
@@ -29,6 +30,9 @@ pub type OnMessageFn = Box<dyn Fn(&Message) + Send + Sync>;
 
 /// Type alias for the runner-level dynamic nudge function.
 pub type NudgeCallbackFn = dyn Fn(&str) -> String + Send + Sync;
+
+/// Callback type for classifier score events during a run.
+pub type ToolCallScoreFn = dyn Fn(&ToolCall, &ToolCallScore) + Send + Sync;
 
 /// Workflow runner orchestrating multi-turn LLM tool-calling loops.
 ///
@@ -45,6 +49,8 @@ pub struct WorkflowRunner<C: LLMClient> {
     on_message: Option<Arc<OnMessageFn>>,
     rescue_enabled: bool,
     retry_nudge_fn: Option<Arc<NudgeCallbackFn>>,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    on_tool_call_score: Option<Arc<ToolCallScoreFn>>,
 }
 
 struct RunnerGuardrails {
@@ -122,6 +128,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             on_message: on_message.map(Arc::new),
             rescue_enabled,
             retry_nudge_fn,
+            scorer: None,
+            on_tool_call_score: None,
         }
     }
 
@@ -150,7 +158,20 @@ impl<C: LLMClient> WorkflowRunner<C> {
             on_message: on_message.map(Arc::new),
             rescue_enabled,
             retry_nudge_fn,
+            scorer: None,
+            on_tool_call_score: None,
         }
+    }
+
+    /// Attach a tool-call scorer that runs after deterministic checks pass.
+    pub fn with_tool_call_scorer(
+        mut self,
+        scorer: Arc<dyn ToolCallScorer>,
+        on_tool_call_score: Option<Arc<ToolCallScoreFn>>,
+    ) -> Self {
+        self.scorer = Some(scorer);
+        self.on_tool_call_score = on_tool_call_score;
+        self
     }
 
     fn build_guardrails(&self, workflow: &Workflow) -> RunnerGuardrails {
@@ -417,6 +438,14 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 continue;
             }
 
+            self.score_tool_calls(
+                user_message,
+                &messages,
+                &tool_calls,
+                &guardrails.step_enforcer,
+                &tool_specs,
+            );
+
             let calls = self.emit_assistant_tool_calls(
                 tool_calls,
                 &mut messages,
@@ -447,6 +476,53 @@ impl<C: LLMClient> WorkflowRunner<C> {
             completed,
             pending,
         )))
+    }
+
+    fn score_tool_calls(
+        &self,
+        fallback_user_message: &str,
+        messages: &[Message],
+        tool_calls: &[ToolCall],
+        step_enforcer: &StepEnforcer,
+        tool_specs: &[ToolSpec],
+    ) {
+        let Some(scorer) = self.scorer.as_ref() else {
+            return;
+        };
+        let user_request = latest_user_request(messages).unwrap_or(fallback_user_message);
+        let ctx = ScoringContext::from_step_enforcer(
+            user_request,
+            step_enforcer,
+            &step_enforcer.terminal_tools,
+            recent_errors_from_messages(messages, 8),
+            tool_specs,
+        );
+        for call in tool_calls {
+            match scorer.score(&ctx, call) {
+                Ok(score) => {
+                    tracing::info!(
+                        target: "forge.classifier",
+                        label = ?score.label,
+                        confidence = score.confidence,
+                        action = ?score.action,
+                        latency_ms = score.latency_ms,
+                        tool = %call.tool,
+                        "tool-call classifier score"
+                    );
+                    if let Some(callback) = &self.on_tool_call_score {
+                        callback(call, &score);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "forge.classifier",
+                        error = %err,
+                        tool = %call.tool,
+                        "classifier scoring failed; allowing deterministic path"
+                    );
+                }
+            }
+        }
     }
 
     fn emit_guardrail_nudge_results(
@@ -693,6 +769,14 @@ impl<C: LLMClient> WorkflowRunner<C> {
             cb(msg);
         }
     }
+}
+
+fn latest_user_request(messages: &[Message]) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.content.as_str())
 }
 
 #[cfg(test)]

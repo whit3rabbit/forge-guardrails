@@ -1,0 +1,32 @@
+{
+  "schema_version": "toolcall-verifier-thresholds/v1",
+  "mode": "shadow",
+  "default_action": "allow",
+  "labels": {
+    "valid": {
+      "action": "allow",
+      "advisory_min_confidence": 0.0,
+      "enforce_min_confidence": 1.01
+    },
+    "wrong_tool_semantic": {
+      "action": "advisory_then_enforce_after_eval",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
+    },
+    "tool_not_needed": {
+      "action": "advisory_then_enforce_after_eval",
+      "advisory_min_confidence": 0.8,
+      "enforce_min_confidence": 0.95
+    },
+    "needs_clarification": {
+      "action": "advisory_then_enforce_after_eval",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
+    },
+    "deterministic_invalid": {
+      "action": "deterministic_only",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
+    }
+  }
+}

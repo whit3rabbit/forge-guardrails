@@ -1,6 +1,8 @@
 use std::env;
+use std::str::FromStr;
 
 use crate::cli::Cli;
+use forge_guardrails::{ClassifierModelKind, ScorerMode};
 
 pub(crate) const DEFAULT_PROXY_PORT: u16 = 8081;
 pub(crate) const DEFAULT_BACKEND_PORT: u16 = 8080;
@@ -22,6 +24,9 @@ pub(crate) struct ProxyConfig {
     pub(crate) rescue_enabled: bool,
     pub(crate) serialize_requests: bool,
     pub(crate) verbose: bool,
+    pub(crate) classifier_dir: Option<String>,
+    pub(crate) classifier_mode: ScorerMode,
+    pub(crate) classifier_model: ClassifierModelKind,
 }
 
 impl ProxyConfig {
@@ -47,6 +52,9 @@ impl ProxyConfig {
             rescue_enabled: env_bool("FORGE_RESCUE_ENABLED", true)?,
             serialize_requests: env_bool("FORGE_SERIALIZE_REQUESTS", false)?,
             verbose: false,
+            classifier_dir: env_optional_string("FORGE_CLASSIFIER_DIR"),
+            classifier_mode: env_scoring_mode("FORGE_CLASSIFIER_MODE", ScorerMode::Shadow)?,
+            classifier_model: env_classifier_model()?,
         })
     }
 }
@@ -78,7 +86,36 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     if cli.verbose {
         config.verbose = true;
     }
+    if let Some(dir) = cli.classifier_dir.as_deref() {
+        config.classifier_dir = Some(validate_nonempty(dir, "--classifier-dir")?.to_string());
+    }
+    if let Some(mode) = cli.classifier_mode.as_deref() {
+        config.classifier_mode = ScorerMode::from_str(mode)?;
+    }
+    if let Some(model) = cli.classifier_model.as_deref() {
+        config.classifier_model = ClassifierModelKind::from_str(model)?;
+    }
     Ok(())
+}
+
+pub(crate) fn classifier_settings_from_env_cli(
+    cli: &Cli,
+) -> Result<(Option<String>, ScorerMode, ClassifierModelKind), String> {
+    let mut dir = env_optional_string("FORGE_CLASSIFIER_DIR");
+    let mut mode = env_scoring_mode("FORGE_CLASSIFIER_MODE", ScorerMode::Shadow)?;
+    let mut model = env_classifier_model()?;
+
+    if let Some(raw) = cli.classifier_dir.as_deref() {
+        dir = Some(validate_nonempty(raw, "--classifier-dir")?.to_string());
+    }
+    if let Some(raw) = cli.classifier_mode.as_deref() {
+        mode = ScorerMode::from_str(raw)?;
+    }
+    if let Some(raw) = cli.classifier_model.as_deref() {
+        model = ClassifierModelKind::from_str(raw)?;
+    }
+
+    Ok((dir, mode, model))
 }
 
 pub(crate) fn cli_host(cli: &Cli) -> Result<String, String> {
@@ -202,6 +239,36 @@ fn env_string(keys: &[&str], default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+fn env_optional_string(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_scoring_mode(key: &str, default: ScorerMode) -> Result<ScorerMode, String> {
+    match env_optional_string(key) {
+        Some(raw) => ScorerMode::from_str(&raw),
+        None => Ok(default),
+    }
+}
+
+fn env_classifier_model() -> Result<ClassifierModelKind, String> {
+    if let Some(raw) = env_optional_string("FORGE_CLASSIFIER_MODEL") {
+        return ClassifierModelKind::from_str(&raw);
+    }
+    match env::var("FORGE_CLASSIFIER_USE_QUANTIZED") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(ClassifierModelKind::Quantized),
+            "0" | "false" | "no" | "off" => Ok(ClassifierModelKind::Full),
+            _ => Err(format!(
+                "FORGE_CLASSIFIER_USE_QUANTIZED must be true or false, got '{raw}'"
+            )),
+        },
+        Err(_) => Ok(ClassifierModelKind::Quantized),
+    }
+}
+
 fn env_u16(keys: &[&str], default: u16, label: &str) -> Result<u16, String> {
     match keys.iter().find_map(|key| env::var(key).ok()) {
         Some(raw) => {
@@ -279,6 +346,9 @@ mod tests {
             rescue_enabled: true,
             serialize_requests: false,
             verbose: false,
+            classifier_dir: None,
+            classifier_mode: ScorerMode::Shadow,
+            classifier_model: ClassifierModelKind::Quantized,
         }
     }
 
@@ -309,6 +379,9 @@ mod tests {
         assert!(!config.rescue_enabled);
         assert!(config.serialize_requests);
         assert!(config.verbose);
+        assert_eq!(config.classifier_dir, None);
+        assert_eq!(config.classifier_mode, ScorerMode::Shadow);
+        assert_eq!(config.classifier_model, ClassifierModelKind::Quantized);
     }
 
     #[test]

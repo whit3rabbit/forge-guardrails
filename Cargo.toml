@@ -5,12 +5,22 @@ edition = "2021"
 license = "MIT"
 description = "Foundation types for an LLM-agent workflow framework"
 
+[features]
+default = []
+classifier = [
+    "dep:ort",
+    "dep:tokenizers",
+    "dep:hf-hub",
+    "dep:ndarray",
+]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 indexmap = { version = "2", features = ["serde"] }
 log = "0.4"
+tracing = "0.1"
 futures-core = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "sync", "signal", "time"] }
@@ -25,6 +35,15 @@ anyllm_proxy = "0.9.6"
 anyllm_providers = "0.9.6"
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.29", features = ["signal", "process"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "api-24", "tls-rustls"], optional = true }
+tokenizers = { version = "0.23.1", optional = true }
+hf-hub = { version = "1.0.0-rc.1", optional = true, features = ["blocking", "rustls-tls"] }
+ndarray = { version = "0.17.2", optional = true }
+
+[[bin]]
+name = "download-classifier"
+path = "src/bin/download-classifier.rs"
+required-features = ["classifier"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }

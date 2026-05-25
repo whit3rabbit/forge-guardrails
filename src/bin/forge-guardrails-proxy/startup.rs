@@ -1,17 +1,20 @@
 use std::path::Path;
+use std::sync::Arc;
 
-use forge_guardrails::{AnyLlmRuntimeClient, LLMClient, LlamafileClient, ServerManager};
+use forge_guardrails::{
+    AnyLlmRuntimeClient, LLMClient, LlamafileClient, ScorerMode, ServerManager, ToolCallScorer,
+};
 use reqwest::Url;
 
 use crate::cli::{Cli, CliBackend, CliBackendProtocol, CliMode};
 use crate::client::ClientFactory;
 use crate::config::ProxyConfig;
 use crate::config::{
-    apply_env_cli_overrides, cli_host, cli_max_retries, cli_model, cli_port,
-    normalized_extra_flags, require_cli_gguf, require_cli_llamafile_runtime, require_cli_model,
-    resolve_serialize, validate_nonempty, validate_nonzero_u16, validate_optional_positive_i64,
-    validate_positive_i64, DEFAULT_ENV_CONTEXT_TOKENS, DEFAULT_EXTERNAL_CONTEXT_TOKENS,
-    DEFAULT_EXTERNAL_MODEL,
+    apply_env_cli_overrides, classifier_settings_from_env_cli, cli_host, cli_max_retries,
+    cli_model, cli_port, normalized_extra_flags, require_cli_gguf, require_cli_llamafile_runtime,
+    require_cli_model, resolve_serialize, validate_nonempty, validate_nonzero_u16,
+    validate_optional_positive_i64, validate_positive_i64, DEFAULT_ENV_CONTEXT_TOKENS,
+    DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_EXTERNAL_MODEL,
 };
 use crate::upstream::{
     direct_anthropic_api_key, direct_local_openai_upstream_from_env, direct_openai_api_key,
@@ -21,17 +24,20 @@ pub(crate) struct Startup {
     pub(crate) config: ProxyConfig,
     pub(crate) client_factory: ClientFactory,
     pub(crate) managed_server: Option<ServerManager>,
+    pub(crate) scorer: Option<Arc<dyn ToolCallScorer>>,
 }
 
 pub(crate) fn build_startup(cli: Cli) -> Result<Startup, String> {
-    if cli.backend_url.is_none() && cli.backend.is_none() {
-        return build_env_startup(&cli);
-    }
-    if let Some(backend_url) = cli.backend_url.as_deref() {
-        return build_external_startup(&cli, backend_url);
-    }
-    let backend = cli.backend.expect("backend checked above");
-    build_managed_startup(&cli, backend)
+    let mut startup = if cli.backend_url.is_none() && cli.backend.is_none() {
+        build_env_startup(&cli)?
+    } else if let Some(backend_url) = cli.backend_url.as_deref() {
+        build_external_startup(&cli, backend_url)?
+    } else {
+        let backend = cli.backend.expect("backend checked above");
+        build_managed_startup(&cli, backend)?
+    };
+    startup.scorer = build_classifier_scorer(&startup.config)?;
+    Ok(startup)
 }
 
 fn build_env_startup(cli: &Cli) -> Result<Startup, String> {
@@ -59,6 +65,7 @@ fn build_env_startup(cli: &Cli) -> Result<Startup, String> {
         config,
         client_factory,
         managed_server: None,
+        scorer: None,
     })
 }
 
@@ -86,6 +93,8 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
         None if cli.backend_protocol == CliBackendProtocol::Anthropic => DEFAULT_ENV_CONTEXT_TOKENS,
         None => discover_external_context_tokens(&base_url),
     };
+    let (classifier_dir, classifier_mode, classifier_model) =
+        classifier_settings_from_env_cli(cli)?;
     let config = ProxyConfig {
         host: cli_host(cli)?,
         port: cli_port(cli)?,
@@ -95,6 +104,9 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
         rescue_enabled: !cli.no_rescue,
         serialize_requests: resolve_serialize(cli, false),
         verbose: cli.verbose,
+        classifier_dir,
+        classifier_mode,
+        classifier_model,
     };
     let client_factory = match (cli.backend_protocol, cli.mode) {
         (CliBackendProtocol::Anthropic, _) => ClientFactory::DirectAnthropic {
@@ -117,6 +129,7 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
         config,
         client_factory,
         managed_server: None,
+        scorer: None,
     })
 }
 
@@ -139,6 +152,8 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
     let proxy_port = cli_port(cli)?;
     let max_retries = cli_max_retries(cli)?;
     let serialize_requests = resolve_serialize(cli, true);
+    let (classifier_dir, classifier_mode, classifier_model) =
+        classifier_settings_from_env_cli(cli)?;
 
     let (default_model, client_factory, managed_server, context_tokens) = match backend {
         CliBackend::Ollama => {
@@ -269,13 +284,45 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
         rescue_enabled: !cli.no_rescue,
         serialize_requests,
         verbose: cli.verbose,
+        classifier_dir,
+        classifier_mode,
+        classifier_model,
     };
 
     Ok(Startup {
         config,
         client_factory,
         managed_server,
+        scorer: None,
     })
+}
+
+fn build_classifier_scorer(
+    config: &ProxyConfig,
+) -> Result<Option<Arc<dyn ToolCallScorer>>, String> {
+    if config.classifier_mode == ScorerMode::Disabled {
+        return Ok(None);
+    }
+    let Some(dir) = config.classifier_dir.as_deref() else {
+        return Ok(None);
+    };
+
+    #[cfg(feature = "classifier")]
+    {
+        let scorer = forge_guardrails::OnnxToolCallScorer::from_dir_with_model(
+            dir,
+            Some(config.classifier_mode),
+            config.classifier_model,
+        )
+        .map_err(|err| format!("failed to load classifier artifact: {err}"))?;
+        Ok(Some(Arc::new(scorer) as Arc<dyn ToolCallScorer>))
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = dir;
+        Err("classifier support requires building with --features classifier".to_string())
+    }
 }
 
 fn managed_extra_flags(cli: &Cli) -> Result<Vec<String>, String> {
