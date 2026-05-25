@@ -305,6 +305,51 @@ class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["eval_target_backend"], "openai-proxy")
         self.assertEqual(row["proxy_terminal_source"], "text")
 
+    def test_result_row_can_include_proxy_backend_mode(self) -> None:
+        scenario = scenario_by_name("tool_selection")
+        result = proxy_eval.ProxyRunResult(
+            scenario_name="tool_selection",
+            completeness=True,
+            iterations_used=3,
+            terminal_args={"answer": "Alice has read, write, and admin permissions."},
+            accuracy=True,
+            final_text="Alice has read, write, and admin permissions.",
+            proxy_terminal_source="text",
+        )
+
+        row = proxy_eval._result_row(
+            result,
+            scenario,
+            1,
+            "Ministral-3-8B-Instruct-2512-Q8_0",
+            True,
+            "reforged",
+            8192,
+            "llamaserver",
+            "proxy",
+            "openai-proxy",
+            "native",
+        )
+
+        self.assertEqual(row["proxy_backend_mode"], "native")
+
+    def test_proxy_terminal_tools_omit_respond_when_real_terminal_exists(self) -> None:
+        scenario = scenario_by_name("error_recovery")
+
+        self.assertEqual(
+            proxy_eval._proxy_terminal_tools(scenario.workflow),
+            ["summarize"],
+        )
+
+    def test_proxy_terminal_tools_keep_respond_without_real_terminal(self) -> None:
+        class WorkflowStub:
+            terminal_tools = {"respond"}
+
+        self.assertEqual(
+            proxy_eval._proxy_terminal_tools(WorkflowStub()),
+            ["respond"],
+        )
+
     def test_terminal_redaction_has_specific_failure_classification(self) -> None:
         result = proxy_eval.ProxyRunResult(
             scenario_name="error_recovery",
@@ -389,6 +434,54 @@ rel=relevance_detection, b2s=basic_2step
                     published.name,
                     "--model",
                     model,
+                    "--local-model",
+                    model,
+                ]
+                try:
+                    stdout = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        status = compare_eval.main()
+                finally:
+                    sys.argv = old_argv
+
+        self.assertEqual(status, 0)
+        self.assertIn("Published comparison passed", stdout.getvalue())
+        self.assertNotIn("Published comparison skipped", stdout.getvalue())
+
+    def test_published_compare_allows_native_proxy_rows_for_native_baseline(self) -> None:
+        model = "Ministral-3-8B-Instruct-2512-Q8_0"
+        published_text = f"""
+Model/Backend Scr Acc Cmp Eff Wst Spd N b2s
+{model} LS/N [reforged] 100.0% 100.0% 100.0% 100% 0.0 1.0s 1 100
+rel=relevance_detection, b2s=basic_2step
+"""
+        row = {
+            "scenario": "basic_2step",
+            "model": model,
+            "ablation": "reforged",
+            "backend": "llamaserver",
+            "mode": "proxy",
+            "eval_target_backend": "openai-proxy",
+            "proxy_backend_mode": "native",
+            "success": True,
+            "completeness": True,
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".md") as published:
+            published.write(published_text)
+            published.flush()
+            with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as handle:
+                handle.write(json.dumps(row) + "\n")
+                handle.flush()
+                old_argv = sys.argv
+                sys.argv = [
+                    "compare_published_eval.py",
+                    handle.name,
+                    "--published",
+                    published.name,
+                    "--model",
+                    model,
+                    "--backend-mode",
+                    "LS/N",
                     "--local-model",
                     model,
                 ]

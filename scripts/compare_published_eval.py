@@ -179,7 +179,15 @@ def main() -> int:
         for row in selected
         if row.get("mode") == "proxy" or row.get("eval_target_backend") == "openai-proxy"
     ]
-    if proxy_rows and published.backend_mode == "LS/N" and not args.force_proxy_compare:
+    native_proxy_rows = proxy_rows and all(
+        row.get("proxy_backend_mode") == "native" for row in proxy_rows
+    )
+    if (
+        proxy_rows
+        and published.backend_mode == "LS/N"
+        and not native_proxy_rows
+        and not args.force_proxy_compare
+    ):
         proxy_modes = sorted({
             f"{row.get('backend', 'unknown')}/{row.get('mode', 'unknown')}"
             for row in proxy_rows

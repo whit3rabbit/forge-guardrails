@@ -58,6 +58,7 @@ def _print_early_help() -> None:
     parser.add_argument("--budget-tokens", type=int)
     parser.add_argument("--backend-label", default="openai-proxy")
     parser.add_argument("--mode-label", default="proxy")
+    parser.add_argument("--proxy-backend-mode", choices=["native", "prompt"])
     parser.add_argument("--eval-target-backend", default="openai-proxy")
     parser.add_argument("--no-recommended-sampling", action="store_true")
     parser.add_argument("--no-history", action="store_true")
@@ -382,7 +383,10 @@ def _proxy_tool_specs(workflow: Workflow) -> list[ToolSpec]:
 
 
 def _proxy_terminal_tools(workflow: Workflow) -> list[str]:
-    return sorted(set(workflow.terminal_tools) | {"respond"})
+    terminal_tools = set(workflow.terminal_tools)
+    if any(tool != "respond" for tool in terminal_tools):
+        return sorted(tool for tool in terminal_tools if tool != "respond")
+    return sorted(terminal_tools | {"respond"})
 
 
 def _openai_tool_call(call: ProxyToolCall) -> dict[str, Any]:
@@ -666,6 +670,7 @@ def _result_row(
     backend_label: str,
     mode_label: str,
     eval_target_backend: str,
+    proxy_backend_mode: str | None = None,
 ) -> dict[str, Any]:
     required_step_mismatch = not result.proxy_required_steps_satisfied
     success = bool(
@@ -722,6 +727,8 @@ def _result_row(
         "wasted_calls": wasted_calls,
         "compaction_events": 0,
     }
+    if proxy_backend_mode:
+        row["proxy_backend_mode"] = proxy_backend_mode
     if result.input_tokens or result.output_tokens:
         row["input_tokens"] = result.input_tokens
         row["output_tokens"] = result.output_tokens
@@ -775,6 +782,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 args.backend_label,
                 args.mode_label,
                 args.eval_target_backend,
+                args.proxy_backend_mode,
             )
             line = json.dumps(row, separators=(",", ":"))
             if output:
@@ -818,6 +826,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--budget-tokens", type=int)
     parser.add_argument("--backend-label", default="openai-proxy")
     parser.add_argument("--mode-label", default="proxy")
+    parser.add_argument("--proxy-backend-mode", choices=["native", "prompt"])
     parser.add_argument("--eval-target-backend", default="openai-proxy")
     parser.add_argument("--no-recommended-sampling", action="store_true")
     parser.add_argument("--no-history", action="store_true")

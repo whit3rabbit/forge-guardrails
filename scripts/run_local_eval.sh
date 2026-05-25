@@ -6,7 +6,7 @@ DEFAULT_PROXY_PORT="8081"
 DEFAULT_BACKEND_PORT="8080"
 DEFAULT_BUDGET_TOKENS="8192"
 DEFAULT_MODEL="Ministral-3-8B-Instruct-2512-Q8_0"
-DEFAULT_PUBLISHED_BACKEND_MODE="LS/P"
+DEFAULT_PROXY_BACKEND_MODE="native"
 DEFAULT_MANAGED_BACKEND="llamaserver"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -17,7 +17,9 @@ RUNS="1"
 GGUF="$DEFAULT_GGUF"
 MODEL="$DEFAULT_MODEL"
 PUBLISHED_MODEL=""
-PUBLISHED_BACKEND_MODE="$DEFAULT_PUBLISHED_BACKEND_MODE"
+PUBLISHED_BACKEND_MODE=""
+PUBLISHED_BACKEND_MODE_SET=0
+PROXY_BACKEND_MODE="$DEFAULT_PROXY_BACKEND_MODE"
 SKIP_PUBLISHED_COMPARE=0
 FORCE_PUBLISHED_COMPARE=0
 INCLUDE_COMPACTION_CHAIN=0
@@ -49,7 +51,9 @@ Options:
   --output-dir DIR          Output directory (default: target/local-eval/<timestamp>)
   --model MODEL             Model name sent to the proxy (default: $DEFAULT_MODEL)
   --published-model MODEL   Published baseline model (default: --model)
-  --published-mode LS/N|LS/P Published baseline row (default: $DEFAULT_PUBLISHED_BACKEND_MODE)
+  --published-mode LS/N|LS/P Published baseline row (default: LS/N for native, LS/P for prompt)
+  --proxy-backend-mode native|prompt
+                            Backend tool-call mode for managed proxy (default: $DEFAULT_PROXY_BACKEND_MODE)
   --skip-published-compare  Do not compare release results to published results
   --force-published-compare Compare proxy rows to direct published rows anyway
   --include-compaction-chain Also run compaction-chain scenarios after published scenarios
@@ -203,6 +207,7 @@ start_proxy() {
   FORGE_PROXY_PORT="$PROXY_PORT" \
     FORGE_BACKEND_PORT="$BACKEND_PORT" \
     "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" \
+      --mode "$PROXY_BACKEND_MODE" \
       --budget-mode manual \
       --budget-tokens "$budget" \
       >"$CURRENT_PROXY_LOG" 2>&1 &
@@ -252,6 +257,7 @@ run_python_oracle() {
     --budget-tokens "$budget"
     --backend-label "$DEFAULT_MANAGED_BACKEND"
     --mode-label proxy
+    --proxy-backend-mode "$PROXY_BACKEND_MODE"
     --eval-target-backend openai-proxy
     --output "$output"
   )
@@ -316,6 +322,7 @@ gguf=$GGUF
 model=$MODEL
 published_model=${PUBLISHED_MODEL:-$MODEL}
 published_backend_mode=$PUBLISHED_BACKEND_MODE
+proxy_backend_mode=$PROXY_BACKEND_MODE
 proxy_url=http://127.0.0.1:${PROXY_PORT}/v1
 managed_backend_url=http://127.0.0.1:${BACKEND_PORT}/v1
 managed_backend=$DEFAULT_MANAGED_BACKEND
@@ -360,6 +367,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --published-mode)
       PUBLISHED_BACKEND_MODE="$(next_arg "$1" "${2:-}")"
+      PUBLISHED_BACKEND_MODE_SET=1
+      shift 2
+      ;;
+    --proxy-backend-mode)
+      PROXY_BACKEND_MODE="$(next_arg "$1" "${2:-}")"
       shift 2
       ;;
     --skip-published-compare)
@@ -407,6 +419,20 @@ case "$SUITE" in
     die "--suite must be smoke or release"
     ;;
 esac
+case "$PROXY_BACKEND_MODE" in
+  native|prompt)
+    ;;
+  *)
+    die "--proxy-backend-mode must be native or prompt"
+    ;;
+esac
+if [[ "$PUBLISHED_BACKEND_MODE_SET" != "1" ]]; then
+  if [[ "$PROXY_BACKEND_MODE" == "native" ]]; then
+    PUBLISHED_BACKEND_MODE="LS/N"
+  else
+    PUBLISHED_BACKEND_MODE="LS/P"
+  fi
+fi
 case "$PUBLISHED_BACKEND_MODE" in
   LS/N|LS/P)
     ;;
@@ -434,7 +460,7 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 log "Output directory: $OUTPUT_DIR"
-log "Suite: $SUITE, runs: $RUNS, stream: $STREAM"
+log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, proxy_backend_mode: $PROXY_BACKEND_MODE"
 write_metadata
 
 start_proxy "$DEFAULT_BUDGET_TOKENS" "budget_${DEFAULT_BUDGET_TOKENS}"

@@ -65,9 +65,16 @@ Known classifications for the local Ministral proxy comparison:
 - `inconsistent_api_recovery_stateful`: if this appears as a failed contract
   mismatch, the proxy workflow extension path regressed.
 - `argument_transformation*`: model/scenario accuracy weakness in local runs.
-- `grounded_synthesis*`: model/scenario weakness; published direct LS/N is also
-  0 for these columns.
+- `grounded_synthesis*`: model/scenario weakness. Compare it only against the
+  selected published baseline mode; the direct `LS/N` and prompt `LS/P` rows
+  have different behavior for these columns.
 - `data_gap_recovery_extended*`: strict scorer/string-literal misses.
+
+When investigating a local score drop, first compare the current JSONL against
+the previous local JSONL by scenario and `proxy_failure_classification`. Treat
+small run-to-run deltas in completed-but-inaccurate rows as stochastic model
+accuracy changes unless the current run shows incomplete rows, missing required
+steps, or `proxy_contract_mismatch` classifications.
 
 ## Native Rust Smoke Runner
 
@@ -143,6 +150,10 @@ python scripts/eval_openai_proxy.py --help
 published comparison helper against the published LS/P row by default. If you
 select `--published-mode LS/N`, the helper skips direct comparison for proxy
 rows unless `--force-published-compare` is passed.
+
+This default matters when reading warnings: an `LS/P` comparison is a
+proxy/prompt-mode leaderboard comparison, while `LS/N` is a direct native-tool
+baseline. Do not use the skipped `LS/N` behavior to explain an `LS/P` warning.
 
 Run live evals manually against real backends. CI should stay deterministic
 unless a job is explicitly marked as live-backend integration.

@@ -251,9 +251,47 @@ fn parse_forge_string_array_field(
     Ok(Some(strings))
 }
 
+fn add_proxy_respond_tool_if_needed(
+    tool_specs: &mut Vec<ToolSpec>,
+    contract: Option<&ProxyStepContract>,
+) -> bool {
+    let has_real_terminal = contract.is_some_and(|contract| {
+        contract
+            .terminal_tools
+            .iter()
+            .any(|tool| tool != RESPOND_TOOL_NAME)
+    });
+    if has_real_terminal {
+        return false;
+    }
+    tool_specs.push(respond_spec());
+    true
+}
+
+fn normalize_proxy_terminal_tools(
+    terminal_tools: Vec<String>,
+    respond_injected: bool,
+) -> Result<Vec<String>, HandlerError> {
+    let mut terminal_tools = if terminal_tools.is_empty() {
+        vec![RESPOND_TOOL_NAME.to_string()]
+    } else {
+        terminal_tools
+    };
+    if !respond_injected {
+        terminal_tools.retain(|tool| tool != RESPOND_TOOL_NAME);
+    }
+    if terminal_tools.is_empty() {
+        return Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_TERMINAL_TOOLS_FIELD} has no available terminal tools"
+        )));
+    }
+    Ok(terminal_tools)
+}
+
 fn validate_proxy_step_contract(
     contract: Option<ProxyStepContract>,
     tool_names: &IndexSet<String>,
+    respond_injected: bool,
 ) -> Result<Option<ProxyStepContract>, HandlerError> {
     let Some(contract) = contract else {
         return Ok(None);
@@ -268,11 +306,7 @@ fn validate_proxy_step_contract(
         }
     }
 
-    let terminal_tools: Vec<String> = if contract.terminal_tools.is_empty() {
-        vec![RESPOND_TOOL_NAME.to_string()]
-    } else {
-        contract.terminal_tools
-    };
+    let terminal_tools = normalize_proxy_terminal_tools(contract.terminal_tools, respond_injected)?;
     validate_proxy_name_list(FORGE_TERMINAL_TOOLS_FIELD, &terminal_tools)?;
 
     let required_set: IndexSet<&str> = contract.required_steps.iter().map(String::as_str).collect();
@@ -353,7 +387,7 @@ fn extract_stream_include_usage(body: &Value) -> Result<bool, HandlerError> {
 /// Main handler for /v1/chat/completions.
 ///
 /// When no tools are present, passes through to backend directly (no guardrails).
-/// When tools are present, injects Forge's reserved respond tool,
+/// When tools are present, conditionally injects Forge's reserved respond tool,
 /// runs inference with validation/retry, then strips respond() calls from output.
 ///
 /// Sampling fields are extracted per-request and passed as a dict (or None);
@@ -457,12 +491,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         .map_err(HandlerError::Upstream);
     }
 
-    // Parse client tools strictly, then add Forge's reserved terminal tool.
+    // Parse client tools strictly, then add Forge's reserved terminal tool only
+    // when the request has not declared a real terminal tool.
     let mut tool_specs = parse_tool_specs(&tools_raw)?;
-    tool_specs.push(respond_spec());
+    let respond_injected =
+        add_proxy_respond_tool_if_needed(&mut tool_specs, step_contract.as_ref());
 
     let tool_names: IndexSet<String> = tool_specs.iter().map(|s| s.name.clone()).collect();
-    let step_contract = validate_proxy_step_contract(step_contract, &tool_names)?;
+    let step_contract = validate_proxy_step_contract(step_contract, &tool_names, respond_injected)?;
     let request_options =
         sanitize_guarded_request_options(request_options, step_contract.as_ref())?;
     let validator = crate::guardrails::ResponseValidator::from_tool_specs(
@@ -2511,6 +2547,7 @@ mod tests {
         responses: Vec<LLMResponse>,
         calls: std::sync::Mutex<usize>,
         sent_messages: std::sync::Mutex<Vec<Vec<Value>>>,
+        sent_tools: std::sync::Mutex<Vec<Vec<String>>>,
     }
 
     impl MockWorkflowContractClient {
@@ -2519,11 +2556,16 @@ mod tests {
                 responses,
                 calls: std::sync::Mutex::new(0),
                 sent_messages: std::sync::Mutex::new(Vec::new()),
+                sent_tools: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn sent_messages(&self) -> Vec<Vec<Value>> {
             self.sent_messages.lock().unwrap().clone()
+        }
+
+        fn sent_tools(&self) -> Vec<Vec<String>> {
+            self.sent_tools.lock().unwrap().clone()
         }
     }
 
@@ -2535,10 +2577,17 @@ mod tests {
         async fn send(
             &self,
             messages: Vec<Value>,
-            _tools: Option<Vec<ToolSpec>>,
+            tools: Option<Vec<ToolSpec>>,
             _sampling: Option<SamplingParams>,
         ) -> Result<LLMResponse, crate::error::BackendError> {
             self.sent_messages.lock().unwrap().push(messages);
+            self.sent_tools.lock().unwrap().push(
+                tools
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect(),
+            );
             let mut calls = self.calls.lock().unwrap();
             let response = self
                 .responses
@@ -2618,6 +2667,129 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[tokio::test]
+    async fn proxy_real_terminal_tool_omits_synthetic_respond_tool() {
+        let mut terminal_args = IndexMap::new();
+        terminal_args.insert("report".into(), json!("done"));
+        let responses = vec![LLMResponse::ToolCalls(vec![ToolCall::new(
+            "legacy_submit_audit",
+            terminal_args,
+        )])];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "audit account"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool(), legacy_submit_audit_tool()],
+            "_forge": {
+                "terminal_tools": ["legacy_submit_audit"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                assert_eq!(
+                    v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                    "legacy_submit_audit"
+                );
+            }
+            _ => panic!("expected Response"),
+        }
+        assert_eq!(
+            client.sent_tools()[0],
+            vec![
+                "legacy_list_accounts".to_string(),
+                "legacy_submit_audit".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_respond_only_terminal_still_injects_respond_tool() {
+        let mut respond_args = IndexMap::new();
+        respond_args.insert("message".into(), json!("done"));
+        let responses = vec![LLMResponse::ToolCalls(vec![ToolCall::new(
+            "respond",
+            respond_args,
+        )])];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "audit account"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "_forge": {
+                "terminal_tools": ["respond"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "stop");
+                assert_eq!(v["choices"][0]["message"]["content"], "done");
+            }
+            _ => panic!("expected Response"),
+        }
+        assert_eq!(
+            client.sent_tools()[0],
+            vec!["legacy_list_accounts".to_string(), "respond".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_mixed_terminal_tools_filters_respond_when_real_terminal_exists() {
+        let mut terminal_args = IndexMap::new();
+        terminal_args.insert("report".into(), json!("done"));
+        let responses = vec![LLMResponse::ToolCalls(vec![ToolCall::new(
+            "legacy_submit_audit",
+            terminal_args,
+        )])];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "audit account"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool(), legacy_submit_audit_tool()],
+            "_forge": {
+                "terminal_tools": ["respond", "legacy_submit_audit"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                assert_eq!(
+                    v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                    "legacy_submit_audit"
+                );
+            }
+            _ => panic!("expected Response"),
+        }
+        assert_eq!(
+            client.sent_tools()[0],
+            vec![
+                "legacy_list_accounts".to_string(),
+                "legacy_submit_audit".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
