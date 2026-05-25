@@ -11,7 +11,9 @@ mod parse_strategies;
 use crate::clients::base::ToolCall;
 use crate::core::tool_spec::ToolSpec;
 use indexmap::IndexMap;
-pub use nudges::{prerequisite_nudge, retry_nudge, step_nudge, unknown_tool_nudge};
+pub use nudges::{
+    prerequisite_nudge, retry_nudge, step_nudge, unknown_tool_nudge, unsafe_batch_nudge,
+};
 use serde_json::Value;
 
 /// Build a structured prompt describing available tools and the expected

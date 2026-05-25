@@ -9,7 +9,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use super::handler::{self, AnthropicHandlerError, AnthropicHandlerResult, HandlerResult};
+use super::handler::{
+    self, AnthropicHandlerError, AnthropicHandlerResult, HandlerError, HandlerResult,
+};
 use super::response;
 use crate::clients::base::LLMClient;
 use crate::context::manager::ContextManager;
@@ -59,6 +61,7 @@ impl HTTPServer {
     /// Handle an incoming HTTP request.
     ///
     /// Returns (status_code, content_type, headers, body_string).
+    #[cfg(test)]
     pub async fn handle_request<C: LLMClient + 'static>(
         &self,
         method: &str,
@@ -114,6 +117,7 @@ impl HTTPServer {
     }
 
     /// Handle /v1/messages.
+    #[cfg(test)]
     async fn handle_anthropic_messages<C: LLMClient + 'static>(
         &self,
         body: &[u8],
@@ -262,6 +266,7 @@ impl HTTPServer {
     }
 
     /// Handle /v1/chat/completions.
+    #[cfg(test)]
     async fn handle_chat_completions<C: LLMClient + 'static>(
         &self,
         body: &[u8],
@@ -315,7 +320,12 @@ impl HTTPServer {
                     }
                 }
             },
-            Err(e) => (502, "application/json", json!({"error": e}).to_string()),
+            Err(HandlerError::BadRequest(e)) => {
+                (400, "application/json", json!({"error": e}).to_string())
+            }
+            Err(HandlerError::Upstream(e)) => {
+                (502, "application/json", json!({"error": e}).to_string())
+            }
         }
     }
 
@@ -365,7 +375,10 @@ impl HTTPServer {
             Ok(HandlerResult::StreamBody(events)) => {
                 response::build_openai_sse_response(events, guard)
             }
-            Err(e) => {
+            Err(HandlerError::BadRequest(e)) => {
+                response::build_response(400, "application/json", json!({"error": e}).to_string())
+            }
+            Err(HandlerError::Upstream(e)) => {
                 response::build_response(502, "application/json", json!({"error": e}).to_string())
             }
         }
@@ -448,13 +461,7 @@ impl HTTPServer {
         };
 
         // Capture shared state in Arcs for each route closure.
-        let srv_health = server.clone();
-        let cli_health = client.clone();
-        let ctx_health = ctx.clone();
-
         let srv_models = server.clone();
-        let cli_models = client.clone();
-        let ctx_models = ctx.clone();
 
         let srv_chat = server.clone();
         let cli_chat = client.clone();
@@ -464,26 +471,27 @@ impl HTTPServer {
         let cli_messages = client.clone();
         let ctx_messages = ctx.clone();
 
-        let health = move || {
-            let srv = srv_health.clone();
-            let cli = cli_health.clone();
-            let ctx = ctx_health.clone();
-            async move {
-                let (status, ct, _, body) =
-                    srv.handle_request("GET", "/health", &[], &cli, &ctx).await;
-                response::build_response(status, ct, body)
-            }
+        let health = move || async move {
+            response::build_response(200, "application/json", json!({"status": "ok"}).to_string())
         };
 
         let models = move || {
             let srv = srv_models.clone();
-            let cli = cli_models.clone();
-            let ctx = ctx_models.clone();
             async move {
-                let (status, ct, _, body) = srv
-                    .handle_request("GET", "/v1/models", &[], &cli, &ctx)
-                    .await;
-                response::build_response(status, ct, body)
+                response::build_response(
+                    200,
+                    "application/json",
+                    json!({
+                        "object": "list",
+                        "data": [{
+                            "id": srv.model_name,
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": "local"
+                        }]
+                    })
+                    .to_string(),
+                )
             }
         };
 
@@ -529,6 +537,7 @@ impl HTTPServer {
 /// Format SSE events into a chunked transfer encoding body.
 ///
 /// Each event is "data: <json>\n\n". Terminator is "data: [DONE]\n\n".
+#[cfg(test)]
 pub fn format_sse_body(events: &[Value]) -> String {
     response::format_sse_body(events)
 }
@@ -537,6 +546,7 @@ pub fn format_sse_body(events: &[Value]) -> String {
 ///
 /// Anthropic streams use named SSE events and do not use OpenAI's [DONE]
 /// sentinel.
+#[cfg(test)]
 pub fn format_anthropic_sse_body(
     events: &[anyllm_translate::anthropic::streaming::StreamEvent],
 ) -> String {
@@ -550,6 +560,7 @@ pub fn format_anthropic_sse_body(
 /// server use. It splits on `\r\n\r\n` and does not handle `Content-Length`, chunked encoding,
 /// pipelined requests, or partial reads. For production environments, use a robust HTTP
 /// framework such as `axum`, `hyper`, or `tiny_http`.
+#[cfg(test)]
 #[allow(clippy::type_complexity)]
 pub fn parse_http_request(raw: &[u8]) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
     let text = std::str::from_utf8(raw).ok()?;
@@ -845,6 +856,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_completions_unknown_role_returns_400() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "messages": [{"role": "function", "content": "hi"}],
+            "model": "test"
+        }))
+        .unwrap();
+        let (status, _ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+
+        assert_eq!(status, 400);
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("role must be one of"));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_malformed_tool_arguments_returns_400() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "messages": [{
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{broken"}
+                }]
+            }],
+            "model": "test"
+        }))
+        .unwrap();
+        let (status, _ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+
+        assert_eq!(status, 400);
+        let v: Value = serde_json::from_str(&body_str).unwrap();
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .contains("arguments must be valid JSON"));
+    }
+
+    #[tokio::test]
     async fn anthropic_messages_valid_request() {
         let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
         let body = serde_json::to_vec(&json!({
@@ -1036,6 +1104,54 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(ct, "text/event-stream");
         assert!(body_str.contains("data: [DONE]"));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_malformed_tool_returns_400() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test",
+            "tools": [{"type": "function", "function": {"name": "search"}}]
+        }))
+        .unwrap();
+        let (status, _ct, _headers, body_str) = srv
+            .handle_request(
+                "POST",
+                "/v1/chat/completions",
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(status, 400);
+        assert!(body_str.contains("missing function.parameters"));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_bad_forge_contract_returns_400() {
+        let srv = HTTPServer::new("127.0.0.1", 8081, false, 3, true, "test");
+        let body = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "_forge": {"required_steps": ["missing"]}
+        }))
+        .unwrap();
+        let response = srv
+            .handle_chat_completions_response(
+                &body,
+                &Arc::new(DummyClient),
+                &Arc::new(Mutex::new(dummy_ctx())),
+            )
+            .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

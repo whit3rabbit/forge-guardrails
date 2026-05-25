@@ -9,8 +9,9 @@ use crate::config::ProxyConfig;
 use crate::config::{
     apply_env_cli_overrides, cli_host, cli_max_retries, cli_model, cli_port,
     normalized_extra_flags, require_cli_gguf, require_cli_llamafile_runtime, require_cli_model,
-    resolve_serialize, validate_nonzero_u16, validate_optional_positive_i64, validate_positive_i64,
-    DEFAULT_ENV_CONTEXT_TOKENS, DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_EXTERNAL_MODEL,
+    resolve_serialize, validate_nonempty, validate_nonzero_u16, validate_optional_positive_i64,
+    validate_positive_i64, DEFAULT_ENV_CONTEXT_TOKENS, DEFAULT_EXTERNAL_CONTEXT_TOKENS,
+    DEFAULT_EXTERNAL_MODEL,
 };
 use crate::upstream::{
     direct_anthropic_api_key, direct_local_openai_upstream_from_env, direct_openai_api_key,
@@ -49,6 +50,7 @@ fn build_env_startup(cli: &Cli) -> Result<Startup, String> {
     if !normalized_extra_flags(&cli.extra_flags).is_empty() {
         return Err("--extra-flags requires --backend".to_string());
     }
+    reject_managed_llama_options(cli)?;
 
     let mut config = ProxyConfig::from_env()?;
     apply_env_cli_overrides(&mut config, cli)?;
@@ -64,6 +66,12 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
     if cli.llamafile_runtime.is_some() {
         return Err("--llamafile-runtime requires --backend llamafile".to_string());
     }
+    if !normalized_extra_flags(&cli.extra_flags).is_empty() {
+        return Err(
+            "--extra-flags requires managed --backend llamaserver or llamafile".to_string(),
+        );
+    }
+    reject_managed_llama_options(cli)?;
     if cli.backend_protocol == CliBackendProtocol::Anthropic && cli.mode == CliMode::Prompt {
         return Err("--mode prompt is not supported with --backend-protocol anthropic".to_string());
     }
@@ -122,7 +130,11 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
     let backend_port = validate_nonzero_u16(cli.backend_port, "--backend-port")?;
     let budget_tokens = validate_optional_positive_i64(cli.budget_tokens, "--budget-tokens")?;
     let budget_mode = forge_guardrails::BudgetMode::from(cli.budget_mode);
-    let extra_flags = normalized_extra_flags(&cli.extra_flags);
+    let extra_flags = managed_extra_flags(cli)?;
+    let cache_type_k = optional_nonempty(cli.cache_type_k.as_deref(), "--cache-type-k")?;
+    let cache_type_v = optional_nonempty(cli.cache_type_v.as_deref(), "--cache-type-v")?;
+    let n_slots = validate_optional_positive_i64(cli.slots, "--slots")?;
+    let kv_unified = cli.kv_unified;
     let proxy_host = cli_host(cli)?;
     let proxy_port = cli_port(cli)?;
     let max_retries = cli_max_retries(cli)?;
@@ -140,6 +152,12 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
             if cli.llamafile_runtime.is_some() {
                 return Err("--backend ollama does not accept --llamafile-runtime".to_string());
             }
+            if has_managed_llama_options(cli) || !extra_flags.is_empty() {
+                return Err(
+                    "cache, slot, reasoning, and extra backend flags require --backend llamaserver or llamafile"
+                        .to_string(),
+                );
+            }
             let (server, context) = forge_guardrails::setup_backend(
                 backend_name,
                 Some(&model),
@@ -149,7 +167,7 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
                 budget_tokens,
                 backend_port as i64,
                 cli.mode.as_str(),
-                &extra_flags,
+                &[],
                 None,
                 None,
                 None,
@@ -186,10 +204,10 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
                 backend_port as i64,
                 cli.mode.as_str(),
                 &extra_flags,
-                None,
-                None,
-                None,
-                false,
+                cache_type_k,
+                cache_type_v,
+                n_slots,
+                kv_unified,
             )?;
             let context_tokens = context.budget();
             let model = gguf_model_identity(&gguf);
@@ -222,10 +240,10 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
                 backend_port as i64,
                 cli.mode.as_str(),
                 &extra_flags,
-                None,
-                None,
-                None,
-                false,
+                cache_type_k,
+                cache_type_v,
+                n_slots,
+                kv_unified,
             )?;
             let context_tokens = context.budget();
             let model = gguf_model_identity(&gguf);
@@ -258,6 +276,42 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
         client_factory,
         managed_server,
     })
+}
+
+fn managed_extra_flags(cli: &Cli) -> Result<Vec<String>, String> {
+    let mut flags = normalized_extra_flags(&cli.extra_flags);
+    if let Some(value) = cli.reasoning_budget.as_deref() {
+        flags.push("--reasoning-budget".to_string());
+        flags.push(validate_nonempty(value, "--reasoning-budget")?.to_string());
+    }
+    if let Some(value) = cli.reasoning_format.as_deref() {
+        flags.push("--reasoning-format".to_string());
+        flags.push(validate_nonempty(value, "--reasoning-format")?.to_string());
+    }
+    Ok(flags)
+}
+
+fn optional_nonempty<'a>(value: Option<&'a str>, label: &str) -> Result<Option<&'a str>, String> {
+    value.map(|raw| validate_nonempty(raw, label)).transpose()
+}
+
+fn reject_managed_llama_options(cli: &Cli) -> Result<(), String> {
+    if has_managed_llama_options(cli) {
+        return Err(
+            "cache, slot, and reasoning flags require managed --backend llamaserver or llamafile"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn has_managed_llama_options(cli: &Cli) -> bool {
+    cli.cache_type_k.is_some()
+        || cli.cache_type_v.is_some()
+        || cli.slots.is_some()
+        || cli.kv_unified
+        || cli.reasoning_budget.is_some()
+        || cli.reasoning_format.is_some()
 }
 
 fn build_env_client_factory(config: &ProxyConfig) -> ClientFactory {
@@ -399,6 +453,24 @@ mod tests {
     }
 
     #[test]
+    fn external_startup_rejects_extra_flags() {
+        let cli = parse(&[
+            "--backend-url",
+            "http://localhost:8080",
+            "--extra-flags",
+            "--",
+            "--reasoning-budget",
+            "0",
+        ]);
+        let err =
+            match build_external_startup(&cli, cli.backend_url.as_deref().expect("backend url")) {
+                Err(err) => err,
+                Ok(_) => panic!("expected error"),
+            };
+        assert!(err.contains("--extra-flags requires managed"));
+    }
+
+    #[test]
     fn external_anthropic_startup_uses_direct_anthropic_factory() {
         let cli = parse(&[
             "--backend-url",
@@ -496,6 +568,16 @@ mod tests {
     }
 
     #[test]
+    fn env_fallback_rejects_first_class_backend_flags() {
+        let cli = parse(&["--reasoning-budget", "0"]);
+        let err = match build_env_startup(&cli) {
+            Err(err) => err,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(err.contains("require managed --backend"));
+    }
+
+    #[test]
     fn env_fallback_rejects_prompt_mode() {
         let cli = parse(&["--mode", "prompt"]);
         let err = match build_env_startup(&cli) {
@@ -550,6 +632,48 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         assert!(err.contains("does not accept --llamafile-runtime"));
+    }
+
+    #[test]
+    fn managed_ollama_rejects_backend_tuning_flags_before_launch() {
+        let cli = parse(&[
+            "--backend",
+            "ollama",
+            "--model",
+            "llama3",
+            "--reasoning-budget",
+            "0",
+        ]);
+        let err = match build_managed_startup(&cli, CliBackend::Ollama) {
+            Err(err) => err,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(err.contains("require --backend llamaserver or llamafile"));
+    }
+
+    #[test]
+    fn managed_extra_flags_include_first_class_reasoning_flags() {
+        let cli = parse(&[
+            "--backend",
+            "llamaserver",
+            "--gguf",
+            "model.gguf",
+            "--reasoning-budget",
+            "0",
+            "--extra-flags",
+            "--",
+            "--reasoning-format",
+            "auto",
+        ]);
+        assert_eq!(
+            managed_extra_flags(&cli).expect("flags"),
+            vec![
+                "--reasoning-format".to_string(),
+                "auto".to_string(),
+                "--reasoning-budget".to_string(),
+                "0".to_string()
+            ]
+        );
     }
 
     #[test]

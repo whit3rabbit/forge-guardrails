@@ -12,12 +12,13 @@ use crate::clients::base::LLMClient;
 use crate::clients::base::{LLMResponse, ToolCall};
 use crate::context::manager::ContextManager;
 use crate::error::{
-    ForgeError, MaxIterationsError, PrerequisiteError, StepEnforcementError, ToolError,
-    ToolExecutionError, WorkflowCancelledError,
+    ForgeError, MaxIterationsError, PrerequisiteError, StepEnforcementError, ToolCallError,
+    ToolError, ToolExecutionError, WorkflowCancelledError,
 };
 use crate::guardrails::{
     ErrorTracker, ResponseValidator, RetryNudgeFn, StepEnforcer, StepPrerequisite,
 };
+use crate::prompts::nudges;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::Value;
 use std::sync::Arc;
@@ -153,7 +154,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
     }
 
     fn build_guardrails(&self, workflow: &Workflow) -> RunnerGuardrails {
-        let tool_names: Vec<String> = workflow.tools.keys().cloned().collect();
+        let tool_specs: Vec<ToolSpec> = workflow.tools.values().map(|d| d.spec.clone()).collect();
         let terminal_set: IndexSet<String> = workflow.terminal_tools.iter().cloned().collect();
         let retry_nudge_for_validator: Option<RetryNudgeFn> = self
             .retry_nudge_fn
@@ -161,8 +162,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             .map(|f| Box::new(move |raw: &str| f(raw)) as RetryNudgeFn);
 
         RunnerGuardrails {
-            validator: ResponseValidator::new(
-                tool_names,
+            validator: ResponseValidator::from_tool_specs(
+                tool_specs,
                 self.rescue_enabled,
                 retry_nudge_for_validator,
             ),
@@ -327,6 +328,40 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 LLMResponse::ToolCalls(calls) => calls,
                 LLMResponse::Text(_) => unreachable!("text response handled above"),
             };
+
+            if Self::is_mixed_terminal_batch(&tool_calls, workflow) {
+                guardrails.error_tracker.record_retry();
+                if guardrails.error_tracker.retries_exhausted() {
+                    let raw =
+                        inference::response_to_raw_string(&LLMResponse::ToolCalls(tool_calls))
+                            .unwrap_or_default();
+                    return Err(ForgeError::ToolCall(
+                        ToolCallError::new(format!(
+                            "Retries exhausted after {} consecutive failed attempts",
+                            guardrails.error_tracker.max_retries()
+                        ))
+                        .with_raw_response(raw),
+                    ));
+                }
+
+                let nudge_content =
+                    Self::mixed_terminal_batch_nudge(workflow, &guardrails.step_enforcer);
+                let calls = self.emit_assistant_tool_calls(
+                    tool_calls,
+                    &mut messages,
+                    &mut tool_call_counter,
+                    iteration as i64,
+                );
+                self.emit_guardrail_nudge_results(
+                    &calls,
+                    &mut messages,
+                    iteration as i64,
+                    MessageType::RetryNudge,
+                    "[MixedTerminalBatch]",
+                    &nudge_content,
+                );
+                continue;
+            }
 
             let step_check = guardrails.step_enforcer.check(&tool_calls);
             if step_check.needs_nudge {
@@ -582,6 +617,39 @@ impl<C: LLMClient> WorkflowRunner<C> {
         Ok(None)
     }
 
+    fn is_mixed_terminal_batch(tool_calls: &[ToolCall], workflow: &Workflow) -> bool {
+        let mut has_terminal = false;
+        let mut has_nonterminal = false;
+        for tc in tool_calls {
+            if workflow.terminal_tools.contains(&tc.tool) {
+                has_terminal = true;
+            } else {
+                has_nonterminal = true;
+            }
+            if has_terminal && has_nonterminal {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn mixed_terminal_batch_nudge(workflow: &Workflow, step_enforcer: &StepEnforcer) -> String {
+        let pending = step_enforcer.pending();
+        let allowed_owned: Vec<String> = if pending.is_empty() {
+            workflow
+                .tools
+                .keys()
+                .filter(|name| !workflow.terminal_tools.contains(*name))
+                .cloned()
+                .collect()
+        } else {
+            pending
+        };
+        let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
+        let blocked: Vec<&str> = workflow.terminal_tools.iter().map(String::as_str).collect();
+        nudges::unsafe_batch_nudge(&allowed, &blocked)
+    }
+
     /// Record the assistant's successful tool-call turn after guardrail checks.
     fn emit_assistant_tool_calls(
         &self,
@@ -600,7 +668,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
             messages.push(reasoning_msg);
         }
 
-        let mut infos = Vec::new();
+        let mut infos = Vec::with_capacity(calls.len());
         for tc in &mut calls {
             let call_id = inference::format_tool_call_id(*tool_call_counter);
             *tool_call_counter += 1;

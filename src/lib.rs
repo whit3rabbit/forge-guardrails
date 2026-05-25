@@ -55,19 +55,21 @@ pub use error::{
     UnsupportedModelError, WorkflowCancelledError,
 };
 pub use guardrails::{
-    CheckResult, ErrorTracker, GuardAction, Guardrails, Nudge, RetryNudgeFn, StepCheck,
-    StepEnforcer, StepPrerequisite, TerminalTool, ValidationResult,
+    validate_tool_arguments, validate_tool_call_batch, ArgValidationError, ArgValidationKind,
+    CheckResult, ErrorTracker, GuardAction, GuardrailDecision, GuardrailHistory, GuardrailState,
+    GuardrailViolation, Guardrails, Nudge, RetryNudgeFn, StepCheck, StepEnforcer, StepPrerequisite,
+    TerminalTool, ValidationResult,
 };
 pub use prompts::{
     build_tool_prompt, extract_tool_call, prerequisite_nudge, rescue_tool_call, retry_nudge,
-    step_nudge, unknown_tool_nudge,
+    step_nudge, unknown_tool_nudge, unsafe_batch_nudge,
 };
 pub use proxy::{
     extract_passthrough, extract_sampling, handle_anthropic_messages, handle_chat_completions,
     has_respond_tool, openai_to_messages, respond_tool_openai, strip_respond_calls,
     text_response_to_openai, text_to_sse_events, tool_calls_to_openai, tool_calls_to_sse_events,
-    AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerResult,
-    OpenAiEventStream,
+    AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerError,
+    HandlerResult, OpenAiEventStream, OpenAiMessageError,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};

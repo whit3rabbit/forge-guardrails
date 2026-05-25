@@ -1518,21 +1518,6 @@
                 }
               }
             }
-          },
-          {
-            "type": "function",
-            "function": {
-              "name": "respond",
-              "description": "Respond",
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "message": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
           }
         ]
       },

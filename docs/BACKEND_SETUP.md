@@ -19,13 +19,35 @@ Rust managed startup preserves:
 - `--cache-type-v`
 - `--parallel`
 - `--kv-unified`
-- raw `extra_flags`
+- allowlisted reasoning `extra_flags`
+
+Managed startup owns model path, host, port, GPU layers, context size, cache
+flags, slots, and KV-unified settings. Do not pass those through
+`--extra-flags`; they are rejected before any backend process is stopped or
+spawned. Use first-class proxy CLI flags instead:
+
+```bash
+forge-guardrails-proxy \
+  --backend llamaserver \
+  --gguf path/to/model.gguf \
+  --budget-mode manual \
+  --budget-tokens 8192 \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
+  --slots 1 \
+  --kv-unified
+```
 
 Reasoning-tagged models on recent llama.cpp builds may need:
 
 ```bash
 --reasoning-budget 0
 ```
+
+Managed startup accepts only `--reasoning-budget` and `--reasoning-format`
+through `--extra-flags`; both require values and may also be provided as
+first-class proxy flags. Model/path/host/port/context/server/security flags are
+not accepted in `--extra-flags`.
 
 The Rust smoke runner accepts `--reasoning-budget` so eval JSONL records the
 intended setting, but it does not start or reconfigure a local server process.

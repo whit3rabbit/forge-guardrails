@@ -5,8 +5,12 @@ pub mod error_tracker;
 #[allow(clippy::module_inception)]
 /// Main guardrails engine linking validation and step enforcement.
 pub mod guardrails;
+/// Bounded guardrail failure memory.
+pub mod history;
 /// Escalating instruction nudges.
 pub mod nudge;
+/// Structured policy verdicts and argument validation.
+pub mod policy;
 /// Format and structure validation of LLM responses.
 pub mod response_validator;
 /// Stateful prerequisite and premature tool call enforcement.
@@ -14,6 +18,11 @@ pub mod step_enforcer;
 
 pub use error_tracker::ErrorTracker;
 pub use guardrails::{CheckResult, GuardAction, Guardrails, TerminalTool};
+pub use history::GuardrailHistory;
 pub use nudge::Nudge;
+pub use policy::{
+    validate_tool_arguments, validate_tool_call_batch, ArgValidationError, ArgValidationKind,
+    GuardrailDecision, GuardrailState, GuardrailViolation,
+};
 pub use response_validator::{ResponseValidator, RetryNudgeFn, ValidationResult};
 pub use step_enforcer::{StepCheck, StepEnforcer, StepPrerequisite};

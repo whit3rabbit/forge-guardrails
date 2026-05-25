@@ -698,17 +698,6 @@ async def _proxy_mixed_respond_streaming_fixture() -> dict[str, Any]:
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "respond",
-                    "description": "Respond",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"message": {"type": "string"}},
-                    },
-                },
-            },
         ],
     }
     events = await handle_chat_completions(

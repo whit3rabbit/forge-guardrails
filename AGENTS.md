@@ -19,29 +19,63 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 
 ## Core layout
 
-- `src/core/message.rs` - message roles, types, metadata, tool-call info
-- `src/core/tool_spec.rs` - tool schema and callable definitions
-- `src/core/workflow.rs` - workflow model, terminal tools, prerequisites
-- `src/core/steps.rs` - step tracking and required-step state
-- `src/guardrails/` - response validation, error tracking, step enforcement
-- `src/core/runner.rs` - multi-turn workflow loop
-- `src/core/inference.rs` - inference helpers and message conversion
-- `src/tools/respond.rs` - built-in `respond` terminal-style tool
-- `src/prompts/` - nudge prompts and JSON/tool-call rescue parsing
-- `src/context/` - context manager, token budget, compaction callbacks, compaction strategies, hardware helpers
-- `src/clients/base.rs` - `LLMClient`, streaming trait, OpenAI tool formatting
-- `src/clients/` - Anthropic, Llamafile, Ollama, and anyllm runtime/sidecar clients
-- `src/server.rs` - backend lifecycle and context-budget resolution
-- `src/proxy/` - HTTP/OpenAI-compatible and Anthropic Messages proxy handling
-- `src/bin/forge-eval/` - small native Rust eval smoke runner
-- `Dockerfile` - Docker image that runs Forge proxy plus an internal anyllm sidecar
-- `docker/entrypoint.sh` - container supervisor for the private sidecar and public Forge proxy
-- `scripts/start_llamaserver_proxy.sh` - local managed llama-server proxy launcher for the default Ministral GGUF
-- `scripts/publish_docker.sh` - buildx publish helper for Docker Hub releases
-- `tests/` - integration coverage for core behavior
-- `tests/parity/` - Python-generated golden fixtures for Rust parity tests
-- `scripts/eval_openai_proxy.py` - Python eval oracle wrapper for Rust proxy checks
-- `docs/PARITY.md`, `docs/EVAL_GUIDE.md`, `docs/BACKEND_SETUP.md` - Rust parity and backend contracts
+- `src/`: Rust library and binary implementation
+  - `core/`: Core types and runner orchestration loop
+    - `inference.rs`: Low-level LLM request/response parsing and role/reasoning folding
+    - `message.rs`: Unified message format, roles, and metadata models
+    - `runner.rs`: Multi-turn stateful executor enforcing the guardrails loop
+    - `slot_worker.rs`: Handles slot allocation and queuing for backend runtimes
+    - `steps.rs`: Required step tracking and workflow iteration constraints
+    - `tool_spec.rs`: ToolSpec schemas, properties, and parameter conversion
+    - `workflow.rs`: Target workflows, required steps, and prerequisites
+  - `guardrails/`: Multi-tiered validator and step enforcement layer
+    - `error_tracker.rs`: Monitors soft resolution and hard execution error budgets
+    - `guardrails.rs`: Main facade pipeline orchestrating checks and retries
+    - `history.rs`: Events timeline tracking validation results and violations
+    - `nudge.rs`: Manages nudge states for retrying/rescuing tools
+    - `policy.rs`: Allowed/blocked tools based on sequence prerequisites
+    - `response_validator.rs`: JSON Schema verification and malformed argument checking
+    - `step_enforcer.rs`: Sequences verification and prerequisite rules
+  - `clients/`: Multi-provider backend adapters and settings
+    - `base.rs`: `LLMClient` trait, streaming, and tool formatting definitions
+    - `sampling.rs`: Model-specific sampling presets for 69+ models
+    - `anthropic/`: Messages format translations, thinking extraction, and cache controls
+    - `llamafile/`: Llamafile/llama.cpp server adapter, NDJSON stream parsing, and reasoning folding
+    - `ollama/`: Ollama local adapter, options validation, and stream boundaries
+    - `anyllm_proxy.rs`: AnyLlm Proxy / Runtime Client for unified provider translation
+  - `context/`: Memory budget tracking and token compaction logic
+    - `hardware.rs`: Apple Silicon plist / NVIDIA system memory context probing
+    - `manager.rs`: Active token counts, budget warnings, and compaction triggers
+    - `strategies.rs`: Slidewindow, phased compaction, and summary fallback strategies
+  - `prompts/`: Nudge generation and raw text extraction
+    - `nudges.rs`: System template builders for step, unknown tool, and error retries
+    - `parse_strategies.rs`: Robust extraction of JSON/XML tool calls from chat text
+  - `proxy/`: OpenAI-compatible and Anthropic-compatible proxy server
+    - `handler.rs`: Route handling, stream intercepts, and result mapping
+    - `proxy.rs`: Request translations, SSE chunk shaping, and respond stripping
+    - `server.rs`: Lifecycle of the proxy daemon
+  - `tools/`: Built-in terminal commands
+    - `respond.rs`: Built-in terminal tool for concluding workflows
+  - `bin/`: Execute runners
+    - `forge-eval/`: Benchmark suite evaluating model performance locally
+    - `forge-guardrails-proxy/`: HTTP daemon server entrypoint
+- `tests/`: Extensive integration and regression test coverage
+  - `parity/`: Python golden fixtures and generate scripts to preserve behavioral parity
+- `scripts/`: Local dev tooling, launchers, and eval summaries
+  - `start_llamaserver_proxy.sh`: Launches local llama-server backend using GGUF
+  - `run_local_eval.sh`: Automates smoke/release suites, starting the proxy and oracle
+  - `eval_openai_proxy.py`: Python oracle evaluating scenario completeness
+  - `publish_docker.sh`: Publishes multi-arch docker builds to Docker Hub
+- `docs/`: Comprehensive manuals and guides
+  - `USER_GUIDE.md`: Developer guide to library APIs, configurations, and use cases
+  - `WORKFLOW.md`: Explanation of guardrails loop and sequential step enforcement
+  - `SCHEMA.md`: Data contracts, JSON specs, and internal `_forge` metadata structures
+  - `PARITY.md`: Specifications for maintaining strict parity with Python Forge
+  - `CLEANROOM.md`: Summary of clean-room implementation history
+  - `BACKEND_SETUP.md`: Setup configurations for local and remote providers
+  - `EVAL_GUIDE.md`: Guide to setting up, running, and analyzing evaluation benchmarks
+- `Dockerfile`: Single-port deployment configuration for production use cases
+- `docker/entrypoint.sh`: Process supervisor for private sidecar and public proxy services
 
 ## Commands
 
@@ -287,6 +321,6 @@ When changing eval/backend parity:
 
 ## Current status notes
 
-The initial clean-room run produced 8/8 units, 487 passing tests, and 0 contamination incidents. After that exercise, a full parity review was conducted against the Python reference to establish complete behavioral alignment. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full narrative.
+The initial clean-room run produced 8/8 units, 487 passing tests, and 0 contamination incidents. After that exercise, a full parity review was conducted against the Python reference to establish complete behavioral alignment. As the codebase evolved, the test suite expanded to 750 passing tests covering edge cases, client adapters, proxy handling, and compaction. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full narrative.
 
 Treat test counts as historical. Re-run the local test suite after any meaningful change.

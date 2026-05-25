@@ -14,11 +14,11 @@ use crate::core::tool_spec::ToolSpec;
 use crate::error::StreamError;
 use crate::guardrails::{StepCheck, StepEnforcer};
 use crate::proxy::{
-    extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,
-    respond_tool_openai, strip_respond_calls, text_response_to_openai_with_usage_details,
-    tool_calls_to_openai_with_usage_details,
+    extract_passthrough, extract_sampling, openai_to_messages, strip_respond_calls,
+    text_response_to_openai_with_usage_details, tool_calls_to_openai_with_usage_details,
+    OpenAiMessageError,
 };
-use crate::tools::respond::RESPOND_TOOL_NAME;
+use crate::tools::respond::{respond_spec, RESPOND_TOOL_NAME};
 use anyllm_translate::anthropic::streaming::StreamEvent;
 use anyllm_translate::anthropic::MessageCreateRequest;
 use futures_core::Stream;
@@ -53,7 +53,7 @@ const PROXY_STEP_INDEX: i64 = 0;
 #[derive(Debug, Clone)]
 struct ProxyStepContract {
     required_steps: Vec<String>,
-    terminal_tools: IndexSet<String>,
+    terminal_tools: Vec<String>,
 }
 
 impl fmt::Debug for HandlerResult {
@@ -62,6 +62,38 @@ impl fmt::Debug for HandlerResult {
             Self::Response(value) => f.debug_tuple("Response").field(value).finish(),
             Self::StreamBody(_) => f.write_str("StreamBody(<openai event stream>)"),
         }
+    }
+}
+
+/// Error class for OpenAI-compatible chat completion request handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandlerError {
+    /// The request is invalid or malformed.
+    BadRequest(String),
+    /// Backend or guarded inference failed after the request was accepted.
+    Upstream(String),
+}
+
+impl HandlerError {
+    /// Returns the underlying error message.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::BadRequest(message) | Self::Upstream(message) => message,
+        }
+    }
+}
+
+impl fmt::Display for HandlerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
+impl std::error::Error for HandlerError {}
+
+impl From<OpenAiMessageError> for HandlerError {
+    fn from(error: OpenAiMessageError) -> Self {
+        Self::BadRequest(error.to_string())
     }
 }
 
@@ -104,6 +136,13 @@ impl AnthropicHandlerError {
     }
 }
 
+fn chat_error_to_anthropic(error: HandlerError) -> AnthropicHandlerError {
+    match error {
+        HandlerError::BadRequest(message) => AnthropicHandlerError::BadRequest(message),
+        HandlerError::Upstream(message) => AnthropicHandlerError::Upstream(message),
+    }
+}
+
 /// Handle /v1/messages by translating Anthropic input through the guarded
 /// OpenAI-compatible handler, then translating the response back to Anthropic.
 #[allow(clippy::too_many_arguments)]
@@ -136,7 +175,7 @@ pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
         Some(raw_body.clone()),
     )
     .await
-    .map_err(AnthropicHandlerError::Upstream)?
+    .map_err(chat_error_to_anthropic)?
     {
         HandlerResult::Response(openai_resp) => {
             let response: anyllm_translate::openai::ChatCompletionResponse =
@@ -169,55 +208,110 @@ fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDet
     }
 }
 
-fn extract_proxy_step_contract(body: &Value) -> Result<Option<ProxyStepContract>, String> {
+fn extract_proxy_step_contract(body: &Value) -> Result<Option<ProxyStepContract>, HandlerError> {
     let Some(forge) = body.get(FORGE_EXTENSION_FIELD) else {
         return Ok(None);
     };
     let Some(forge_obj) = forge.as_object() else {
-        return Err(format!("{FORGE_EXTENSION_FIELD} must be an object"));
+        return Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD} must be an object"
+        )));
     };
 
     let required_steps =
         parse_forge_string_array_field(forge_obj, FORGE_REQUIRED_STEPS_FIELD)?.unwrap_or_default();
     let terminal_tools = parse_forge_string_array_field(forge_obj, FORGE_TERMINAL_TOOLS_FIELD)?
         .unwrap_or_else(|| vec![RESPOND_TOOL_NAME.to_string()]);
-    let mut terminal_set: IndexSet<String> = terminal_tools.into_iter().collect();
-    if terminal_set.is_empty() {
-        terminal_set.insert(RESPOND_TOOL_NAME.to_string());
-    }
-
-    if required_steps.is_empty() {
-        return Ok(None);
-    }
 
     Ok(Some(ProxyStepContract {
         required_steps,
-        terminal_tools: terminal_set,
+        terminal_tools,
     }))
 }
 
 fn parse_forge_string_array_field(
     forge_obj: &serde_json::Map<String, Value>,
     field: &str,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<Option<Vec<String>>, HandlerError> {
     let Some(value) = forge_obj.get(field) else {
         return Ok(None);
     };
     let Some(items) = value.as_array() else {
-        return Err(format!(
+        return Err(HandlerError::BadRequest(format!(
             "{FORGE_EXTENSION_FIELD}.{field} must be an array of strings"
-        ));
+        )));
     };
     let mut strings = Vec::with_capacity(items.len());
     for item in items {
         let Some(s) = item.as_str() else {
-            return Err(format!(
+            return Err(HandlerError::BadRequest(format!(
                 "{FORGE_EXTENSION_FIELD}.{field} must be an array of strings"
-            ));
+            )));
         };
         strings.push(s.to_string());
     }
     Ok(Some(strings))
+}
+
+fn validate_proxy_step_contract(
+    contract: Option<ProxyStepContract>,
+    tool_names: &IndexSet<String>,
+) -> Result<Option<ProxyStepContract>, HandlerError> {
+    let Some(contract) = contract else {
+        return Ok(None);
+    };
+
+    validate_proxy_name_list(FORGE_REQUIRED_STEPS_FIELD, &contract.required_steps)?;
+    for step in &contract.required_steps {
+        if !tool_names.contains(step.as_str()) {
+            return Err(HandlerError::BadRequest(format!(
+                "{FORGE_EXTENSION_FIELD}.{FORGE_REQUIRED_STEPS_FIELD} contains unknown tool '{step}'"
+            )));
+        }
+    }
+
+    let terminal_tools: Vec<String> = if contract.terminal_tools.is_empty() {
+        vec![RESPOND_TOOL_NAME.to_string()]
+    } else {
+        contract.terminal_tools
+    };
+    validate_proxy_name_list(FORGE_TERMINAL_TOOLS_FIELD, &terminal_tools)?;
+
+    let required_set: IndexSet<&str> = contract.required_steps.iter().map(String::as_str).collect();
+    for terminal in &terminal_tools {
+        if !tool_names.contains(terminal.as_str()) {
+            return Err(HandlerError::BadRequest(format!(
+                "{FORGE_EXTENSION_FIELD}.{FORGE_TERMINAL_TOOLS_FIELD} contains unknown tool '{terminal}'"
+            )));
+        }
+        if required_set.contains(terminal.as_str()) {
+            return Err(HandlerError::BadRequest(format!(
+                "{FORGE_EXTENSION_FIELD}.{FORGE_TERMINAL_TOOLS_FIELD} contains required step '{terminal}'"
+            )));
+        }
+    }
+
+    Ok(Some(ProxyStepContract {
+        required_steps: contract.required_steps,
+        terminal_tools,
+    }))
+}
+
+fn validate_proxy_name_list(field: &str, values: &[String]) -> Result<(), HandlerError> {
+    let mut seen = IndexSet::new();
+    for value in values {
+        if value.trim().is_empty() {
+            return Err(HandlerError::BadRequest(format!(
+                "{FORGE_EXTENSION_FIELD}.{field} contains an empty tool name"
+            )));
+        }
+        if !seen.insert(value.as_str()) {
+            return Err(HandlerError::BadRequest(format!(
+                "{FORGE_EXTENSION_FIELD}.{field} contains duplicate tool '{value}'"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Main handler for /v1/chat/completions.
@@ -235,7 +329,7 @@ pub async fn handle_chat_completions<C: LLMClient + 'static>(
     context_manager: &Arc<Mutex<ContextManager>>,
     max_retries: i32,
     rescue_enabled: bool,
-) -> Result<HandlerResult, String> {
+) -> Result<HandlerResult, HandlerError> {
     handle_chat_completions_impl(
         body,
         client,
@@ -255,11 +349,11 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     max_retries: i32,
     rescue_enabled: bool,
     inbound_anthropic_body: Option<Value>,
-) -> Result<HandlerResult, String> {
+) -> Result<HandlerResult, HandlerError> {
     let messages = body
         .get("messages")
         .and_then(|m| m.as_array())
-        .ok_or("missing or invalid messages field")?;
+        .ok_or_else(|| HandlerError::BadRequest("missing or invalid messages field".to_string()))?;
 
     let model_name = body
         .get("model")
@@ -271,11 +365,15 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
-    let tools_raw = body
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let tools_raw = match body.get("tools") {
+        Some(Value::Array(tools)) => tools.clone(),
+        Some(_) => {
+            return Err(HandlerError::BadRequest(
+                "tools must be an array".to_string(),
+            ))
+        }
+        None => Vec::new(),
+    };
     let step_contract = extract_proxy_step_contract(body)?;
 
     let sampling = extract_sampling(body);
@@ -287,10 +385,17 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     };
 
     // Convert inbound OpenAI messages to internal format.
-    let mut internal_msgs = openai_to_messages(messages);
+    let mut internal_msgs = openai_to_messages(messages)?;
 
     // If no tools, pass through directly.
     if tools_raw.is_empty() {
+        if let Some(contract) = step_contract.as_ref() {
+            if !contract.required_steps.is_empty() {
+                return Err(HandlerError::BadRequest(format!(
+                    "{FORGE_EXTENSION_FIELD}.{FORGE_REQUIRED_STEPS_FIELD} requires tools"
+                )));
+            }
+        }
         let api_format = client.api_format().as_str();
         let serialized = crate::core::inference::fold_and_serialize(&internal_msgs, api_format);
         return run_passthrough(
@@ -301,25 +406,31 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             model_name,
             stream,
         )
-        .await;
+        .await
+        .map_err(HandlerError::Upstream);
     }
 
-    // Tools present: inject respond tool if needed.
-    let mut tools_with_respond = tools_raw.clone();
-    if !has_respond_tool(&tools_with_respond) {
-        tools_with_respond.push(respond_tool_openai());
-    }
+    // Parse client tools strictly, then add Forge's reserved terminal tool.
+    let mut tool_specs = parse_tool_specs(&tools_raw)?;
+    tool_specs.push(respond_spec());
 
-    // Parse tools into ToolSpec for the client.
-    let tool_specs = parse_tool_specs(&tools_with_respond);
-
-    let tool_names: Vec<String> = tool_specs.iter().map(|s| s.name.clone()).collect();
-    let validator = crate::guardrails::ResponseValidator::new(tool_names, rescue_enabled, None);
+    let tool_names: IndexSet<String> = tool_specs.iter().map(|s| s.name.clone()).collect();
+    let step_contract = validate_proxy_step_contract(step_contract, &tool_names)?;
+    let validator = crate::guardrails::ResponseValidator::from_tool_specs(
+        tool_specs.clone(),
+        rescue_enabled,
+        None,
+    );
     let mut error_tracker = crate::guardrails::ErrorTracker::new(max_retries, 2);
     let mut tool_call_counter = 0;
     let mut step_enforcer = step_contract.map(|contract| {
-        let mut enforcer =
-            StepEnforcer::new(contract.required_steps, contract.terminal_tools, None, 3, 2);
+        let mut enforcer = StepEnforcer::new(
+            contract.required_steps,
+            contract.terminal_tools.into_iter().collect(),
+            None,
+            3,
+            2,
+        );
         record_completed_proxy_tool_results(&internal_msgs, &mut enforcer);
         enforcer
     });
@@ -364,7 +475,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     usage_details.as_ref(),
                 ));
             }
-            Err(err) => return Err(err.to_string()),
+            Err(err) => return Err(HandlerError::Upstream(err.to_string())),
         };
 
         tool_call_counter = result.tool_call_counter;
@@ -376,16 +487,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
         match response {
             LLMResponse::ToolCalls(tool_calls) => {
-                let (real_calls, respond_text) = strip_respond_calls(&tool_calls);
-                let has_real_terminal = real_calls
-                    .iter()
-                    .any(|call| enforcer.terminal_tools.contains(&call.tool));
-                let steps_pending = !enforcer.is_satisfied();
-                if !real_calls.is_empty() && (!has_real_terminal || !steps_pending) {
-                    break LLMResponse::ToolCalls(tool_calls);
-                }
-
-                if (respond_text.is_some() || has_real_terminal) && steps_pending {
+                if !enforcer.is_satisfied() {
                     let step_check = enforcer.check(&tool_calls);
                     if step_check.needs_nudge {
                         emit_proxy_step_nudge_or_error(
@@ -394,7 +496,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                             tool_calls,
                             &mut internal_msgs,
                             &mut tool_call_counter,
-                        )?;
+                        )
+                        .map_err(HandlerError::Upstream)?;
                         continue;
                     }
                 }
@@ -412,7 +515,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                             tool_calls,
                             &mut internal_msgs,
                             &mut tool_call_counter,
-                        )?;
+                        )
+                        .map_err(HandlerError::Upstream)?;
                         continue;
                     }
                 }
@@ -885,27 +989,65 @@ pub fn process_response(response: &LLMResponse, model_name: &str, stream: bool) 
 }
 
 /// Parse OpenAI-format tool definitions into ToolSpec objects.
-pub fn parse_tool_specs(tools: &[Value]) -> Vec<ToolSpec> {
+pub fn parse_tool_specs(tools: &[Value]) -> Result<Vec<ToolSpec>, HandlerError> {
     let mut specs = Vec::new();
-    for tool in tools {
-        if let Some(func) = tool.get("function") {
-            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let description = func
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            let schema = func
-                .get("parameters")
-                .cloned()
-                .unwrap_or(json!({"type": "object", "properties": {}}));
-
-            if let Ok(mut spec) = ToolSpec::from_json_schema(name, description, &schema) {
-                spec.json_schema = Some(schema);
-                specs.push(spec);
-            }
+    let mut seen = IndexSet::new();
+    for (index, tool) in tools.iter().enumerate() {
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            return Err(HandlerError::BadRequest(format!(
+                "tools[{index}] must be a function tool"
+            )));
         }
+        let func = tool
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HandlerError::BadRequest(format!("tools[{index}].function must be an object"))
+            })?;
+        let name = func.get("name").and_then(Value::as_str).ok_or_else(|| {
+            HandlerError::BadRequest(format!("tools[{index}].function.name must be a string"))
+        })?;
+        if name.trim().is_empty() {
+            return Err(HandlerError::BadRequest(format!(
+                "tools[{index}].function.name must not be empty"
+            )));
+        }
+        if name == RESPOND_TOOL_NAME {
+            continue;
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(HandlerError::BadRequest(format!(
+                "tools[{index}].function.name duplicates tool '{name}'"
+            )));
+        }
+
+        let description = func
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let schema = func.get("parameters").cloned().ok_or_else(|| {
+            HandlerError::BadRequest(format!(
+                "tools[{index}] ('{name}') missing function.parameters"
+            ))
+        })?;
+        let schema_obj = schema.as_object().ok_or_else(|| {
+            HandlerError::BadRequest(format!(
+                "tools[{index}] ('{name}') function.parameters must be an object schema"
+            ))
+        })?;
+        if schema_obj.get("type").and_then(Value::as_str) != Some("object") {
+            return Err(HandlerError::BadRequest(format!(
+                "tools[{index}] ('{name}') function.parameters must have type 'object'"
+            )));
+        }
+
+        let mut spec = ToolSpec::from_json_schema(name, description, &schema).map_err(|err| {
+            HandlerError::BadRequest(format!("tools[{index}] ('{name}') invalid schema: {err}"))
+        })?;
+        spec.json_schema = Some(schema);
+        specs.push(spec);
     }
-    specs
+    Ok(specs)
 }
 
 #[cfg(test)]
@@ -1026,7 +1168,7 @@ mod tests {
                 "parameters": schema.clone()
             }
         })];
-        let specs = parse_tool_specs(&tools);
+        let specs = parse_tool_specs(&tools).expect("valid tools");
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "search");
         assert_eq!(specs[0].get_json_schema(), schema);
@@ -1034,8 +1176,53 @@ mod tests {
 
     #[test]
     fn parse_tool_specs_empty() {
-        let specs = parse_tool_specs(&[]);
+        let specs = parse_tool_specs(&[]).expect("empty tools");
         assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_specs_rejects_malformed_tools() {
+        let cases = [
+            (
+                json!({"type": "custom", "function": {"name": "search", "parameters": {"type": "object", "properties": {}}}}),
+                "must be a function tool",
+            ),
+            (
+                json!({"type": "function", "function": {"name": "", "parameters": {"type": "object", "properties": {}}}}),
+                "must not be empty",
+            ),
+            (
+                json!({"type": "function", "function": {"name": "search"}}),
+                "missing function.parameters",
+            ),
+            (
+                json!({"type": "function", "function": {"name": "search", "parameters": {"type": "array"}}}),
+                "must have type 'object'",
+            ),
+            (
+                json!({"type": "function", "function": {"name": "search", "parameters": {"type": "object", "properties": []}}}),
+                "invalid schema",
+            ),
+        ];
+
+        for (tool, expected) in cases {
+            let err = parse_tool_specs(&[tool]).expect_err("invalid tool");
+            assert!(
+                err.message().contains(expected),
+                "expected '{expected}' in '{}'",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_tool_specs_rejects_duplicate_names() {
+        let tools = vec![
+            json!({"type": "function", "function": {"name": "search", "parameters": {"type": "object", "properties": {}}}}),
+            json!({"type": "function", "function": {"name": "search", "parameters": {"type": "object", "properties": {}}}}),
+        ];
+        let err = parse_tool_specs(&tools).expect_err("duplicate rejected");
+        assert!(err.message().contains("duplicates tool 'search'"));
     }
 
     #[test]
@@ -1314,6 +1501,20 @@ mod tests {
         )
     }
 
+    fn search_tool_json() -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}}
+                }
+            }
+        })
+    }
+
     #[tokio::test]
     async fn handle_no_tools_passthrough() {
         let body = json!({
@@ -1342,10 +1543,6 @@ mod tests {
             "stop": ["done"],
             "tool_choice": {"type": "function", "function": {"name": "search"}},
             "response_format": {"type": "json_object"},
-            "_forge": {
-                "required_steps": ["search"],
-                "terminal_tools": ["respond"]
-            },
             "temperature": 0.7
         });
         let client = Arc::new(MockOptionsClient::new(Some(TokenUsage::new(11, 5, 16))));
@@ -1385,6 +1582,76 @@ mod tests {
         assert!(!passthrough.contains_key("temperature"));
         assert!(!passthrough.contains_key("_forge"));
         assert!(options.inbound_anthropic_body.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_no_tools_rejects_required_steps_contract() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "_forge": {"required_steps": ["search"]}
+        });
+        let client = Arc::new(MockOptionsClient::new(None));
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let err = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect_err("required steps without tools");
+        assert!(matches!(err, HandlerError::BadRequest(_)));
+        assert!(err.message().contains("requires tools"));
+    }
+
+    #[tokio::test]
+    async fn proxy_step_contract_rejects_invalid_names() {
+        let cases = [
+            (
+                json!({"required_steps": ["missing"]}),
+                "required_steps contains unknown tool 'missing'",
+            ),
+            (
+                json!({"required_steps": [""]}),
+                "required_steps contains an empty tool name",
+            ),
+            (
+                json!({"required_steps": ["search", "search"]}),
+                "required_steps contains duplicate tool 'search'",
+            ),
+            (
+                json!({"required_steps": ["search"], "terminal_tools": ["finish"]}),
+                "terminal_tools contains unknown tool 'finish'",
+            ),
+            (
+                json!({"required_steps": ["search"], "terminal_tools": [""]}),
+                "terminal_tools contains an empty tool name",
+            ),
+            (
+                json!({"required_steps": ["search"], "terminal_tools": ["respond", "respond"]}),
+                "terminal_tools contains duplicate tool 'respond'",
+            ),
+            (
+                json!({"required_steps": ["search"], "terminal_tools": ["search"]}),
+                "terminal_tools contains required step 'search'",
+            ),
+        ];
+
+        let client = Arc::new(MockOptionsClient::new(None));
+        for (forge, expected) in cases {
+            let body = json!({
+                "messages": [{"role": "user", "content": "hi"}],
+                "model": "request-model",
+                "tools": [search_tool_json()],
+                "_forge": forge
+            });
+            let ctx = Arc::new(Mutex::new(dummy_ctx()));
+            let err = handle_chat_completions(&body, &client, &ctx, 3, true)
+                .await
+                .expect_err("invalid _forge contract");
+            assert!(matches!(err, HandlerError::BadRequest(_)));
+            assert!(
+                err.message().contains(expected),
+                "expected '{expected}' in '{}'",
+                err.message()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1689,6 +1956,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_messages_with_tools_injects_respond_to_raw_backend_body() {
+        let mut server = mockito::Server::new_async().await;
+        let raw = json!({
+            "model": "claude-3",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "search",
+                "description": "Search",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}}
+                }
+            }]
+        });
+        let mut expected = raw.clone();
+        expected["tools"]
+            .as_array_mut()
+            .expect("tools")
+            .push(crate::clients::anthropic::convert::convert_tools(&[respond_spec()])[0].clone());
+        let mock = server
+            .mock("POST", "/messages")
+            .match_body(mockito::Matcher::Json(expected))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-3",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_respond",
+                        "name": "respond",
+                        "input": {"message": "ok"}
+                    }],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 3, "output_tokens": 1}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+        let client = Arc::new(
+            AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+                .with_base_url(server.url())
+                .with_timeout(5.0),
+        );
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true).await;
+
+        match result.unwrap() {
+            AnthropicHandlerResult::Response(v) => {
+                assert_eq!(v["content"][0]["text"], "ok");
+            }
+            _ => panic!("expected Response"),
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn anthropic_messages_streaming_preserves_cache_control_to_backend() {
         let mut server = mockito::Server::new_async().await;
         let raw = json!({
@@ -1897,6 +2227,22 @@ mod tests {
         })
     }
 
+    fn legacy_fetch_account_tool() -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": "legacy_fetch_account",
+                "description": "Fetch one account",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {"account_id": {"type": "string"}},
+                    "required": ["account_id"]
+                }
+            }
+        })
+    }
+
     #[tokio::test]
     async fn proxy_required_steps_block_premature_respond() {
         let mut respond_args = IndexMap::new();
@@ -1939,6 +2285,129 @@ mod tests {
         let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
         assert!(second_wire.contains("[StepEnforcementError]"));
         assert!(second_wire.contains("legacy_list_accounts"));
+    }
+
+    #[tokio::test]
+    async fn proxy_required_steps_retry_empty_tool_batch() {
+        let responses = vec![
+            LLMResponse::ToolCalls(Vec::new()),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_list_accounts", IndexMap::new())]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "audit account"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "_forge": {
+                "required_steps": ["legacy_list_accounts"],
+                "terminal_tools": ["respond"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                let calls = v["choices"][0]["message"]["tool_calls"]
+                    .as_array()
+                    .expect("tool calls");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["function"]["name"], json!("legacy_list_accounts"));
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let sent = client.sent_messages();
+        assert_eq!(sent.len(), 2);
+        let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
+        assert!(second_wire.contains("Your previous response was not a valid tool call"));
+        assert!(!second_wire.contains("\"tool_calls\":[]"));
+    }
+
+    #[tokio::test]
+    async fn proxy_retries_invalid_tool_arguments() {
+        let mut bad_args = IndexMap::new();
+        bad_args.insert("account_id".into(), json!(42));
+        let mut good_args = IndexMap::new();
+        good_args.insert("account_id".into(), json!("ACC-123"));
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_fetch_account", bad_args)]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_fetch_account", good_args)]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "fetch account"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_fetch_account_tool()]
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                let calls = v["choices"][0]["message"]["tool_calls"]
+                    .as_array()
+                    .expect("tool calls");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["function"]["name"], json!("legacy_fetch_account"));
+                assert_eq!(
+                    calls[0]["function"]["arguments"],
+                    json!("{\"account_id\":\"ACC-123\"}")
+                );
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let sent = client.sent_messages();
+        assert_eq!(sent.len(), 2);
+        let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
+        assert!(second_wire.contains("[InvalidArguments]"));
+        assert!(second_wire.contains("account_id must be string, got number"));
+    }
+
+    #[tokio::test]
+    async fn proxy_retries_invalid_tool_arguments_streaming() {
+        let mut bad_args = IndexMap::new();
+        bad_args.insert("account_id".into(), json!(42));
+        let mut good_args = IndexMap::new();
+        good_args.insert("account_id".into(), json!("ACC-123"));
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_fetch_account", bad_args)]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_fetch_account", good_args)]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "fetch account"}],
+            "model": "test-model",
+            "stream": true,
+            "tools": [legacy_fetch_account_tool()]
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        let events = collect_stream_events(result).await;
+        let event_text = serde_json::to_string(&events).expect("events json");
+        assert!(event_text.contains("legacy_fetch_account"));
+        assert!(event_text.contains("ACC-123"));
+
+        let sent = client.sent_messages();
+        assert_eq!(sent.len(), 2);
+        let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
+        assert!(second_wire.contains("[InvalidArguments]"));
+        assert!(second_wire.contains("account_id must be string, got number"));
     }
 
     #[tokio::test]
@@ -2091,13 +2560,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_required_steps_return_real_tools_from_mixed_batch() {
+    async fn proxy_required_steps_retry_mixed_terminal_batch() {
         let mut respond_args = IndexMap::new();
         respond_args.insert("message".into(), json!("done"));
-        let responses = vec![LLMResponse::ToolCalls(vec![
-            ToolCall::new("legacy_list_accounts", IndexMap::new()),
-            ToolCall::new("respond", respond_args),
-        ])];
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![
+                ToolCall::new("legacy_list_accounts", IndexMap::new()),
+                ToolCall::new("respond", respond_args),
+            ]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_list_accounts", IndexMap::new())]),
+        ];
         let client = Arc::new(MockWorkflowContractClient::new(responses));
         let body = json!({
             "messages": [{"role": "user", "content": "audit account"}],
@@ -2127,7 +2599,11 @@ mod tests {
             _ => panic!("expected Response"),
         }
 
-        assert_eq!(client.sent_messages().len(), 1);
+        let sent = client.sent_messages();
+        assert_eq!(sent.len(), 2);
+        let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
+        assert!(second_wire.contains("[StepEnforcementError]"));
+        assert!(second_wire.contains("Do not combine terminal and non-terminal tools"));
     }
 
     struct MockAlwaysTextClient;
@@ -2450,8 +2926,7 @@ mod tests {
             "model": "test-model",
             "stream": false,
             "tools": [
-                {"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}},
-                {"type": "function", "function": {"name": "respond", "description": "r", "parameters": {"type": "object", "properties": {"message": {"type": "string"}}}}}
+                {"type": "function", "function": {"name": "search", "description": "s", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}
             ]
         });
         let client = Arc::new(MockMixedToolClient);

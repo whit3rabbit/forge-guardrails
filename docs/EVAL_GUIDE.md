@@ -31,8 +31,8 @@ tools). The proxy strips `_forge` before forwarding to the backend, uses it only
 for step nudging/finalization, and still returns non-terminal client-owned tool
 calls for the wrapper to execute. Rows include
 `proxy_missing_required_steps`, `proxy_required_steps_satisfied`, and
-`proxy_failure_classification` so completed accuracy misses are not mislabeled
-as harness or protocol failures.
+`proxy_failure_classification` so required-step contract misses are not
+mislabeled as successful accuracy results or generic protocol failures.
 
 Rows should label the managed backend and proxy mode separately. For a local
 managed llama-server run, use `backend=llamaserver`, `mode=proxy`,
@@ -44,8 +44,11 @@ wrapper applies recommended sampling defaults by model unless
 It emits the flat JSONL fields needed by the Python report path plus
 Rust-parity fields such as `impl`, `success`, `tool_sequence`, `tool_args`,
 `final_text`, `proxy_terminal_source`, `proxy_missing_required_steps`,
-`proxy_required_steps_satisfied`, `proxy_failure_classification`, and
-`raw_response_on_failure`.
+`proxy_required_steps_satisfied`, `missing_required_steps`,
+`required_step_mismatch`, `proxy_failure_classification`, and
+`raw_response_on_failure`. The `success` field is contract-gated: a completed
+row with acceptable answer accuracy is still unsuccessful when
+`required_step_mismatch` is true.
 Streaming token usage is recorded only when the proxy emits OpenAI `usage`
 chunks.
 

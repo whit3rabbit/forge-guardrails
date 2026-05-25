@@ -50,6 +50,30 @@ pub(crate) struct Cli {
     )]
     pub(crate) extra_flags: Vec<String>,
 
+    /// KV cache type for K cache in managed llama backends.
+    #[arg(long, value_name = "TYPE")]
+    pub(crate) cache_type_k: Option<String>,
+
+    /// KV cache type for V cache in managed llama backends.
+    #[arg(long, value_name = "TYPE")]
+    pub(crate) cache_type_v: Option<String>,
+
+    /// Number of managed llama backend slots.
+    #[arg(long, value_name = "N")]
+    pub(crate) slots: Option<i64>,
+
+    /// Use unified KV cache in managed llama backends.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub(crate) kv_unified: bool,
+
+    /// Reasoning budget for managed llama backends.
+    #[arg(long, value_name = "TOKENS")]
+    pub(crate) reasoning_budget: Option<String>,
+
+    /// Reasoning format for managed llama backends.
+    #[arg(long, value_name = "FORMAT")]
+    pub(crate) reasoning_format: Option<String>,
+
     /// Function-calling mode for llama-compatible OpenAI-shape backends.
     #[arg(long, value_enum, default_value = "native", value_name = "MODE")]
     pub(crate) mode: CliMode,
@@ -170,6 +194,12 @@ mod tests {
         assert_eq!(cli.backend_port, DEFAULT_BACKEND_PORT);
         assert_eq!(cli.budget_mode, CliBudgetMode::Backend);
         assert_eq!(cli.budget_tokens, None);
+        assert_eq!(cli.cache_type_k, None);
+        assert_eq!(cli.cache_type_v, None);
+        assert_eq!(cli.slots, None);
+        assert!(!cli.kv_unified);
+        assert_eq!(cli.reasoning_budget, None);
+        assert_eq!(cli.reasoning_format, None);
         assert_eq!(cli.mode, CliMode::Native);
         assert_eq!(cli.backend_protocol, CliBackendProtocol::Openai);
         assert!(!cli.serialize);
@@ -232,6 +262,33 @@ mod tests {
             normalized_extra_flags(&cli.extra_flags),
             vec!["--reasoning-format".to_string(), "auto".to_string()]
         );
+    }
+
+    #[test]
+    fn first_class_managed_backend_flags_are_parsed() {
+        let cli = parse(&[
+            "--backend",
+            "llamaserver",
+            "--gguf",
+            "model.gguf",
+            "--cache-type-k",
+            "q8_0",
+            "--cache-type-v",
+            "q8_0",
+            "--slots",
+            "4",
+            "--kv-unified",
+            "--reasoning-budget",
+            "0",
+            "--reasoning-format",
+            "auto",
+        ]);
+        assert_eq!(cli.cache_type_k.as_deref(), Some("q8_0"));
+        assert_eq!(cli.cache_type_v.as_deref(), Some("q8_0"));
+        assert_eq!(cli.slots, Some(4));
+        assert!(cli.kv_unified);
+        assert_eq!(cli.reasoning_budget.as_deref(), Some("0"));
+        assert_eq!(cli.reasoning_format.as_deref(), Some("auto"));
     }
 
     #[test]

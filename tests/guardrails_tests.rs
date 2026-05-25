@@ -3,11 +3,13 @@
 //! plus additional edge cases from observable_behaviors and edge_cases.
 
 use forge_guardrails::guardrails::{
-    ErrorTracker, GuardAction, Guardrails, Nudge, ResponseValidator, RetryNudgeFn, StepEnforcer,
-    StepPrerequisite, TerminalTool,
+    ArgValidationKind, ErrorTracker, GuardAction, GuardrailHistory, GuardrailViolation, Guardrails,
+    Nudge, ResponseValidator, RetryNudgeFn, StepEnforcer, StepPrerequisite, TerminalTool,
 };
 use forge_guardrails::streaming::{LLMResponse, TextResponse, ToolCall};
+use forge_guardrails::ToolSpec;
 use indexmap::{IndexMap, IndexSet};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 fn make_tool_call(tool: &str) -> ToolCall {
@@ -43,6 +45,34 @@ fn make_args(pairs: &[(&str, &str)]) -> IndexMap<String, serde_json::Value> {
         map.insert(k.to_string(), serde_json::Value::String(v.to_string()));
     }
     map
+}
+
+fn validation_spec() -> ToolSpec {
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "query": {"type": "string", "enum": ["rust", "python"]},
+            "count": {"type": "integer"},
+            "exact": {"type": "number"},
+            "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "mode": {"type": "string"}
+                },
+                "required": ["mode"]
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
+        "required": ["query", "count", "config"]
+    });
+    let mut spec = ToolSpec::from_json_schema("search", "Search", &schema).expect("valid spec");
+    spec.json_schema = Some(schema);
+    spec
 }
 
 // ts-001
@@ -158,13 +188,75 @@ fn validator_unknown_tool_lists_available_tools_in_order() {
 
 // ob-008
 #[test]
-fn validator_empty_tool_calls_valid() {
+fn validator_empty_tool_calls_retry_when_tools_configured() {
     let validator = ResponseValidator::new(vec!["search".into()], true, None);
+    let response = LLMResponse::ToolCalls(Vec::new());
+    let result = validator.validate(&response);
+    assert!(result.needs_retry);
+    let nudge = result.nudge.expect("should have nudge");
+    assert_eq!(nudge.kind, "retry");
+}
+
+#[test]
+fn validator_empty_tool_calls_valid_without_tools() {
+    let validator = ResponseValidator::new(vec![], true, None);
     let response = LLMResponse::ToolCalls(Vec::new());
     let result = validator.validate(&response);
     assert!(!result.needs_retry);
     let calls = result.tool_calls.expect("should have tool_calls");
     assert!(calls.is_empty());
+}
+
+#[test]
+fn validator_schema_rejects_missing_required_arg() {
+    let validator = ResponseValidator::from_tool_specs(vec![validation_spec()], true, None);
+    let response = LLMResponse::ToolCalls(vec![make_tool_call("search")]);
+
+    let result = validator.validate(&response);
+
+    assert!(result.needs_retry);
+    let nudge = result.nudge.expect("nudge");
+    assert_eq!(nudge.kind, "invalid_arguments");
+    assert!(nudge.content.contains("query is required"));
+    assert!(nudge.content.contains("count is required"));
+}
+
+#[test]
+fn validator_schema_rejects_types_enums_extra_and_nested_args() {
+    let validator = ResponseValidator::from_tool_specs(vec![validation_spec()], true, None);
+    let mut args = IndexMap::new();
+    args.insert("query".to_string(), json!("go"));
+    args.insert("count".to_string(), json!("10"));
+    args.insert("exact".to_string(), json!("3"));
+    args.insert("tags".to_string(), json!(["ok", 7]));
+    args.insert("extra".to_string(), json!(true));
+    args.insert("config".to_string(), json!({"mode": 42, "other": "x"}));
+
+    let result = validator.validate(&LLMResponse::ToolCalls(vec![ToolCall::new("search", args)]));
+
+    assert!(result.needs_retry);
+    let content = result.nudge.expect("nudge").content;
+    assert!(content.contains("query must be one of: rust, python"));
+    assert!(content.contains("count must be integer, got string"));
+    assert!(content.contains("exact must be number, got string"));
+    assert!(content.contains("tags[1] must be string, got number"));
+    assert!(content.contains("config.mode must be string, got number"));
+    assert!(content.contains("config.other is not allowed"));
+    assert!(content.contains("extra is not allowed"));
+}
+
+#[test]
+fn validate_tool_arguments_reports_structured_kind() {
+    let mut args = IndexMap::new();
+    args.insert("query".to_string(), json!("rust"));
+    let errors = forge_guardrails::validate_tool_arguments(
+        &ToolCall::new("search", args),
+        &validation_spec(),
+    );
+
+    assert!(errors.iter().any(|error| {
+        error.path == "count" && matches!(error.kind, ArgValidationKind::MissingRequired)
+    }));
 }
 
 // ec-005
@@ -374,6 +466,55 @@ fn step_enforcer_summary_hint_and_completed_steps() {
     assert_eq!(completed.len(), 1);
     assert!(completed.contains_key("search"));
     assert!(!completed.contains_key("analyze"));
+}
+
+#[test]
+fn step_enforcer_guardrail_state_lists_allowed_and_blocked_tools() {
+    let mut enforcer = StepEnforcer::new(
+        vec!["search".into(), "analyze".into()],
+        IndexSet::from(["respond".into()]),
+        None,
+        3,
+        2,
+    );
+    enforcer.record("search", None);
+    let tools = vec![
+        "search".to_string(),
+        "analyze".to_string(),
+        "respond".to_string(),
+    ];
+
+    let state = enforcer.guardrail_state(&tools);
+
+    assert_eq!(state.completed_steps, vec!["search"]);
+    assert_eq!(state.pending_steps, vec!["analyze"]);
+    assert_eq!(state.allowed_next_tools, vec!["analyze"]);
+    assert_eq!(state.blocked_tools, vec!["respond"]);
+    assert_eq!(state.terminal_tools, vec!["respond"]);
+}
+
+#[test]
+fn guardrail_history_keeps_recent_events_and_bounded_counters() {
+    let mut history = GuardrailHistory::new(2);
+    history.record_violation(GuardrailViolation::UnknownTool {
+        called: "bad_a".to_string(),
+        available: vec!["search".to_string()],
+    });
+    history.record_violation(GuardrailViolation::UnknownTool {
+        called: "bad_b".to_string(),
+        available: vec!["search".to_string()],
+    });
+    history.record_violation(GuardrailViolation::UnknownTool {
+        called: "bad_c".to_string(),
+        available: vec!["search".to_string()],
+    });
+
+    assert_eq!(history.capacity(), 2);
+    assert_eq!(history.recent().len(), 2);
+    assert_eq!(history.last_called_tool.as_deref(), Some("bad_c"));
+    assert!(!history.repeated_unknown_tool.contains_key("bad_a"));
+    assert!(history.repeated_unknown_tool.contains_key("bad_b"));
+    assert!(history.repeated_unknown_tool.contains_key("bad_c"));
 }
 
 // ob-021
@@ -669,5 +810,7 @@ fn step_enforcer_mixed_batch_triggers_premature() {
         2,
     );
     let batch = vec![make_tool_call("search"), make_tool_call("respond")];
-    assert!(enforcer.check(&batch).needs_nudge);
+    let result = enforcer.check(&batch);
+    assert!(result.needs_nudge);
+    assert_eq!(result.nudge.expect("nudge").kind, "unsafe_batch");
 }

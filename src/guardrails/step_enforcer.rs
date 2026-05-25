@@ -1,4 +1,5 @@
 use super::nudge::Nudge;
+use super::policy::GuardrailState;
 use crate::clients::base::ToolCall;
 use crate::core::steps::{Prerequisite, StepTracker};
 use crate::prompts::nudges;
@@ -112,6 +113,15 @@ impl StepEnforcer {
         let tier = std::cmp::min(self.premature_attempts, 3);
         let pending = self.tracker.pending();
         let pending_refs: Vec<&str> = pending.iter().map(|s| s.as_str()).collect();
+        let mixed_terminal_batch = tool_calls
+            .iter()
+            .any(|c| !self.terminal_tools.contains(&c.tool));
+        if mixed_terminal_batch {
+            let blocked: Vec<&str> = self.terminal_tools.iter().map(|s| s.as_str()).collect();
+            let content = nudges::unsafe_batch_nudge(&pending_refs, &blocked);
+            let nudge = Nudge::new("user", content, "unsafe_batch").with_tier(tier);
+            return StepCheck::blocked(nudge);
+        }
         let terminal_name = tool_calls
             .iter()
             .find(|c| self.terminal_tools.contains(&c.tool))
@@ -181,6 +191,17 @@ impl StepEnforcer {
         self.tracker.summary_hint()
     }
 
+    /// Returns structured guardrail state for the current step tracker.
+    pub fn guardrail_state(&self, tool_names: &[String]) -> GuardrailState {
+        let completed_steps = self.completed_steps().keys().cloned().collect();
+        GuardrailState::from_parts(
+            completed_steps,
+            self.pending(),
+            tool_names,
+            &self.terminal_tools,
+        )
+    }
+
     /// Returns the number of recorded premature terminal tool attempts.
     pub fn premature_attempts(&self) -> i32 {
         self.premature_attempts
@@ -204,10 +225,10 @@ impl StepEnforcer {
     /// Returns completed steps as an IndexMap with string keys and unit values.
     pub fn completed_steps(&self) -> IndexMap<String, ()> {
         let all_required = self.tracker.required_steps();
-        let pending = self.tracker.pending();
+        let pending: IndexSet<String> = self.tracker.pending().into_iter().collect();
         all_required
             .iter()
-            .filter(|s| !pending.contains(s))
+            .filter(|s| !pending.contains(s.as_str()))
             .map(|s| (s.clone(), ()))
             .collect()
     }

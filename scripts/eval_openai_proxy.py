@@ -615,10 +615,10 @@ async def run_proxy_scenario(
 def _proxy_failure_classification(result: ProxyRunResult) -> str | None:
     if not result.completeness:
         return result.error_type or "incomplete"
-    if result.accuracy is not False:
-        return None
     if not result.proxy_required_steps_satisfied:
         return "proxy_contract_mismatch"
+    if result.accuracy is not False:
+        return None
     return "accuracy_false"
 
 
@@ -634,7 +634,12 @@ def _result_row(
     mode_label: str,
     eval_target_backend: str,
 ) -> dict[str, Any]:
-    success = bool(result.completeness and result.accuracy is not False)
+    required_step_mismatch = not result.proxy_required_steps_satisfied
+    success = bool(
+        result.completeness
+        and result.accuracy is not False
+        and not required_step_mismatch
+    )
     ideal_iterations = scenario.ideal_iterations or (
         len(scenario.workflow.required_steps) + 1
     )
@@ -676,6 +681,8 @@ def _result_row(
         "proxy_terminal_source": result.proxy_terminal_source,
         "proxy_missing_required_steps": result.proxy_missing_required_steps,
         "proxy_required_steps_satisfied": result.proxy_required_steps_satisfied,
+        "missing_required_steps": result.proxy_missing_required_steps,
+        "required_step_mismatch": required_step_mismatch,
         "proxy_failure_classification": proxy_failure_classification,
         "raw_response_on_failure": result.error_message if not result.completeness else None,
         "ideal_iterations": ideal_iterations,

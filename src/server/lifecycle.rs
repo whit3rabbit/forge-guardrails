@@ -13,7 +13,7 @@ use nix::sys::signal::{kill, killpg, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
-use super::args::build_backend_args;
+use super::args::{build_backend_args, validate_backend_extra_flags};
 use super::manager::{RunConfig, ServerManager};
 use super::runtime::validate_llamafile_runtime_path;
 
@@ -94,11 +94,13 @@ impl ServerManager {
         kv_unified: bool,
         options: LifecycleOptions,
     ) -> Result<bool, BackendError> {
+        let extra_flags =
+            validate_backend_extra_flags(extra_flags).map_err(|e| BackendError::new(0, e))?;
         let new_config = RunConfig {
             model: model.to_string(),
             mode: mode.to_string(),
             ctx_override,
-            extra_flags: extra_flags.to_vec(),
+            extra_flags: extra_flags.clone(),
             cache_type_k: cache_type_k.map(|s| s.to_string()),
             cache_type_v: cache_type_v.map(|s| s.to_string()),
             n_slots,
@@ -147,13 +149,14 @@ impl ServerManager {
             self.port,
             gguf_path,
             mode,
-            extra_flags,
+            &extra_flags,
             ctx_override,
             cache_type_k,
             cache_type_v,
             n_slots,
             kv_unified,
-        );
+        )
+        .map_err(|e| BackendError::new(0, e))?;
         let mut cmd = std::process::Command::new(&binary);
         cmd.args(&args);
         #[cfg(unix)]

@@ -37,11 +37,26 @@ def _classification(row: dict[str, Any]) -> str | None:
         return str(existing)
     if not row.get("completeness"):
         return str(row.get("error_type") or "incomplete")
+    if _required_step_mismatch(row):
+        return "proxy_contract_mismatch"
     if row.get("accuracy") is not False:
         return None
-    if row.get("proxy_required_steps_satisfied") is False:
-        return "proxy_contract_mismatch"
     return "accuracy_false"
+
+
+def _missing_required_steps(row: dict[str, Any]) -> list[Any]:
+    missing = row.get("missing_required_steps")
+    if missing is None:
+        missing = row.get("proxy_missing_required_steps")
+    return missing if isinstance(missing, list) else []
+
+
+def _required_step_mismatch(row: dict[str, Any]) -> bool:
+    if "required_step_mismatch" in row:
+        return bool(row["required_step_mismatch"])
+    if row.get("proxy_required_steps_satisfied") is False:
+        return True
+    return bool(_missing_required_steps(row))
 
 
 def _scenario_stats(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
@@ -55,7 +70,7 @@ def _scenario_stats(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
             stats[scenario]["success"] += 1
         if row.get("completeness") and row.get("accuracy") is False:
             stats[scenario]["completed_inaccurate"] += 1
-        if row.get("proxy_missing_required_steps"):
+        if _missing_required_steps(row):
             stats[scenario]["missing_required_steps"] += 1
         if _classification(row) == "proxy_contract_mismatch":
             stats[scenario]["failed_contract_mismatch"] += 1

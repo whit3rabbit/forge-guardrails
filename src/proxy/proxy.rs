@@ -5,6 +5,7 @@
 
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::clients::base::{LLMUsageDetails, TextResponse, TokenUsage, ToolCall};
@@ -91,24 +92,43 @@ fn uuid_prefix() -> String {
     format!("{:08x}", (t as u32).wrapping_mul(2654435761))
 }
 
+/// Error returned when OpenAI-format messages cannot be converted safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiMessageError {
+    message: String,
+}
+
+impl OpenAiMessageError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Returns the validation error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for OpenAiMessageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OpenAiMessageError {}
+
 /// Convert OpenAI-format chat messages to internal Message objects.
 ///
 /// Handles system, user, assistant (with optional tool_calls), and tool roles.
-/// Unknown roles map to user. List content blocks are joined with newlines.
-/// Null/empty content becomes empty string. Empty tool_calls list is treated
-/// as a text response.
-pub fn openai_to_messages(input: &[Value]) -> Vec<Message> {
+/// List content blocks are joined with newlines. Null/empty content becomes
+/// empty string. Empty tool_calls list is treated as a text response.
+pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessageError> {
     let mut messages = Vec::new();
-    for item in input {
-        let role_str = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+    for (message_index, item) in input.iter().enumerate() {
         let content = extract_content(item);
-        let role = match role_str {
-            "system" => MessageRole::System,
-            "user" => MessageRole::User,
-            "assistant" => MessageRole::Assistant,
-            "tool" => MessageRole::Tool,
-            _ => MessageRole::User,
-        };
+        let role = parse_message_role(item, message_index)?;
         let msg_type = match role {
             MessageRole::System => MessageType::SystemPrompt,
             MessageRole::User => MessageType::UserInput,
@@ -123,14 +143,14 @@ pub fn openai_to_messages(input: &[Value]) -> Vec<Message> {
             if let Some(tcs) = item.get("tool_calls").and_then(|t| t.as_array()) {
                 if !tcs.is_empty() {
                     let mut infos = Vec::new();
-                    for tc in tcs {
+                    for (tool_call_index, tc) in tcs.iter().enumerate() {
                         let name = tc
                             .get("function")
                             .and_then(|f| f.get("name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
                         let args_raw = tc.get("function").and_then(|f| f.get("arguments"));
-                        let args = parse_args_value(args_raw);
+                        let args = parse_args_value(args_raw, message_index, tool_call_index)?;
                         let call_id = tc
                             .get("id")
                             .and_then(|i| i.as_str())
@@ -156,7 +176,32 @@ pub fn openai_to_messages(input: &[Value]) -> Vec<Message> {
 
         messages.push(msg);
     }
-    messages
+    Ok(messages)
+}
+
+fn parse_message_role(
+    item: &Value,
+    message_index: usize,
+) -> Result<MessageRole, OpenAiMessageError> {
+    let Some(role_value) = item.get("role") else {
+        return Err(OpenAiMessageError::new(format!(
+            "messages[{message_index}].role is required"
+        )));
+    };
+    let Some(role) = role_value.as_str() else {
+        return Err(OpenAiMessageError::new(format!(
+            "messages[{message_index}].role must be a string"
+        )));
+    };
+    match role {
+        "system" => Ok(MessageRole::System),
+        "user" => Ok(MessageRole::User),
+        "assistant" => Ok(MessageRole::Assistant),
+        "tool" => Ok(MessageRole::Tool),
+        _ => Err(OpenAiMessageError::new(format!(
+            "messages[{message_index}].role must be one of system, user, assistant, tool"
+        ))),
+    }
 }
 
 /// Extract text content from an OpenAI message, handling null, string, and list.
@@ -189,15 +234,26 @@ fn extract_content(item: &Value) -> String {
 }
 
 /// Parse arguments from various JSON shapes.
-fn parse_args_value(args_raw: Option<&Value>) -> IndexMap<String, Value> {
+fn parse_args_value(
+    args_raw: Option<&Value>,
+    message_index: usize,
+    tool_call_index: usize,
+) -> Result<IndexMap<String, Value>, OpenAiMessageError> {
     match args_raw {
-        None => IndexMap::new(),
+        None => Ok(IndexMap::new()),
         Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
-            Ok(Value::Object(obj)) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            _ => IndexMap::new(),
+            Ok(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+            Ok(_) => Err(OpenAiMessageError::new(format!(
+                "messages[{message_index}].tool_calls[{tool_call_index}].function.arguments must decode to a JSON object"
+            ))),
+            Err(err) => Err(OpenAiMessageError::new(format!(
+                "messages[{message_index}].tool_calls[{tool_call_index}].function.arguments must be valid JSON: {err}"
+            ))),
         },
-        Some(Value::Object(obj)) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        _ => IndexMap::new(),
+        Some(Value::Object(obj)) => Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        Some(_) => Err(OpenAiMessageError::new(format!(
+            "messages[{message_index}].tool_calls[{tool_call_index}].function.arguments must be an object or JSON object string"
+        ))),
     }
 }
 
@@ -459,6 +515,9 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
             }
 
             let mut delta = Map::new();
+            if reasoning.is_none() {
+                delta.insert("role".into(), json!("assistant"));
+            }
             delta.insert("tool_calls".into(), json!(tc_deltas));
 
             let mut event = json!({
@@ -683,7 +742,7 @@ mod tests {
             json!({"role": "system", "content": "You are helpful"}),
             json!({"role": "user", "content": "Hello"}),
         ];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, MessageRole::System);
         assert_eq!(msgs[0].content, "You are helpful");
@@ -698,7 +757,7 @@ mod tests {
             "content": "",
             "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"p\": 1}"}}]
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].tool_calls.is_some());
         let calls = msgs[0].tool_calls.as_ref().unwrap();
@@ -714,7 +773,7 @@ mod tests {
             "content": "",
             "tool_calls": [{"type": "function", "function": {"name": "read", "arguments": "{}"}}]
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         let calls = msgs[0].tool_calls.as_ref().unwrap();
         assert!(calls[0].call_id.starts_with("call_"));
         assert!(calls[0].call_id.len() > "call_".len());
@@ -727,7 +786,7 @@ mod tests {
             "content": "",
             "tool_calls": [{"id": "", "type": "function", "function": {"name": "read", "arguments": "{}"}}]
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         let calls = msgs[0].tool_calls.as_ref().unwrap();
         assert!(calls[0].call_id.starts_with("call_"));
         assert!(calls[0].call_id.len() > "call_".len());
@@ -740,7 +799,7 @@ mod tests {
             "content": "Just text",
             "tool_calls": []
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert!(msgs[0].tool_calls.is_none());
         assert_eq!(msgs[0].content, "Just text");
     }
@@ -753,23 +812,23 @@ mod tests {
             "name": "search",
             "tool_call_id": "c1"
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs[0].role, MessageRole::Tool);
         assert_eq!(msgs[0].tool_name.as_deref(), Some("search"));
         assert_eq!(msgs[0].tool_call_id.as_deref(), Some("c1"));
     }
 
     #[test]
-    fn openai_to_messages_unknown_role_maps_to_user() {
+    fn openai_to_messages_unknown_role_rejected() {
         let input = vec![json!({"role": "function", "content": "test"})];
-        let msgs = openai_to_messages(&input);
-        assert_eq!(msgs[0].role, MessageRole::User);
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("role must be one of"));
     }
 
     #[test]
     fn openai_to_messages_null_content() {
         let input = vec![json!({"role": "user", "content": null})];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs[0].content, "");
     }
 
@@ -779,7 +838,7 @@ mod tests {
             "role": "user",
             "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": "World"}]
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs[0].content, "Hello\nWorld");
     }
 
@@ -789,8 +848,67 @@ mod tests {
             "role": "user",
             "content": ["Hello", {"type": "text", "text": "World"}]
         })];
-        let msgs = openai_to_messages(&input);
+        let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs[0].content, "Hello\nWorld");
+    }
+
+    #[test]
+    fn openai_to_messages_missing_role_rejected() {
+        let input = vec![json!({"content": "test"})];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("role is required"));
+    }
+
+    #[test]
+    fn openai_to_messages_non_string_role_rejected() {
+        let input = vec![json!({"role": 7, "content": "test"})];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("role must be a string"));
+    }
+
+    #[test]
+    fn openai_to_messages_malformed_tool_arguments_rejected() {
+        let input = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{broken"}}]
+        })];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("arguments must be valid JSON"));
+    }
+
+    #[test]
+    fn openai_to_messages_tool_arguments_string_non_object_rejected() {
+        let input = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "[]"}}]
+        })];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("must decode to a JSON object"));
+    }
+
+    #[test]
+    fn openai_to_messages_tool_arguments_value_non_object_rejected() {
+        let input = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": null}}]
+        })];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("must be an object"));
+    }
+
+    #[test]
+    fn openai_to_messages_absent_tool_arguments_is_empty_object() {
+        let input = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read"}}]
+        })];
+        let msgs = openai_to_messages(&input).expect("messages");
+        let calls = msgs[0].tool_calls.as_ref().unwrap();
+        assert!(calls[0].args.as_ref().unwrap().is_empty());
     }
 
     #[test]
@@ -867,6 +985,17 @@ mod tests {
             events[0]["choices"][0]["delta"]["tool_calls"][0]["id"],
             "call_keep"
         );
+    }
+
+    #[test]
+    fn sse_tool_calls_without_reasoning_include_assistant_role() {
+        let calls = vec![ToolCall::new("search", IndexMap::new())];
+        let events = tool_calls_to_sse_events(&calls, "model");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["choices"][0]["delta"]["role"], "assistant");
+        assert!(events[0]["choices"][0]["delta"]["tool_calls"].is_array());
+        assert_eq!(events[1]["choices"][0]["finish_reason"], "tool_calls");
     }
 
     #[test]

@@ -1,8 +1,10 @@
 use super::nudge::Nudge;
+use super::policy::{self, ArgValidationError};
 use crate::clients::base::{LLMResponse, TextResponse, ToolCall};
+use crate::core::tool_spec::ToolSpec;
 use crate::prompts;
 use crate::prompts::nudges;
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 
 /// Function type for generating custom retry nudge content.
 pub type RetryNudgeFn = Box<dyn Fn(&str) -> String + Send + Sync>;
@@ -43,6 +45,7 @@ impl ValidationResult {
 /// produces retry nudges for invalid responses.
 pub struct ResponseValidator {
     tool_names: IndexSet<String>,
+    tool_specs: IndexMap<String, ToolSpec>,
     rescue_enabled: bool,
     retry_nudge_fn: Option<RetryNudgeFn>,
 }
@@ -56,6 +59,27 @@ impl ResponseValidator {
     ) -> Self {
         Self {
             tool_names: tool_names.into_iter().collect(),
+            tool_specs: IndexMap::new(),
+            rescue_enabled,
+            retry_nudge_fn,
+        }
+    }
+
+    /// Creates a schema-aware `ResponseValidator` from tool specs.
+    pub fn from_tool_specs(
+        tool_specs: Vec<ToolSpec>,
+        rescue_enabled: bool,
+        retry_nudge_fn: Option<RetryNudgeFn>,
+    ) -> Self {
+        let mut tool_names = IndexSet::new();
+        let mut specs = IndexMap::new();
+        for spec in tool_specs {
+            tool_names.insert(spec.name.clone());
+            specs.insert(spec.name.clone(), spec);
+        }
+        Self {
+            tool_names,
+            tool_specs: specs,
             rescue_enabled,
             retry_nudge_fn,
         }
@@ -72,7 +96,15 @@ impl ResponseValidator {
 
     fn validate_tool_calls(&self, calls: &[ToolCall]) -> ValidationResult {
         if calls.is_empty() {
-            return ValidationResult::valid(Vec::new());
+            if self.tool_names.is_empty() {
+                return ValidationResult::valid(Vec::new());
+            }
+            let content = match &self.retry_nudge_fn {
+                Some(f) => f(""),
+                None => nudges::retry_nudge(""),
+            };
+            let nudge = Nudge::new("user", content, "retry");
+            return ValidationResult::invalid(nudge);
         }
         let unknown: Vec<&str> = calls
             .iter()
@@ -83,6 +115,17 @@ impl ResponseValidator {
             let available: Vec<&str> = self.tool_names.iter().map(|s| s.as_str()).collect();
             let content = nudges::unknown_tool_nudge(first_unknown, &available);
             let nudge = Nudge::new("user", content, "unknown_tool");
+            return ValidationResult::invalid(nudge);
+        }
+        let arg_errors = policy::validate_tool_call_batch(calls, &self.tool_specs);
+        if !arg_errors.is_empty() {
+            let first_tool = arg_errors[0].tool.clone();
+            let tool_errors: Vec<ArgValidationError> = arg_errors
+                .into_iter()
+                .filter(|error| error.tool == first_tool)
+                .collect();
+            let content = Self::invalid_arguments_nudge(&first_tool, &tool_errors);
+            let nudge = Nudge::new("user", content, "invalid_arguments");
             return ValidationResult::invalid(nudge);
         }
         ValidationResult::valid(calls.to_vec())
@@ -102,5 +145,15 @@ impl ResponseValidator {
         };
         let nudge = Nudge::new("user", content, "retry");
         ValidationResult::invalid(nudge)
+    }
+
+    fn invalid_arguments_nudge(tool_name: &str, errors: &[ArgValidationError]) -> String {
+        let mut lines = Vec::with_capacity(errors.len() + 2);
+        lines.push(format!("The call to {} has invalid arguments:", tool_name));
+        for error in errors {
+            lines.push(format!("- {}", error.message()));
+        }
+        lines.push("Retry with only this tool call and corrected arguments.".to_string());
+        lines.join("\n")
     }
 }

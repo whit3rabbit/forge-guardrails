@@ -65,6 +65,19 @@ pub fn prerequisite_nudge(tool_name: &str, missing_prereqs: &[&str]) -> String {
     )
 }
 
+/// Generate a nudge when a terminal call is mixed with non-terminal work.
+pub fn unsafe_batch_nudge(allowed_next_tools: &[&str], blocked_tools: &[&str]) -> String {
+    let allowed = allowed_next_tools.join(", ");
+    let blocked = blocked_tools.join(", ");
+    format!(
+        "Do not combine terminal and non-terminal tools in the same response. \
+         Allowed next tool calls: {}. \
+         Blocked until later: {}. \
+         Retry with only an allowed tool call.",
+        allowed, blocked
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +144,13 @@ mod tests {
         let result = prerequisite_nudge("finalize", &["search", "analyze"]);
         assert!(result.contains("finalize"));
         assert!(result.contains("search, analyze"));
+    }
+
+    #[test]
+    fn unsafe_batch_nudge_lists_allowed_and_blocked() {
+        let result = unsafe_batch_nudge(&["search"], &["respond"]);
+        assert!(result.contains("search"));
+        assert!(result.contains("respond"));
+        assert!(result.contains("Do not combine"));
     }
 }

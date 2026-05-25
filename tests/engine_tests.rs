@@ -191,7 +191,9 @@ where
                 "search",
                 "Search tool",
                 &serde_json::json!({
-                    "type": "object", "properties": {"query": {"type": "string"}}
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
                 }),
             )
             .expect("valid spec"),
@@ -303,6 +305,190 @@ async fn ts002_text_response_retry() {
 
     let result = runner.run(&workflow, "do stuff", None, None, None).await;
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+}
+
+#[tokio::test]
+async fn empty_tool_batch_retried_without_noop_execution() {
+    let collected: Arc<std::sync::Mutex<Vec<MessageType>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected_clone = collected.clone();
+    let cb: OnMessageFn = Box::new(move |msg: &Message| {
+        if let Ok(mut v) = collected_clone.lock() {
+            v.push(msg.metadata.msg_type);
+        }
+    });
+
+    let mut search_args = IndexMap::new();
+    search_args.insert("query".to_string(), Value::String("test".to_string()));
+    let mut respond_args = IndexMap::new();
+    respond_args.insert("message".to_string(), Value::String("done".to_string()));
+
+    let client = MockClient::new(vec![
+        LLMResponse::ToolCalls(Vec::new()),
+        make_tool_call("search", search_args),
+        make_tool_call("respond", respond_args),
+    ]);
+    let runner = Arc::new(WorkflowRunner::new(
+        Arc::new(client),
+        make_context_manager(),
+        10,
+        3,
+        2,
+        false,
+        None,
+        Some(cb),
+        true,
+        None,
+    ));
+    let workflow = make_simple_workflow();
+
+    let result = runner.run(&workflow, "do stuff", None, None, None).await;
+    assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+    assert_eq!(result.expect("ok"), Value::String("done".to_string()));
+
+    let final_collected = collected.lock().expect("lock");
+    assert_eq!(final_collected.first(), Some(&MessageType::RetryNudge));
+    assert_eq!(
+        final_collected
+            .iter()
+            .filter(|msg_type| **msg_type == MessageType::RetryNudge)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn invalid_tool_arguments_retry_before_execution() {
+    let collected: Arc<std::sync::Mutex<Vec<Message>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected_clone = collected.clone();
+    let cb: OnMessageFn = Box::new(move |msg: &Message| {
+        if let Ok(mut v) = collected_clone.lock() {
+            v.push(msg.clone());
+        }
+    });
+
+    let mut search_args = IndexMap::new();
+    search_args.insert("query".to_string(), Value::String("test".to_string()));
+    let mut respond_args = IndexMap::new();
+    respond_args.insert("message".to_string(), Value::String("done".to_string()));
+
+    let client = Arc::new(MockClient::new(vec![
+        make_tool_call("search", IndexMap::new()),
+        make_tool_call("search", search_args),
+        make_tool_call("respond", respond_args),
+    ]));
+    let runner = Arc::new(WorkflowRunner::new(
+        client.clone(),
+        make_context_manager(),
+        10,
+        3,
+        2,
+        false,
+        None,
+        Some(cb),
+        true,
+        None,
+    ));
+    let workflow = make_simple_workflow();
+
+    let result = runner.run(&workflow, "do stuff", None, None, None).await;
+
+    assert_eq!(
+        result.expect("workflow ok"),
+        Value::String("done".to_string())
+    );
+    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+    let messages = collected.lock().expect("lock");
+    let invalid_result = messages
+        .iter()
+        .find(|msg| {
+            msg.metadata.msg_type == MessageType::RetryNudge
+                && msg.content.contains("[InvalidArguments]")
+        })
+        .expect("invalid argument retry message");
+    assert!(invalid_result.content.contains("query is required"));
+}
+
+#[tokio::test]
+async fn mixed_terminal_batch_retried_without_executing_partial_work() {
+    let collected: Arc<std::sync::Mutex<Vec<Message>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected_clone = collected.clone();
+    let cb: OnMessageFn = Box::new(move |msg: &Message| {
+        if let Ok(mut v) = collected_clone.lock() {
+            v.push(msg.clone());
+        }
+    });
+
+    let mut search_args = IndexMap::new();
+    search_args.insert("query".to_string(), Value::String("test".to_string()));
+    let mut premature_respond_args = IndexMap::new();
+    premature_respond_args.insert("message".to_string(), Value::String("too soon".to_string()));
+    let mut final_respond_args = IndexMap::new();
+    final_respond_args.insert("message".to_string(), Value::String("done".to_string()));
+
+    let client = Arc::new(MockClient::new(vec![
+        LLMResponse::ToolCalls(vec![
+            forge_guardrails::ToolCall::new("search", search_args.clone()),
+            forge_guardrails::ToolCall::new("respond", premature_respond_args),
+        ]),
+        make_tool_call("search", search_args),
+        make_tool_call("respond", final_respond_args),
+    ]));
+    let runner = Arc::new(WorkflowRunner::new(
+        client.clone(),
+        make_context_manager(),
+        10,
+        3,
+        2,
+        false,
+        None,
+        Some(cb),
+        true,
+        None,
+    ));
+    let workflow = make_simple_workflow();
+
+    let result = runner.run(&workflow, "do stuff", None, None, None).await;
+
+    assert_eq!(
+        result.expect("workflow ok"),
+        Value::String("done".to_string())
+    );
+    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+
+    let messages = collected.lock().expect("lock");
+    let retry_results: Vec<&Message> = messages
+        .iter()
+        .filter(|msg| msg.metadata.msg_type == MessageType::RetryNudge)
+        .collect();
+    assert_eq!(retry_results.len(), 2);
+    assert!(retry_results
+        .iter()
+        .all(|msg| msg.content.contains("Do not combine terminal")));
+
+    let blocked_call_ids: Vec<String> = messages
+        .iter()
+        .filter_map(|msg| {
+            if msg.metadata.msg_type == MessageType::ToolCall {
+                msg.tool_calls.as_ref().map(|calls| {
+                    calls
+                        .iter()
+                        .map(|call| call.call_id.clone())
+                        .collect::<Vec<_>>()
+                })
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("blocked tool call ids");
+    let blocked_result_ids: Vec<String> = retry_results
+        .iter()
+        .map(|msg| msg.tool_call_id.clone().expect("tool result id"))
+        .collect();
+    assert_eq!(blocked_call_ids, blocked_result_ids);
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +1112,68 @@ async fn ts014_multiple_terminal_tools() {
         result.expect("ok"),
         Value::String("summary result".to_string())
     );
+}
+
+#[tokio::test]
+async fn terminal_mixed_batch_rejected_when_no_steps_pending() {
+    fn respond_fn(args: Vec<String>) -> Result<String, ToolResolutionError> {
+        for arg in &args {
+            if let Some(val) = arg.strip_prefix("message=") {
+                return Ok(val.to_string());
+            }
+        }
+        Ok("responded".to_string())
+    }
+
+    let side_effects = Arc::new(AtomicI32::new(0));
+    let side_effects_for_tool = side_effects.clone();
+    let side_effect_tool = move |_args: Vec<String>| -> Result<String, ToolResolutionError> {
+        side_effects_for_tool.fetch_add(1, AtomicOrdering::SeqCst);
+        Ok("side effect executed".to_string())
+    };
+
+    let mut tools: IndexMap<String, ToolDef> = IndexMap::new();
+    tools.insert(
+        "respond".to_string(),
+        ToolDef::new(respond_spec(), respond_fn),
+    );
+    tools.insert(
+        "side_effect".to_string(),
+        ToolDef::new(
+            ToolSpec::from_json_schema(
+                "side_effect",
+                "Side effect",
+                &serde_json::json!({
+                    "type": "object", "properties": {}
+                }),
+            )
+            .expect("valid"),
+            side_effect_tool,
+        ),
+    );
+
+    let workflow = Workflow::new(
+        "mixed_terminal",
+        "mixed terminal test",
+        tools,
+        vec![],
+        TerminalToolInput::Single("respond".to_string()),
+        "Helper.",
+    )
+    .expect("valid");
+
+    let mut terminal_args = IndexMap::new();
+    terminal_args.insert("message".to_string(), Value::String("done".to_string()));
+    let mixed_batch = LLMResponse::ToolCalls(vec![
+        forge_guardrails::ToolCall::new("respond", terminal_args.clone()),
+        forge_guardrails::ToolCall::new("side_effect", IndexMap::new()),
+    ]);
+    let client = MockClient::new(vec![mixed_batch, make_tool_call("respond", terminal_args)]);
+    let runner = make_runner(client);
+
+    let result = runner.run(&workflow, "finish", None, None, None).await;
+    assert_eq!(result.expect("ok"), Value::String("done".to_string()));
+    assert_eq!(side_effects.load(AtomicOrdering::SeqCst), 0);
 }
 
 // ---------------------------------------------------------------------------

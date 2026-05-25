@@ -54,6 +54,22 @@ fn args_for(
         n_slots,
         kv_unified,
     )
+    .expect("backend args")
+}
+
+fn args_result(extra_flags: &[String]) -> Result<Vec<String>, String> {
+    build_backend_args(
+        "llamaserver",
+        8080,
+        Path::new("model.gguf"),
+        "native",
+        extra_flags,
+        None,
+        None,
+        None,
+        None,
+        false,
+    )
 }
 
 fn unique_test_dir(name: &str) -> PathBuf {
@@ -212,6 +228,45 @@ fn backend_args_preserve_extra_flags() {
     assert!(args
         .windows(2)
         .any(|pair| pair[0] == "--reasoning-budget" && pair[1] == "0"));
+}
+
+#[test]
+fn backend_args_accept_allowlisted_inline_extra_flags() {
+    let extra = vec![
+        "--reasoning-budget=0".to_string(),
+        "--reasoning-format=auto".to_string(),
+    ];
+    let args = args_for("llamaserver", "native", &extra, None, false);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--reasoning-budget" && pair[1] == "0"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--reasoning-format" && pair[1] == "auto"));
+}
+
+#[test]
+fn backend_args_reject_core_override_extra_flags() {
+    for flag in ["-m", "--model", "--host", "--port", "-c", "--ctx-size"] {
+        let err = args_result(&[flag.to_string(), "unsafe".to_string()]).unwrap_err();
+        assert!(err.contains("unsupported backend extra flag"));
+    }
+}
+
+#[test]
+fn backend_args_reject_unsupported_and_malformed_extra_flags() {
+    for extra in [
+        vec!["--temp".to_string(), "0".to_string()],
+        vec!["positional".to_string()],
+        vec!["--".to_string(), "--reasoning-budget".to_string()],
+        vec!["--reasoning-budget".to_string()],
+        vec!["--reasoning-format=".to_string()],
+    ] {
+        assert!(
+            args_result(&extra).is_err(),
+            "expected rejection for {extra:?}"
+        );
+    }
 }
 
 #[test]
@@ -517,6 +572,49 @@ fn managed_port_occupied_fails_before_spawn() {
     assert!(result.is_err());
     assert!(!log_path.exists());
     drop(listener);
+    let _ = std::fs::remove_dir_all(test_dir);
+}
+
+#[test]
+fn invalid_extra_flags_fail_before_stopping_existing_backend() {
+    let _guard = port_test_guard();
+    let test_dir = unique_test_dir("managed-invalid-extra-flags");
+    let gguf_path = test_dir.join("model.gguf");
+    std::fs::write(&gguf_path, b"dummy gguf").unwrap();
+    let child = std::process::Command::new("sleep")
+        .arg("5")
+        .spawn()
+        .unwrap();
+    let mgr = ServerManager::new("llamaserver", free_port(), None);
+    *mgr.process.lock().unwrap() = Some(child);
+
+    let result = mgr.start_with_options(
+        "",
+        &gguf_path,
+        "native",
+        &["--host".to_string(), "0.0.0.0".to_string()],
+        None,
+        None,
+        None,
+        None,
+        false,
+        test_lifecycle_options(),
+    );
+
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported backend extra flag"));
+    assert!(mgr
+        .process
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none());
+    let _ = mgr.stop_with_options(Duration::from_millis(200), Duration::ZERO);
     let _ = std::fs::remove_dir_all(test_dir);
 }
 

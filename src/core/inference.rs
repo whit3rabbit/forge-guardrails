@@ -272,6 +272,17 @@ pub async fn run_inference_with_options<C: LLMClient>(
                     new_messages.push(nudge_msg);
                 }
                 LLMResponse::ToolCalls(calls) => {
+                    if calls.is_empty() {
+                        let nudge_msg = Message::new(
+                            MessageRole::User,
+                            &nudge_content,
+                            MessageMeta::new(MessageType::RetryNudge).with_step_index(step_index),
+                        );
+                        messages.push(nudge_msg.clone());
+                        new_messages.push(nudge_msg);
+                        continue;
+                    }
+
                     // Unknown tool: emit reasoning (if present), tool_call, error results.
                     let mut tool_call_infos = Vec::new();
                     for tc in calls {
@@ -299,9 +310,18 @@ pub async fn run_inference_with_options<C: LLMClient>(
                     messages.push(tool_call_msg.clone());
                     new_messages.push(tool_call_msg);
 
-                    // Error results with [UnknownTool] prefix (Python parity).
+                    let error_prefix = validation
+                        .nudge
+                        .as_ref()
+                        .map(|nudge| match nudge.kind.as_str() {
+                            "unknown_tool" => "[UnknownTool]",
+                            "invalid_arguments" => "[InvalidArguments]",
+                            _ => "[Guardrail]",
+                        })
+                        .unwrap_or("[Guardrail]");
+
                     for info in &tool_call_infos {
-                        let error_content = format!("[UnknownTool] {}", nudge_content);
+                        let error_content = format!("{} {}", error_prefix, nudge_content);
                         let result_msg = Message::new(
                             MessageRole::Tool,
                             &error_content,

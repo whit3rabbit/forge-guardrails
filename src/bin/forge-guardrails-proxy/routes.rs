@@ -8,7 +8,8 @@ use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
     handle_anthropic_messages, handle_chat_completions, AnthropicHandlerError,
-    AnthropicHandlerResult, ContextManager, HandlerResult, LLMClient, NoCompact, ServerManager,
+    AnthropicHandlerResult, ContextManager, HandlerError, HandlerResult, LLMClient, NoCompact,
+    ServerManager,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
@@ -141,16 +142,6 @@ async fn models(State(state): State<AppState>) -> Response {
 }
 
 async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
-    let model = extract_openai_model(body.as_ref(), &state.config.default_model);
-    let client = Arc::new(state.client_factory.client_for_model(model.clone()));
-    let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
-        Box::new(NoCompact),
-        state.config.context_tokens,
-        None,
-        None,
-        None,
-    )));
-
     if body.len() > MAX_BODY_SIZE {
         return build_response(
             413,
@@ -168,6 +159,15 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
             );
         }
     };
+    let model = extract_model_from_value(&parsed, &state.config.default_model);
+    let client = Arc::new(state.client_factory.client_for_model(model));
+    let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
+        Box::new(NoCompact),
+        state.config.context_tokens,
+        None,
+        None,
+        None,
+    )));
 
     let guard = if state.config.serialize_requests {
         Some(state.request_mutex.clone().lock_owned().await)
@@ -188,7 +188,12 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
             build_response(200, "application/json", value.to_string())
         }
         Ok(HandlerResult::StreamBody(events)) => build_openai_sse_response(events, guard),
-        Err(err) => build_response(502, "application/json", json!({"error": err}).to_string()),
+        Err(HandlerError::BadRequest(err)) => {
+            build_response(400, "application/json", json!({"error": err}).to_string())
+        }
+        Err(HandlerError::Upstream(err)) => {
+            build_response(502, "application/json", json!({"error": err}).to_string())
+        }
     }
 }
 
@@ -201,11 +206,22 @@ async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Respo
         );
     }
 
-    let model = extract_anthropic_model(body.as_ref(), &state.config.default_model);
-    let client = Arc::new(state.client_factory.client_for_model(model.clone()));
-    anthropic_messages_with_client(state.config, state.request_mutex, client, body).await
+    let raw: Value = match serde_json::from_slice(body.as_ref()) {
+        Ok(value) => value,
+        Err(err) => {
+            return build_response(
+                400,
+                "application/json",
+                json!({"error": err.to_string()}).to_string(),
+            );
+        }
+    };
+    let model = extract_model_from_value(&raw, &state.config.default_model);
+    let client = Arc::new(state.client_factory.client_for_model(model));
+    anthropic_messages_with_raw_client(state.config, state.request_mutex, client, raw).await
 }
 
+#[cfg(test)]
 async fn anthropic_messages_with_client<C: LLMClient + 'static>(
     config: Arc<ProxyConfig>,
     request_mutex: Arc<TokioMutex<()>>,
@@ -230,6 +246,15 @@ async fn anthropic_messages_with_client<C: LLMClient + 'static>(
             );
         }
     };
+    anthropic_messages_with_raw_client(config, request_mutex, client, raw).await
+}
+
+async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
+    config: Arc<ProxyConfig>,
+    request_mutex: Arc<TokioMutex<()>>,
+    client: Arc<C>,
+    raw: Value,
+) -> Response {
     let parsed: anyllm_translate::anthropic::MessageCreateRequest =
         match serde_json::from_value(raw.clone()) {
             Ok(value) => value,
@@ -287,25 +312,31 @@ async fn cors_preflight() -> Response {
     build_response(204, "", String::new())
 }
 
+#[cfg(test)]
 fn extract_openai_model(body: &[u8], default_model: &str) -> String {
     extract_json_model(body, default_model)
 }
 
+#[cfg(test)]
 fn extract_anthropic_model(body: &[u8], default_model: &str) -> String {
     extract_json_model(body, default_model)
 }
 
+#[cfg(test)]
 fn extract_json_model(body: &[u8], default_model: &str) -> String {
     serde_json::from_slice::<Value>(body)
         .ok()
-        .and_then(|value| {
-            value
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .map(ToOwned::to_owned)
-        })
+        .map(|value| extract_model_from_value(&value, default_model))
+        .unwrap_or_else(|| default_model.to_string())
+}
+
+fn extract_model_from_value(value: &Value, default_model: &str) -> String {
+    value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
         .unwrap_or_else(|| default_model.to_string())
 }
 

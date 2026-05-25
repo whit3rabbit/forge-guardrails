@@ -127,6 +127,9 @@ impl AnthropicClient {
                 }
                 obj.entry("model".to_string())
                     .or_insert_with(|| Value::String(self.model.clone()));
+                if let Some(tool_specs) = tools.as_deref().filter(|tools| !tools.is_empty()) {
+                    merge_guarded_tools_into_raw_body(obj, tool_specs);
+                }
             }
             return body;
         }
@@ -145,6 +148,32 @@ impl AnthropicClient {
             }
         }
         body
+    }
+}
+
+fn merge_guarded_tools_into_raw_body(obj: &mut serde_json::Map<String, Value>, tools: &[ToolSpec]) {
+    let converted = convert::convert_tools(tools);
+    let existing_tools = obj
+        .entry("tools".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(existing_tools) = existing_tools.as_array_mut() else {
+        obj.insert("tools".to_string(), Value::Array(converted));
+        return;
+    };
+
+    for tool in converted {
+        let Some(name) = tool.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let already_present = existing_tools.iter().any(|existing| {
+            existing
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|existing_name| existing_name == name)
+        });
+        if !already_present {
+            existing_tools.push(tool);
+        }
     }
 }
 

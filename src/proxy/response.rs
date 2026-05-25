@@ -118,6 +118,7 @@ fn cors_header_name(name: &str) -> Option<HeaderName> {
 /// Format OpenAI-style SSE events.
 ///
 /// OpenAI streams terminate with a synthetic [DONE] sentinel; Anthropic streams do not.
+#[cfg(test)]
 pub fn format_sse_body(events: &[Value]) -> String {
     let mut body = String::new();
     for event in events {
@@ -127,6 +128,7 @@ pub fn format_sse_body(events: &[Value]) -> String {
     body
 }
 
+#[cfg(test)]
 pub(crate) async fn collect_openai_sse_body<S>(events: S) -> Result<String, StreamError>
 where
     S: Stream<Item = Result<Value, StreamError>>,
@@ -140,6 +142,7 @@ where
     Ok(body)
 }
 
+#[cfg(test)]
 pub(crate) async fn collect_anthropic_sse_body<S>(events: S) -> Result<String, StreamError>
 where
     S: Stream<Item = Result<StreamEvent, StreamError>>,
@@ -204,6 +207,7 @@ where
 }
 
 /// Format Anthropic SSE events with named event fields.
+#[cfg(test)]
 pub fn format_anthropic_sse_body(events: &[StreamEvent]) -> String {
     let mut body = String::new();
     for event in events {
