@@ -25,12 +25,14 @@ executed locally, matching `tool` results are appended with the original tool
 call IDs, and final proxy-visible text is validated against the scenario
 terminal schema where possible. The wrapper does not send scenario-owned
 `respond(...)` tools to the proxy because `respond` is proxy-reserved.
-It does not enforce scenario `required_steps` or prerequisites itself; if the
-proxy returns premature text, the row completes with whatever accuracy the
-scenario validator assigns. Rows include `proxy_missing_required_steps`,
-`proxy_required_steps_satisfied`, and `proxy_failure_classification` so direct
-runner step-enforcement deltas are not mislabeled as harness or protocol
-failures.
+For workflow parity checks it sends private Forge extension fields:
+`forge_required_steps`, `forge_terminal_tools`, and
+`forge_tool_prerequisites`. The proxy strips these before forwarding to the
+backend, uses them only for step/prerequisite nudging, and still returns
+client-owned tool calls for the wrapper to execute. Rows include
+`proxy_missing_required_steps`, `proxy_required_steps_satisfied`, and
+`proxy_failure_classification` so completed accuracy misses are not mislabeled
+as harness or protocol failures.
 
 Rows should label the managed backend and proxy mode separately. For a local
 managed llama-server run, use `backend=llamaserver`, `mode=proxy`,
@@ -54,8 +56,8 @@ results.
 
 Known classifications for the local Ministral proxy comparison:
 
-- `inconsistent_api_recovery_stateful`: proxy contract mismatch from skipped
-  required setup; direct `WorkflowRunner` step enforcement nudges this path.
+- `inconsistent_api_recovery_stateful`: required-step contract gap; proxy
+  workflow extensions should remove this from failed contract mismatches.
 - `argument_transformation*`: model/scenario accuracy weakness in local runs.
 - `grounded_synthesis*`: model/scenario weakness; published direct LS/N is also
   0 for these columns.
@@ -87,6 +89,7 @@ Supported initial scenarios:
 - `basic_2step`
 - `sequential_3step`
 - `error_recovery`
+- `inconsistent_api_recovery_stateful`
 
 The runner writes JSONL to stdout unless `--output` is provided. It does not
 generate dashboards, manage local server processes, or clone the full Python
@@ -108,7 +111,8 @@ ideal_iterations, wasted_calls, elapsed_s, error_type, error_message,
 budget_tokens, compaction_events, retry_nudges, step_nudges, tool_errors,
 reasoning_msgs, tool_sequence, tool_args, final_text, proxy_terminal_source,
 proxy_missing_required_steps, proxy_required_steps_satisfied,
-proxy_failure_classification, raw_response_on_failure
+proxy_failure_classification, raw_response_on_failure, missing_required_steps,
+required_step_mismatch
 ```
 
 Rows may also include `stream_retries`, `input_tokens`, and `output_tokens`

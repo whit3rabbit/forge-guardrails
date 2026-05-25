@@ -9,8 +9,10 @@ use crate::clients::base::{
     TokenUsage, ToolCall,
 };
 use crate::context::manager::ContextManager;
+use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
 use crate::error::StreamError;
+use crate::guardrails::{StepEnforcer, StepPrerequisite};
 use crate::proxy::{
     extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,
     respond_tool_openai, strip_respond_calls, text_response_to_openai_with_usage_details,
@@ -21,6 +23,7 @@ use anyllm_translate::anthropic::streaming::StreamEvent;
 use anyllm_translate::anthropic::MessageCreateRequest;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Value};
 use std::fmt;
 use std::pin::Pin;
@@ -40,6 +43,18 @@ pub enum HandlerResult {
     Response(Value),
     /// Streaming: OpenAI response chunk objects.
     StreamBody(OpenAiEventStream),
+}
+
+const FORGE_REQUIRED_STEPS_FIELD: &str = "forge_required_steps";
+const FORGE_TERMINAL_TOOLS_FIELD: &str = "forge_terminal_tools";
+const FORGE_TOOL_PREREQUISITES_FIELD: &str = "forge_tool_prerequisites";
+const PROXY_STEP_INDEX: i64 = 0;
+
+#[derive(Debug, Clone)]
+struct ProxyWorkflowContract {
+    required_steps: Vec<String>,
+    terminal_tools: IndexSet<String>,
+    tool_prerequisites: Option<IndexMap<String, Vec<StepPrerequisite>>>,
 }
 
 impl fmt::Debug for HandlerResult {
@@ -155,6 +170,106 @@ fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDet
     }
 }
 
+fn parse_proxy_workflow_contract(body: &Value) -> Result<Option<ProxyWorkflowContract>, String> {
+    let has_contract_field = body.get(FORGE_REQUIRED_STEPS_FIELD).is_some()
+        || body.get(FORGE_TERMINAL_TOOLS_FIELD).is_some()
+        || body.get(FORGE_TOOL_PREREQUISITES_FIELD).is_some();
+    if !has_contract_field {
+        return Ok(None);
+    }
+
+    let required_steps =
+        parse_string_array_field(body, FORGE_REQUIRED_STEPS_FIELD)?.unwrap_or_default();
+    let terminal_tools = parse_string_array_field(body, FORGE_TERMINAL_TOOLS_FIELD)?
+        .unwrap_or_else(|| vec![RESPOND_TOOL_NAME.to_string()]);
+    let mut terminal_set: IndexSet<String> = terminal_tools.into_iter().collect();
+    if terminal_set.is_empty() {
+        terminal_set.insert(RESPOND_TOOL_NAME.to_string());
+    }
+    let tool_prerequisites =
+        parse_tool_prerequisites_field(body.get(FORGE_TOOL_PREREQUISITES_FIELD))?;
+
+    Ok(Some(ProxyWorkflowContract {
+        required_steps,
+        terminal_tools: terminal_set,
+        tool_prerequisites,
+    }))
+}
+
+fn parse_string_array_field(body: &Value, field: &str) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = body.get(field) else {
+        return Ok(None);
+    };
+    let Some(items) = value.as_array() else {
+        return Err(format!("{field} must be an array of strings"));
+    };
+    let mut strings = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(s) = item.as_str() else {
+            return Err(format!("{field} must be an array of strings"));
+        };
+        strings.push(s.to_string());
+    }
+    Ok(Some(strings))
+}
+
+fn parse_tool_prerequisites_field(
+    value: Option<&Value>,
+) -> Result<Option<IndexMap<String, Vec<StepPrerequisite>>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(format!(
+            "{FORGE_TOOL_PREREQUISITES_FIELD} must be an object keyed by tool name"
+        ));
+    };
+
+    let mut parsed = IndexMap::new();
+    for (tool_name, raw_prereqs) in obj {
+        let Some(items) = raw_prereqs.as_array() else {
+            return Err(format!(
+                "{FORGE_TOOL_PREREQUISITES_FIELD}.{tool_name} must be an array"
+            ));
+        };
+        let mut prereqs = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(name) = item.as_str() {
+                prereqs.push(StepPrerequisite::NameOnly(name.to_string()));
+                continue;
+            }
+            let Some(prereq_obj) = item.as_object() else {
+                return Err(format!(
+                    "{FORGE_TOOL_PREREQUISITES_FIELD}.{tool_name} entries must be strings or objects"
+                ));
+            };
+            let prereq_tool = prereq_obj
+                .get("tool")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "{FORGE_TOOL_PREREQUISITES_FIELD}.{tool_name} object entries require tool"
+                    )
+                })?;
+            if let Some(match_arg) = prereq_obj.get("match_arg").and_then(Value::as_str) {
+                prereqs.push(StepPrerequisite::ArgMatched {
+                    tool: prereq_tool.to_string(),
+                    match_arg: match_arg.to_string(),
+                });
+            } else {
+                prereqs.push(StepPrerequisite::NameOnly(prereq_tool.to_string()));
+            }
+        }
+        parsed.insert(tool_name.clone(), prereqs);
+    }
+
+    if parsed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(parsed))
+    }
+}
+
 /// Main handler for /v1/chat/completions.
 ///
 /// When no tools are present, passes through to backend directly (no guardrails).
@@ -211,6 +326,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         .and_then(|t| t.as_array())
         .cloned()
         .unwrap_or_default();
+    let workflow_contract = parse_proxy_workflow_contract(body)?;
 
     let sampling = extract_sampling(body);
     let passthrough = extract_passthrough(body);
@@ -251,46 +367,129 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     let validator = crate::guardrails::ResponseValidator::new(tool_names, rescue_enabled, None);
     let mut error_tracker = crate::guardrails::ErrorTracker::new(max_retries, 2);
     let mut tool_call_counter = 0;
+    let mut step_enforcer = workflow_contract.map(|contract| {
+        let mut enforcer = StepEnforcer::new(
+            contract.required_steps,
+            contract.terminal_tools,
+            contract.tool_prerequisites,
+            3,
+            2,
+        );
+        record_completed_proxy_tool_results(&internal_msgs, &mut enforcer);
+        enforcer
+    });
 
     let mut ctx = context_manager.lock().await;
 
-    // Run inference (compact -> fold -> serialize -> send -> validate -> retry)
-    let inference_result = crate::core::inference::run_inference_with_options(
-        &mut internal_msgs,
-        client.as_ref(),
-        &mut ctx,
-        &validator,
-        &mut error_tracker,
-        &tool_specs,
-        &mut tool_call_counter,
-        0,                     // step_index
-        "",                    // step_hint
-        Some(max_retries + 1), // max_attempts
-        stream,
-        None,
-        request_options,
-    )
-    .await;
+    let response = loop {
+        let step_hint = step_enforcer
+            .as_ref()
+            .map(StepEnforcer::summary_hint)
+            .unwrap_or_default();
+        let inference_result = crate::core::inference::run_inference_with_options(
+            &mut internal_msgs,
+            client.as_ref(),
+            &mut ctx,
+            &validator,
+            &mut error_tracker,
+            &tool_specs,
+            &mut tool_call_counter,
+            PROXY_STEP_INDEX,
+            &step_hint,
+            Some(max_retries + 1),
+            stream,
+            None,
+            request_options.clone(),
+        )
+        .await;
+
+        let result = match inference_result {
+            Ok(Some(result)) => result,
+            Ok(None) => break LLMResponse::Text(TextResponse::new("")),
+            Err(crate::error::ForgeError::ToolCall(err)) => {
+                let raw = err.raw_response.unwrap_or_default();
+                let usage = client.last_usage();
+                let usage_details = client.last_usage_details();
+                drop(ctx);
+                return Ok(text_content_result(
+                    &raw,
+                    model_name,
+                    stream,
+                    usage.as_ref(),
+                    usage_details.as_ref(),
+                ));
+            }
+            Err(err) => return Err(err.to_string()),
+        };
+
+        tool_call_counter = result.tool_call_counter;
+
+        let tool_calls = match result.response {
+            LLMResponse::ToolCalls(tool_calls) => tool_calls,
+            other => break other,
+        };
+
+        let Some(enforcer) = step_enforcer.as_mut() else {
+            break LLMResponse::ToolCalls(tool_calls);
+        };
+
+        let step_check = enforcer.check(&tool_calls);
+        if step_check.needs_nudge {
+            if enforcer.premature_exhausted() {
+                return Err(format!(
+                    "step enforcement exhausted after {} premature terminal tool attempts; pending required steps: {}",
+                    enforcer.premature_attempts(),
+                    enforcer.pending().join(", ")
+                ));
+            }
+            let nudge = step_check.nudge.expect("step nudge required");
+            let calls = emit_proxy_assistant_tool_calls(
+                tool_calls,
+                &mut internal_msgs,
+                &mut tool_call_counter,
+                PROXY_STEP_INDEX,
+            );
+            emit_proxy_guardrail_nudge_results(
+                &calls,
+                &mut internal_msgs,
+                PROXY_STEP_INDEX,
+                MessageType::StepNudge,
+                "[StepEnforcementError]",
+                &nudge.content,
+            );
+            continue;
+        }
+
+        let prereq_check = enforcer.check_prerequisites(&tool_calls);
+        if prereq_check.needs_nudge {
+            if enforcer.prereq_exhausted() {
+                return Err(format!(
+                    "prerequisite enforcement exhausted after {} violations",
+                    enforcer.prereq_violations()
+                ));
+            }
+            let nudge = prereq_check.nudge.expect("prerequisite nudge required");
+            let calls = emit_proxy_assistant_tool_calls(
+                tool_calls,
+                &mut internal_msgs,
+                &mut tool_call_counter,
+                PROXY_STEP_INDEX,
+            );
+            emit_proxy_guardrail_nudge_results(
+                &calls,
+                &mut internal_msgs,
+                PROXY_STEP_INDEX,
+                MessageType::PrerequisiteNudge,
+                "[PrerequisiteError]",
+                &nudge.content,
+            );
+            continue;
+        }
+
+        break LLMResponse::ToolCalls(tool_calls);
+    };
 
     drop(ctx);
-
-    let response = match inference_result {
-        Ok(Some(result)) => result.response,
-        Ok(None) => LLMResponse::Text(TextResponse::new("")),
-        Err(crate::error::ForgeError::ToolCall(err)) => {
-            let raw = err.raw_response.unwrap_or_default();
-            let usage = client.last_usage();
-            let usage_details = client.last_usage_details();
-            return Ok(text_content_result(
-                &raw,
-                model_name,
-                stream,
-                usage.as_ref(),
-                usage_details.as_ref(),
-            ));
-        }
-        Err(err) => return Err(err.to_string()),
-    };
     let usage = client.last_usage();
     let usage_details = client.last_usage_details();
 
@@ -329,6 +528,87 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     };
 
     Ok(handler_result)
+}
+
+fn record_completed_proxy_tool_results(messages: &[Message], enforcer: &mut StepEnforcer) {
+    let mut completed_call_ids = IndexSet::new();
+    for message in messages {
+        if message.role == MessageRole::Tool {
+            if let Some(call_id) = &message.tool_call_id {
+                completed_call_ids.insert(call_id.clone());
+            }
+        }
+    }
+
+    for message in messages {
+        let Some(tool_calls) = &message.tool_calls else {
+            continue;
+        };
+        for call in tool_calls {
+            if completed_call_ids.contains(call.call_id.as_str()) {
+                enforcer.record(&call.name, call.args.as_ref());
+            }
+        }
+    }
+}
+
+fn emit_proxy_assistant_tool_calls(
+    mut calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    step_index: i64,
+) -> Vec<ToolCall> {
+    if let Some(reasoning) = calls.first().and_then(|tc| tc.reasoning.as_ref()) {
+        messages.push(Message::new(
+            MessageRole::Assistant,
+            reasoning.as_str(),
+            MessageMeta::new(MessageType::Reasoning).with_step_index(step_index),
+        ));
+    }
+
+    let mut infos = Vec::with_capacity(calls.len());
+    for tc in &mut calls {
+        let call_id = tc.id.clone().unwrap_or_else(|| {
+            let id = crate::core::inference::format_tool_call_id(*tool_call_counter);
+            *tool_call_counter += 1;
+            id
+        });
+        tc.id = Some(call_id.clone());
+        infos.push(ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), call_id));
+    }
+
+    messages.push(
+        Message::new(
+            MessageRole::Assistant,
+            "",
+            MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
+        )
+        .with_tool_calls(infos),
+    );
+    calls
+}
+
+fn emit_proxy_guardrail_nudge_results(
+    calls: &[ToolCall],
+    messages: &mut Vec<Message>,
+    step_index: i64,
+    msg_type: MessageType,
+    prefix: &str,
+    nudge_content: &str,
+) {
+    for tc in calls {
+        let call_id = tc.id.as_deref().unwrap_or_default();
+        let error_content = format!("{prefix} {nudge_content}");
+        messages.push(
+            Message::new(
+                MessageRole::Tool,
+                error_content,
+                MessageMeta::new(msg_type).with_step_index(step_index),
+            )
+            .with_tool_name(&tc.tool)
+            .with_tool_call_id(call_id),
+        );
+    }
 }
 
 /// Helper to forward requests to LLM Client without tools or guardrails (passthrough).
@@ -1092,6 +1372,9 @@ mod tests {
             "stop": ["done"],
             "tool_choice": {"type": "function", "function": {"name": "search"}},
             "response_format": {"type": "json_object"},
+            "forge_required_steps": ["search"],
+            "forge_terminal_tools": ["respond"],
+            "forge_tool_prerequisites": {"respond": ["search"]},
             "temperature": 0.7
         });
         let client = Arc::new(MockOptionsClient::new(Some(TokenUsage::new(11, 5, 16))));
@@ -1129,6 +1412,9 @@ mod tests {
         assert!(!passthrough.contains_key("messages"));
         assert!(!passthrough.contains_key("stream"));
         assert!(!passthrough.contains_key("temperature"));
+        assert!(!passthrough.contains_key("forge_required_steps"));
+        assert!(!passthrough.contains_key("forge_terminal_tools"));
+        assert!(!passthrough.contains_key("forge_tool_prerequisites"));
         assert!(options.inbound_anthropic_body.is_none());
     }
 
@@ -1543,6 +1829,180 @@ mod tests {
             }
             _ => panic!("expected Response"),
         }
+    }
+
+    struct MockWorkflowContractClient {
+        responses: Vec<LLMResponse>,
+        calls: std::sync::Mutex<usize>,
+        sent_messages: std::sync::Mutex<Vec<Vec<Value>>>,
+    }
+
+    impl MockWorkflowContractClient {
+        fn new(responses: Vec<LLMResponse>) -> Self {
+            Self {
+                responses,
+                calls: std::sync::Mutex::new(0),
+                sent_messages: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn sent_messages(&self) -> Vec<Vec<Value>> {
+            self.sent_messages.lock().unwrap().clone()
+        }
+    }
+
+    impl LLMClient for MockWorkflowContractClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            self.sent_messages.lock().unwrap().push(messages);
+            let mut calls = self.calls.lock().unwrap();
+            let response = self
+                .responses
+                .get(*calls)
+                .or_else(|| self.responses.last())
+                .cloned()
+                .unwrap_or_else(|| LLMResponse::Text(TextResponse::new("")));
+            *calls += 1;
+            Ok(response)
+        }
+
+        async fn send_with_options(
+            &self,
+            messages: Vec<Value>,
+            tools: Option<Vec<ToolSpec>>,
+            options: LLMRequestOptions,
+        ) -> Result<LLMResponse, crate::error::BackendError> {
+            self.send(messages, tools, options.sampling).await
+        }
+
+        async fn send_stream(
+            &self,
+            messages: Vec<Value>,
+            tools: Option<Vec<ToolSpec>>,
+            sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, crate::error::StreamError> {
+            let response = self
+                .send(messages, tools, sampling)
+                .await
+                .map_err(|err| crate::error::StreamError::new(err.to_string()))?;
+            Ok(stream_from_response(response))
+        }
+
+        async fn get_context_length(
+            &self,
+        ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    fn legacy_list_accounts_tool() -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": "legacy_list_accounts",
+                "description": "List available accounts",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn proxy_required_steps_block_premature_respond() {
+        let mut respond_args = IndexMap::new();
+        respond_args.insert("message".into(), json!("too soon"));
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", respond_args)]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("legacy_list_accounts", IndexMap::new())]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let body = json!({
+            "messages": [{"role": "user", "content": "audit account"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "forge_required_steps": ["legacy_list_accounts"],
+            "forge_terminal_tools": ["respond"]
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+                let calls = v["choices"][0]["message"]["tool_calls"]
+                    .as_array()
+                    .expect("tool calls");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["function"]["name"], json!("legacy_list_accounts"));
+            }
+            _ => panic!("expected Response"),
+        }
+
+        let sent = client.sent_messages();
+        assert_eq!(sent.len(), 2);
+        let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
+        assert!(second_wire.contains("[StepEnforcementError]"));
+        assert!(second_wire.contains("legacy_list_accounts"));
+    }
+
+    #[tokio::test]
+    async fn proxy_required_steps_use_prior_tool_result_history() {
+        let mut respond_args = IndexMap::new();
+        respond_args.insert("message".into(), json!("done"));
+        let client = Arc::new(MockWorkflowContractClient::new(vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", respond_args)]),
+        ]));
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "audit account"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_list",
+                        "type": "function",
+                        "function": {"name": "legacy_list_accounts", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_list",
+                    "name": "legacy_list_accounts",
+                    "content": "ACC-12345"
+                }
+            ],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "forge_required_steps": ["legacy_list_accounts"],
+            "forge_terminal_tools": ["respond"]
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "stop");
+                assert_eq!(v["choices"][0]["message"]["content"], "done");
+            }
+            _ => panic!("expected Response"),
+        }
+        let wire = serde_json::to_string(&client.sent_messages()).expect("wire json");
+        assert!(!wire.contains("[StepEnforcementError]"));
     }
 
     struct MockAlwaysTextClient;

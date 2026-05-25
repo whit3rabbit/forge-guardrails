@@ -141,10 +141,21 @@ class OpenAIProxyClient:
         tools: list[ToolSpec] | None = None,
         sampling: dict[str, Any] | None = None,
         stream: bool = False,
+        required_steps: list[str] | None = None,
+        terminal_tools: list[str] | None = None,
+        tool_prerequisites: dict[str, list[str | dict[str, str]]] | None = None,
     ) -> ProxyTurn:
         import httpx
 
-        body = self._body(messages, tools, sampling, stream=stream)
+        body = self._body(
+            messages,
+            tools,
+            sampling,
+            stream=stream,
+            required_steps=required_steps,
+            terminal_tools=terminal_tools,
+            tool_prerequisites=tool_prerequisites,
+        )
         if stream:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 async with client.stream("POST", self.base_url, json=body) as response:
@@ -161,6 +172,9 @@ class OpenAIProxyClient:
         tools: list[ToolSpec] | None,
         sampling: dict[str, Any] | None,
         stream: bool,
+        required_steps: list[str] | None = None,
+        terminal_tools: list[str] | None = None,
+        tool_prerequisites: dict[str, list[str | dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -169,6 +183,12 @@ class OpenAIProxyClient:
         }
         if tools:
             body["tools"] = [format_tool(tool) for tool in tools]
+        if required_steps:
+            body["forge_required_steps"] = required_steps
+        if terminal_tools:
+            body["forge_terminal_tools"] = terminal_tools
+        if tool_prerequisites:
+            body["forge_tool_prerequisites"] = tool_prerequisites
         body.update(self.sampling_defaults)
         if sampling:
             body.update(sampling)
@@ -352,6 +372,20 @@ def _proxy_tool_specs(workflow: Workflow) -> list[ToolSpec]:
     return [spec for spec in specs if spec.name != "respond"]
 
 
+def _proxy_terminal_tools(workflow: Workflow) -> list[str]:
+    return sorted(set(workflow.terminal_tools) | {"respond"})
+
+
+def _proxy_tool_prerequisites(
+    workflow: Workflow,
+) -> dict[str, list[str | dict[str, str]]]:
+    prerequisites: dict[str, list[str | dict[str, str]]] = {}
+    for name, tool_def in workflow.tools.items():
+        if tool_def.prerequisites:
+            prerequisites[name] = list(tool_def.prerequisites)
+    return prerequisites
+
+
 def _openai_tool_call(call: ProxyToolCall) -> dict[str, Any]:
     return {
         "id": call.id,
@@ -471,6 +505,9 @@ async def run_proxy_scenario(
     )
     consecutive_tool_errors = 0
     proxy_tools = _proxy_tool_specs(workflow)
+    proxy_required_steps = list(workflow.required_steps)
+    proxy_terminal_tools = _proxy_terminal_tools(workflow)
+    proxy_prerequisites = _proxy_tool_prerequisites(workflow)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": workflow.build_system_prompt()},
         {"role": "user", "content": scenario.user_message},
@@ -488,6 +525,9 @@ async def run_proxy_scenario(
             tools=proxy_tools,
             sampling=None,
             stream=stream,
+            required_steps=proxy_required_steps,
+            terminal_tools=proxy_terminal_tools,
+            tool_prerequisites=proxy_prerequisites,
         )
         result.iterations_used += 1
         result.input_tokens += turn.input_tokens

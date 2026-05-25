@@ -53,6 +53,9 @@ pub(crate) fn row_for_result(
     };
     let stats = message_stats(messages);
     let (tool_sequence, tool_args) = tool_trace(messages);
+    let missing_required_steps =
+        missing_required_steps(&scenario.workflow.required_steps, messages);
+    let required_step_mismatch = !missing_required_steps.is_empty();
     let ideal_iterations = scenario.workflow.required_steps.len() as i32 + 1;
     let wasted_calls = if completeness {
         json!((iterations - ideal_iterations).max(0))
@@ -87,6 +90,8 @@ pub(crate) fn row_for_result(
         "reasoning_msgs": stats.reasoning_msgs,
         "tool_sequence": tool_sequence,
         "tool_args": tool_args,
+        "missing_required_steps": missing_required_steps,
+        "required_step_mismatch": required_step_mismatch,
         "final_text": final_text,
         "raw_response_on_failure": raw_response,
         "reasoning_budget": cli.reasoning_budget,
@@ -126,6 +131,9 @@ fn validate_scenario(name: &str, text: &str) -> bool {
                 && normalized.contains("apac")
         }
         "error_recovery" => normalized.contains("10") && normalized.contains("record"),
+        "inconsistent_api_recovery_stateful" => {
+            normalized.contains("acc-12345") && normalized.contains("pass")
+        }
         _ => false,
     }
 }
@@ -169,6 +177,25 @@ fn tool_trace(messages: &[Message]) -> (Vec<Value>, Vec<Value>) {
         }
     }
     (names, args)
+}
+
+fn missing_required_steps(required_steps: &[String], messages: &[Message]) -> Vec<Value> {
+    let mut called = indexmap::IndexSet::new();
+    for message in messages {
+        if message.metadata.msg_type != MessageType::ToolCall {
+            continue;
+        }
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                called.insert(call.name.clone());
+            }
+        }
+    }
+    required_steps
+        .iter()
+        .filter(|step| !called.contains(step.as_str()))
+        .map(|step| json!(step))
+        .collect()
 }
 
 fn error_kind(err: &ForgeError) -> &'static str {
@@ -221,5 +248,7 @@ mod tests {
         assert_eq!(row["ideal_iterations"], json!(2));
         assert_eq!(row["wasted_calls"], json!(2));
         assert_eq!(row["compaction_events"], json!(2));
+        assert_eq!(row["missing_required_steps"], json!(["get_country_info"]));
+        assert_eq!(row["required_step_mismatch"], json!(true));
     }
 }

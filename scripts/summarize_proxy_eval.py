@@ -57,6 +57,8 @@ def _scenario_stats(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
             stats[scenario]["completed_inaccurate"] += 1
         if row.get("proxy_missing_required_steps"):
             stats[scenario]["missing_required_steps"] += 1
+        if _classification(row) == "proxy_contract_mismatch":
+            stats[scenario]["failed_contract_mismatch"] += 1
     return stats
 
 
@@ -89,7 +91,8 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
     stats = _scenario_stats(rows)
     completeness_weak = []
     accuracy_weak = []
-    contract_mismatch = []
+    missing_required_steps = []
+    failed_contract_mismatch = []
     for scenario, counter in sorted(stats.items()):
         scenario_total = counter["total"]
         if counter["complete"] < scenario_total:
@@ -101,8 +104,12 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
                 f"{scenario}={counter['completed_inaccurate']}/{scenario_total}"
             )
         if counter["missing_required_steps"]:
-            contract_mismatch.append(
+            missing_required_steps.append(
                 f"{scenario}={counter['missing_required_steps']}/{scenario_total}"
+            )
+        if counter["failed_contract_mismatch"]:
+            failed_contract_mismatch.append(
+                f"{scenario}={counter['failed_contract_mismatch']}/{scenario_total}"
             )
 
     print(
@@ -114,8 +121,16 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
         + (", ".join(accuracy_weak) if accuracy_weak else "none")
     )
     print(
-        "  Proxy contract mismatches: "
-        + (", ".join(contract_mismatch) if contract_mismatch else "none")
+        "  Missing required steps: "
+        + (", ".join(missing_required_steps) if missing_required_steps else "none")
+    )
+    print(
+        "  Failed proxy contract mismatches: "
+        + (
+            ", ".join(failed_contract_mismatch)
+            if failed_contract_mismatch
+            else "none"
+        )
     )
 
 

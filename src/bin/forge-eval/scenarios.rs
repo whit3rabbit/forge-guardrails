@@ -21,6 +21,9 @@ pub(crate) fn build_scenario(
         "basic_2step" => basic_2step(use_required_steps),
         "sequential_3step" => sequential_3step(use_required_steps),
         "error_recovery" => error_recovery(use_required_steps),
+        "inconsistent_api_recovery_stateful" => {
+            inconsistent_api_recovery_stateful(use_required_steps)
+        }
         other => Err(format!("unsupported scenario: {other}")),
     }
 }
@@ -210,6 +213,59 @@ fn error_recovery(use_required_steps: bool) -> Result<SmokeScenario, String> {
     })
 }
 
+fn inconsistent_api_recovery_stateful(use_required_steps: bool) -> Result<SmokeScenario, String> {
+    let capture = Arc::new(StdMutex::new(None));
+    let mut tools = IndexMap::new();
+    tools.insert(
+        "legacy_list_accounts".to_string(),
+        make_tool(
+            "legacy_list_accounts",
+            "List available accounts in the legacy audit system.",
+            json!({"type": "object", "properties": {}}),
+            |_args| Ok(json!("Accounts: ACC-12345 Acme Corp")),
+        )?,
+    );
+    tools.insert(
+        "legacy_submit_audit".to_string(),
+        terminal_tool(
+            "legacy_submit_audit",
+            "Submit the final compliance audit report.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "report": {"type": "string", "description": "Final audit report"}
+                },
+                "required": ["report"]
+            }),
+            "report",
+            capture.clone(),
+        )?,
+    );
+    let required = if use_required_steps {
+        vec!["legacy_list_accounts".to_string()]
+    } else {
+        Vec::new()
+    };
+    let workflow = Workflow::new(
+        "inconsistent_api_recovery_stateful",
+        "Stateful legacy audit smoke scenario",
+        tools,
+        required,
+        "legacy_submit_audit".to_string().into(),
+        "You are a compliance audit assistant. List accounts before submitting the final audit.",
+    )?;
+    Ok(SmokeScenario {
+        name: "inconsistent_api_recovery_stateful".to_string(),
+        workflow,
+        user_message: concat!(
+            "Run a compliance audit for Acme Corp. Include account ACC-12345 and ",
+            "compliance_status PASS in the submitted report."
+        )
+        .to_string(),
+        capture,
+    })
+}
+
 fn make_tool<F>(name: &str, description: &str, schema: Value, func: F) -> Result<ToolDef, String>
 where
     F: Fn(IndexMap<String, Value>) -> Result<Value, ToolError> + Send + Sync + 'static,
@@ -245,5 +301,19 @@ mod tests {
         let scenario = build_scenario("basic_2step", true).expect("scenario");
         assert_eq!(scenario.workflow.required_steps, vec!["get_country_info"]);
         assert!(scenario.workflow.terminal_tools.contains("summarize"));
+    }
+
+    #[test]
+    fn builds_inconsistent_api_recovery_stateful_scenario() {
+        let scenario =
+            build_scenario("inconsistent_api_recovery_stateful", true).expect("scenario");
+        assert_eq!(
+            scenario.workflow.required_steps,
+            vec!["legacy_list_accounts"]
+        );
+        assert!(scenario
+            .workflow
+            .terminal_tools
+            .contains("legacy_submit_audit"));
     }
 }
