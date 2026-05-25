@@ -23,6 +23,12 @@ ROOT = Path(__file__).resolve().parents[1]
 FORGE_ROOT = ROOT / "forge"
 sys.path.insert(0, str(FORGE_ROOT / "src"))
 sys.path.insert(0, str(FORGE_ROOT))
+_tests_package = sys.modules.get("tests")
+if _tests_package is not None and hasattr(_tests_package, "__path__"):
+    _forge_tests_path = str(FORGE_ROOT / "tests")
+    _tests_paths = list(_tests_package.__path__)
+    if _forge_tests_path not in _tests_paths:
+        _tests_package.__path__ = [_forge_tests_path, *_tests_paths]
 
 
 def _print_early_help() -> None:
@@ -71,6 +77,13 @@ from forge.core.workflow import ToolSpec, Workflow
 from tests.eval.ablation import ABLATION_PRESETS
 from tests.eval.eval_runner import _build_workflow_with_capture
 from tests.eval.scenarios import ALL_SCENARIOS, EvalScenario
+
+
+FORGE_EXTENSION_FIELD = "_forge"
+FORGE_TOOL_STATUS_FIELD = "tool_status"
+FORGE_TOOL_STATUS_OK = "ok"
+FORGE_TOOL_STATUS_ERROR = "error"
+REDACTED_TERMINAL_TEXT = "[REDACTED]"
 
 
 @dataclass
@@ -383,6 +396,16 @@ def _openai_tool_call(call: ProxyToolCall) -> dict[str, Any]:
     }
 
 
+def _tool_result_message(call: ProxyToolCall, content: str, status: str) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": call.id,
+        "name": call.name,
+        "content": content,
+        FORGE_EXTENSION_FIELD: {FORGE_TOOL_STATUS_FIELD: status},
+    }
+
+
 async def _call_tool(fn: Any, args: dict[str, Any]) -> Any:
     result = fn(**args)
     if inspect.isawaitable(result):
@@ -552,23 +575,20 @@ async def run_proxy_scenario(
         for call in turn.tool_calls:
             result.tool_sequence.append(call.name)
             result.tool_args.append(call.args)
+            tool_status = FORGE_TOOL_STATUS_OK
             try:
                 fn = workflow.get_callable(call.name)
                 tool_result = await _call_tool(fn, call.args)
             except Exception as exc:
                 batch_had_error = True
+                tool_status = FORGE_TOOL_STATUS_ERROR
                 content = f"[ToolError] {type(exc).__name__}: {exc}"
             else:
                 content = _stringify_tool_result(tool_result)
                 if call.name in workflow.terminal_tools:
                     terminal_args = call.args
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "name": call.name,
-                "content": content,
-            })
+            messages.append(_tool_result_message(call, content, tool_status))
 
         if batch_had_error:
             result.tool_errors += 1
@@ -619,7 +639,20 @@ def _proxy_failure_classification(result: ProxyRunResult) -> str | None:
         return "proxy_contract_mismatch"
     if result.accuracy is not False:
         return None
+    if _has_redacted_terminal_content(result):
+        return "terminal_redacted"
     return "accuracy_false"
+
+
+def _has_redacted_terminal_content(result: ProxyRunResult) -> bool:
+    return _is_redacted_terminal_text(result.final_text) or any(
+        _is_redacted_terminal_text(value)
+        for value in (result.terminal_args or {}).values()
+    )
+
+
+def _is_redacted_terminal_text(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() == REDACTED_TERMINAL_TEXT
 
 
 def _result_row(

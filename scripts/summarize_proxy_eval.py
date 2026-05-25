@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
+REDACTED_TERMINAL_TEXT = "[REDACTED]"
+
+
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open() as handle:
@@ -33,7 +36,7 @@ def _rate(count: int, total: int) -> str:
 
 def _classification(row: dict[str, Any]) -> str | None:
     existing = row.get("proxy_failure_classification")
-    if existing:
+    if existing and str(existing) != "accuracy_false":
         return str(existing)
     if not row.get("completeness"):
         return str(row.get("error_type") or "incomplete")
@@ -41,7 +44,27 @@ def _classification(row: dict[str, Any]) -> str | None:
         return "proxy_contract_mismatch"
     if row.get("accuracy") is not False:
         return None
+    if _has_redacted_terminal_content(row):
+        return "terminal_redacted"
     return "accuracy_false"
+
+
+def _has_redacted_terminal_content(row: dict[str, Any]) -> bool:
+    if _is_redacted_terminal_text(row.get("final_text")):
+        return True
+
+    if row.get("proxy_terminal_source") == "tool_call":
+        tool_args = row.get("tool_args")
+        if isinstance(tool_args, list) and tool_args:
+            last_args = tool_args[-1]
+            if isinstance(last_args, dict):
+                return any(_is_redacted_terminal_text(value) for value in last_args.values())
+
+    return False
+
+
+def _is_redacted_terminal_text(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() == REDACTED_TERMINAL_TEXT
 
 
 def _missing_required_steps(row: dict[str, Any]) -> list[Any]:
@@ -63,6 +86,7 @@ def _scenario_stats(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
     stats: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
         scenario = str(row.get("scenario", "<unknown>"))
+        classification = _classification(row)
         stats[scenario]["total"] += 1
         if row.get("completeness"):
             stats[scenario]["complete"] += 1
@@ -70,9 +94,11 @@ def _scenario_stats(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
             stats[scenario]["success"] += 1
         if row.get("completeness") and row.get("accuracy") is False:
             stats[scenario]["completed_inaccurate"] += 1
+            if classification:
+                stats[scenario][f"classification:{classification}"] += 1
         if _missing_required_steps(row):
             stats[scenario]["missing_required_steps"] += 1
-        if _classification(row) == "proxy_contract_mismatch":
+        if classification == "proxy_contract_mismatch":
             stats[scenario]["failed_contract_mismatch"] += 1
     return stats
 
@@ -115,8 +141,18 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
                 f"{scenario}={_rate(counter['complete'], scenario_total)}"
             )
         if counter["completed_inaccurate"]:
+            classification_parts = [
+                f"{key.removeprefix('classification:')}={count}"
+                for key, count in sorted(counter.items())
+                if key.startswith("classification:")
+            ]
+            suffix = (
+                f" ({', '.join(classification_parts)})"
+                if classification_parts
+                else ""
+            )
             accuracy_weak.append(
-                f"{scenario}={counter['completed_inaccurate']}/{scenario_total}"
+                f"{scenario}={counter['completed_inaccurate']}/{scenario_total}{suffix}"
             )
         if counter["missing_required_steps"]:
             missing_required_steps.append(

@@ -57,6 +57,8 @@ class FakeProxyClient:
         tools: list[Any] | None = None,
         sampling: dict[str, Any] | None = None,
         stream: bool = False,
+        required_steps: list[str] | None = None,
+        terminal_tools: list[str] | None = None,
     ) -> Any:
         self.tool_names_by_call.append([tool.name for tool in tools or []])
         self.messages_by_call.append(list(messages))
@@ -211,8 +213,47 @@ class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
             "call_lookup",
         )
         self.assertEqual(
+            client.messages_by_call[1][-1]["_forge"]["tool_status"],
+            "ok",
+        )
+        self.assertEqual(
             client.messages_by_call[2][-1]["tool_call_id"],
             "call_permissions",
+        )
+        self.assertEqual(
+            client.messages_by_call[2][-1]["_forge"]["tool_status"],
+            "ok",
+        )
+
+    async def test_tool_execution_error_marks_tool_status_error(self) -> None:
+        client = FakeProxyClient([
+            proxy_eval.ProxyTurn(
+                "tool_call",
+                tool_calls=[
+                    proxy_eval.ProxyToolCall(
+                        "call_fetch",
+                        "fetch",
+                        {"count": "10"},
+                        "{\"count\":\"10\"}",
+                    ),
+                ],
+            ),
+            proxy_eval.ProxyTurn("text", content="Fetched 10 records."),
+        ])
+
+        result = await proxy_eval.run_proxy_scenario(
+            client,
+            scenario_by_name("error_recovery"),
+            stream=False,
+            budget_tokens=8192,
+            ablation=proxy_eval.ABLATION_PRESETS["reforged"],
+        )
+
+        self.assertTrue(result.completeness)
+        self.assertEqual(result.tool_errors, 1)
+        self.assertEqual(
+            client.messages_by_call[1][-1]["_forge"]["tool_status"],
+            "error",
         )
 
     async def test_premature_text_is_not_client_side_nudged(self) -> None:
@@ -264,7 +305,23 @@ class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["eval_target_backend"], "openai-proxy")
         self.assertEqual(row["proxy_terminal_source"], "text")
 
-    def test_published_compare_skips_proxy_rows_by_default(self) -> None:
+    def test_terminal_redaction_has_specific_failure_classification(self) -> None:
+        result = proxy_eval.ProxyRunResult(
+            scenario_name="error_recovery",
+            completeness=True,
+            iterations_used=3,
+            terminal_args={"content": "[REDACTED]"},
+            accuracy=False,
+            final_text="[REDACTED]",
+            proxy_terminal_source="tool_call",
+        )
+
+        self.assertEqual(
+            proxy_eval._proxy_failure_classification(result),
+            "terminal_redacted",
+        )
+
+    def test_published_compare_skips_proxy_rows_for_native_baseline(self) -> None:
         model = "Ministral-3-8B-Instruct-2512-Q8_0"
         row = {
             "scenario": "basic_2step",
@@ -300,6 +357,51 @@ class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 0)
         self.assertIn("Published comparison skipped", stdout.getvalue())
         self.assertIn("llamaserver/proxy", stdout.getvalue())
+
+    def test_published_compare_allows_proxy_rows_for_prompt_baseline(self) -> None:
+        model = "Ministral-3-8B-Instruct-2512-Q8_0"
+        published_text = f"""
+Model/Backend Scr Acc Cmp Eff Wst Spd N b2s
+{model} LS/P [reforged] 100.0% 100.0% 100.0% 100% 0.0 1.0s 1 100
+rel=relevance_detection, b2s=basic_2step
+"""
+        row = {
+            "scenario": "basic_2step",
+            "model": model,
+            "ablation": "reforged",
+            "backend": "llamaserver",
+            "mode": "proxy",
+            "eval_target_backend": "openai-proxy",
+            "success": True,
+            "completeness": True,
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".md") as published:
+            published.write(published_text)
+            published.flush()
+            with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as handle:
+                handle.write(json.dumps(row) + "\n")
+                handle.flush()
+                old_argv = sys.argv
+                sys.argv = [
+                    "compare_published_eval.py",
+                    handle.name,
+                    "--published",
+                    published.name,
+                    "--model",
+                    model,
+                    "--local-model",
+                    model,
+                ]
+                try:
+                    stdout = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        status = compare_eval.main()
+                finally:
+                    sys.argv = old_argv
+
+        self.assertEqual(status, 0)
+        self.assertIn("Published comparison passed", stdout.getvalue())
+        self.assertNotIn("Published comparison skipped", stdout.getvalue())
 
 
 if __name__ == "__main__":

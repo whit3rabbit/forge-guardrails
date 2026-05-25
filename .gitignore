@@ -36,6 +36,8 @@ Icon?
 
 # Local files
 repomix-output.xml
+.venv/
+venv/
 .syntext/
 .synrepo/
 

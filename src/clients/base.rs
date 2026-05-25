@@ -264,10 +264,10 @@ pub type SamplingParams = serde_json::Map<String, serde_json::Value>;
 ///
 /// `sampling` carries backend generation controls already understood by
 /// clients. `passthrough` carries non-forge-owned request fields that should
-/// ride to the outbound wire body. `inbound_anthropic_body` is only meaningful
-/// for Anthropic-shape downstreams: it lets a clean Anthropic proxy turn send
-/// the original request body verbatim, preserving block annotations such as
-/// `cache_control`.
+/// ride to the outbound wire body. `inbound_anthropic_body` and
+/// `initial_openai_messages` are only meaningful for Anthropic-shape
+/// downstreams: they let a clean Anthropic proxy preserve annotated raw
+/// request blocks while still patching retry/nudge transcript changes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LLMRequestOptions {
     /// Per-call sampling overrides.
@@ -276,6 +276,8 @@ pub struct LLMRequestOptions {
     pub passthrough: Option<serde_json::Map<String, serde_json::Value>>,
     /// Original inbound Anthropic body for clean Path-1 proxy calls.
     pub inbound_anthropic_body: Option<Value>,
+    /// Initial translated OpenAI messages matching `inbound_anthropic_body`.
+    pub initial_openai_messages: Option<Vec<Value>>,
 }
 
 impl LLMRequestOptions {
@@ -285,6 +287,7 @@ impl LLMRequestOptions {
             sampling,
             passthrough: None,
             inbound_anthropic_body: None,
+            initial_openai_messages: None,
         }
     }
 
@@ -293,6 +296,7 @@ impl LLMRequestOptions {
         self.sampling.is_none()
             && self.passthrough.is_none()
             && self.inbound_anthropic_body.is_none()
+            && self.initial_openai_messages.is_none()
     }
 }
 

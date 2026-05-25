@@ -24,7 +24,7 @@ use anyllm_translate::anthropic::MessageCreateRequest;
 use futures_core::Stream;
 use futures_util::StreamExt;
 use indexmap::{IndexMap, IndexSet};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -417,14 +417,21 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
     let sampling = extract_sampling(body);
     let passthrough = extract_passthrough(body);
-    let request_options = LLMRequestOptions {
+    let mut request_options = LLMRequestOptions {
         sampling,
         passthrough,
         inbound_anthropic_body,
+        initial_openai_messages: None,
     };
 
     // Convert inbound OpenAI messages to internal format.
     let mut internal_msgs = openai_to_messages(messages)?;
+    if request_options.inbound_anthropic_body.is_some() {
+        request_options.initial_openai_messages = Some(crate::core::inference::fold_and_serialize(
+            &internal_msgs,
+            client.api_format().as_str(),
+        ));
+    }
 
     // If no tools, pass through directly.
     if tools_raw.is_empty() {
@@ -456,6 +463,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
     let tool_names: IndexSet<String> = tool_specs.iter().map(|s| s.name.clone()).collect();
     let step_contract = validate_proxy_step_contract(step_contract, &tool_names)?;
+    let request_options =
+        sanitize_guarded_request_options(request_options, step_contract.as_ref())?;
     let validator = crate::guardrails::ResponseValidator::from_tool_specs(
         tool_specs.clone(),
         rescue_enabled,
@@ -475,17 +484,15 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         enforcer
     });
 
-    let mut ctx = context_manager.lock().await;
-
     let response = loop {
         let step_hint = step_enforcer
             .as_ref()
             .map(StepEnforcer::summary_hint)
             .unwrap_or_default();
-        let inference_result = crate::core::inference::run_inference_with_options(
+        let inference_result = crate::core::inference::run_inference_with_options_shared_context(
             &mut internal_msgs,
             client.as_ref(),
-            &mut ctx,
+            context_manager.as_ref(),
             &validator,
             &mut error_tracker,
             &tool_specs,
@@ -512,7 +519,6 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 let raw = err.raw_response.unwrap_or_default();
                 let usage = client.last_usage();
                 let usage_details = client.last_usage_details();
-                drop(ctx);
                 return Ok(text_content_result(
                     &raw,
                     model_name,
@@ -573,7 +579,6 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         }
     };
 
-    drop(ctx);
     let usage = client.last_usage();
     let usage_details = client.last_usage_details();
 
@@ -617,13 +622,95 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     Ok(handler_result)
 }
 
+fn sanitize_guarded_request_options(
+    mut options: LLMRequestOptions,
+    step_contract: Option<&ProxyStepContract>,
+) -> Result<LLMRequestOptions, HandlerError> {
+    let has_required_steps =
+        step_contract.is_some_and(|contract| !contract.required_steps.is_empty());
+    options.passthrough = sanitize_guarded_passthrough(options.passthrough, has_required_steps)?;
+    options.inbound_anthropic_body =
+        sanitize_guarded_anthropic_body(options.inbound_anthropic_body, has_required_steps)?;
+    Ok(options)
+}
+
+fn sanitize_guarded_passthrough(
+    passthrough: Option<Map<String, Value>>,
+    has_required_steps: bool,
+) -> Result<Option<Map<String, Value>>, HandlerError> {
+    let Some(mut passthrough) = passthrough else {
+        return Ok(None);
+    };
+    passthrough.remove("response_format");
+    if let Some(tool_choice) = passthrough.get("tool_choice") {
+        validate_guarded_openai_tool_choice(tool_choice, has_required_steps)?;
+    }
+    Ok(if passthrough.is_empty() {
+        None
+    } else {
+        Some(passthrough)
+    })
+}
+
+fn sanitize_guarded_anthropic_body(
+    body: Option<Value>,
+    has_required_steps: bool,
+) -> Result<Option<Value>, HandlerError> {
+    let Some(mut body) = body else {
+        return Ok(None);
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("response_format");
+        if let Some(tool_choice) = obj.get("tool_choice") {
+            validate_guarded_anthropic_tool_choice(tool_choice, has_required_steps)?;
+        }
+    }
+    Ok(Some(body))
+}
+
+fn validate_guarded_openai_tool_choice(
+    value: &Value,
+    has_required_steps: bool,
+) -> Result<(), HandlerError> {
+    match value {
+        Value::String(choice) if choice == "none" => Err(HandlerError::BadRequest(
+            "tool_choice=none is incompatible with guarded tool execution".to_string(),
+        )),
+        Value::Object(_) if has_required_steps => Err(HandlerError::BadRequest(
+            "forced tool_choice is incompatible with _forge.required_steps".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_guarded_anthropic_tool_choice(
+    value: &Value,
+    has_required_steps: bool,
+) -> Result<(), HandlerError> {
+    let choice_type = match value {
+        Value::Object(obj) => obj.get("type").and_then(Value::as_str),
+        Value::String(choice) => Some(choice.as_str()),
+        _ => None,
+    };
+    match choice_type {
+        Some("none") => Err(HandlerError::BadRequest(
+            "tool_choice=none is incompatible with guarded tool execution".to_string(),
+        )),
+        Some("tool") if has_required_steps => Err(HandlerError::BadRequest(
+            "forced tool_choice is incompatible with _forge.required_steps".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn record_completed_proxy_tool_results(
     raw_messages: &[Value],
     messages: &[Message],
     enforcer: &mut StepEnforcer,
 ) {
     let mut pending_tool_calls: IndexMap<String, ToolCallInfo> = IndexMap::new();
-    for (index, message) in messages.iter().enumerate() {
+    let raw_tool_statuses = proxy_tool_statuses_by_call_id(raw_messages);
+    for message in messages {
         match message.role {
             MessageRole::Assistant => {
                 let Some(tool_calls) = &message.tool_calls else {
@@ -637,8 +724,8 @@ fn record_completed_proxy_tool_results(
                 let Some(call_id) = &message.tool_call_id else {
                     continue;
                 };
-                let raw_message = raw_messages.get(index);
-                if !proxy_tool_result_succeeded(raw_message, &message.content) {
+                let raw_status = raw_tool_statuses.get(call_id.as_str()).copied().flatten();
+                if !proxy_tool_result_succeeded(raw_status, &message.content) {
                     continue;
                 }
                 if let Some(call) = pending_tool_calls.get(call_id) {
@@ -650,27 +737,39 @@ fn record_completed_proxy_tool_results(
     }
 }
 
-fn proxy_tool_result_succeeded(raw_message: Option<&Value>, content: &str) -> bool {
-    if let Some(status) = raw_message
-        .and_then(|m| m.get(FORGE_EXTENSION_FIELD))
-        .and_then(Value::as_object)
-        .and_then(|forge| forge.get(FORGE_TOOL_STATUS_FIELD))
-        .and_then(Value::as_str)
-    {
+fn proxy_tool_statuses_by_call_id(raw_messages: &[Value]) -> IndexMap<&str, Option<&str>> {
+    let mut statuses = IndexMap::new();
+    for raw in raw_messages {
+        if raw.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(call_id) = raw.get("tool_call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let status = raw
+            .get(FORGE_EXTENSION_FIELD)
+            .and_then(Value::as_object)
+            .and_then(|forge| forge.get(FORGE_TOOL_STATUS_FIELD))
+            .and_then(Value::as_str);
+        statuses.insert(call_id, status);
+    }
+    statuses
+}
+
+fn proxy_tool_result_succeeded(raw_status: Option<&str>, content: &str) -> bool {
+    if let Some(status) = raw_status {
         return status == FORGE_TOOL_STATUS_OK;
     }
 
-    !looks_like_failed_proxy_tool_result(content)
+    !has_explicit_proxy_tool_error_prefix(content)
 }
 
-fn looks_like_failed_proxy_tool_result(content: &str) -> bool {
-    let normalized = content.trim().to_ascii_lowercase();
+fn has_explicit_proxy_tool_error_prefix(content: &str) -> bool {
+    let normalized = content.trim_start().to_ascii_lowercase();
     normalized.starts_with("[toolerror]")
-        || normalized.starts_with("error:")
-        || normalized.contains("\nerror:")
-        || normalized.contains("failed")
-        || normalized.contains("exception")
-        || normalized.contains("timeout")
+        || normalized.starts_with("[toolresolutionerror]")
+        || normalized.starts_with("[toolexecutionerror]")
+        || normalized.starts_with("[tool_error]")
 }
 
 fn synthetic_respond_tool_call(text: &TextResponse) -> ToolCall {
@@ -804,15 +903,7 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
             usage_details.as_ref(),
         )),
         LLMResponse::ToolCalls(_) => {
-            // No-tools passthrough must not expose unexpected backend tool calls.
-            Ok(text_content_result(
-                "",
-                model_name,
-                stream,
-                stream_include_usage,
-                usage.as_ref(),
-                usage_details.as_ref(),
-            ))
+            Err("backend returned tool calls for request without tools".to_string())
         }
     }
 }
@@ -860,7 +951,13 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
                     if !emitted_text {
                         let content = match chunk.response {
                             Some(LLMResponse::Text(text)) => text.content,
-                            _ => String::new(),
+                            Some(LLMResponse::ToolCalls(_)) => {
+                                yield Err(StreamError::new(
+                                    "backend returned tool calls for request without tools",
+                                ));
+                                return;
+                            }
+                            None => String::new(),
                         };
                         yield Ok(crate::proxy::proxy::text_delta_sse_event(
                             &completion_id,
@@ -890,7 +987,13 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
                     ));
                     return;
                 }
-                ChunkType::ToolCallDelta | ChunkType::Retry => {}
+                ChunkType::ToolCallDelta => {
+                    yield Err(StreamError::new(
+                        "backend streamed tool calls for request without tools",
+                    ));
+                    return;
+                }
+                ChunkType::Retry => {}
             }
         }
 
@@ -1984,6 +2087,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_tools_rejects_tool_choice_none() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "tool_choice": "none",
+            "tools": [search_tool_json()]
+        });
+        let client = Arc::new(MockRespondOptionsClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let err = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect_err("tool_choice none rejected");
+        assert!(matches!(err, HandlerError::BadRequest(_)));
+        assert!(err.message().contains("tool_choice=none"));
+    }
+
+    #[tokio::test]
+    async fn handle_required_steps_rejects_forced_tool_choice() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "tool_choice": {"type": "function", "function": {"name": "search"}},
+            "tools": [search_tool_json()],
+            "_forge": {
+                "required_steps": ["search"],
+                "terminal_tools": ["respond"]
+            }
+        });
+        let client = Arc::new(MockRespondOptionsClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        let err = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect_err("forced tool choice rejected");
+        assert!(matches!(err, HandlerError::BadRequest(_)));
+        assert!(err.message().contains("forced tool_choice"));
+    }
+
+    #[tokio::test]
+    async fn handle_tools_strips_response_format_from_passthrough() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "request-model",
+            "response_format": {"type": "json_object"},
+            "prompt_cache_key": "tenant-a-tools-v1",
+            "tools": [search_tool_json()]
+        });
+        let client = Arc::new(MockRespondOptionsClient::new());
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler");
+
+        let options = client
+            .last_options
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("options recorded");
+        let passthrough = options.passthrough.expect("passthrough");
+        assert_eq!(passthrough["prompt_cache_key"], "tenant-a-tools-v1");
+        assert!(!passthrough.contains_key("response_format"));
+    }
+
+    #[test]
+    fn guarded_anthropic_body_rejects_incompatible_tool_choice() {
+        let err =
+            sanitize_guarded_anthropic_body(Some(json!({"tool_choice": {"type": "none"}})), false)
+                .expect_err("tool_choice none rejected");
+        assert!(err.message().contains("tool_choice=none"));
+
+        let err = sanitize_guarded_anthropic_body(
+            Some(json!({"tool_choice": {"type": "tool", "name": "search"}})),
+            true,
+        )
+        .expect_err("forced tool choice rejected");
+        assert!(err.message().contains("forced tool_choice"));
+    }
+
+    #[tokio::test]
     async fn handle_no_tools_streaming_uses_stream_client() {
         let body = json!({
             "messages": [{"role": "user", "content": "hi"}],
@@ -2270,7 +2452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_no_tools_tool_calls_become_empty_text() {
+    async fn handle_no_tools_tool_calls_return_upstream_error() {
         let body = json!({
             "messages": [{"role": "user", "content": "hi"}],
             "model": "test-model",
@@ -2279,17 +2461,13 @@ mod tests {
         let client = Arc::new(MockPassthroughToolCallClient);
         let ctx = Arc::new(Mutex::new(dummy_ctx()));
         let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
-        match result.unwrap() {
-            HandlerResult::Response(v) => {
-                assert_eq!(v["choices"][0]["message"]["content"], "");
-                assert_eq!(v["choices"][0]["finish_reason"], "stop");
-            }
-            _ => panic!("expected Response"),
-        }
+        let err = result.expect_err("unexpected tool calls should fail");
+        assert!(matches!(err, HandlerError::Upstream(_)));
+        assert!(err.message().contains("without tools"));
     }
 
     #[tokio::test]
-    async fn handle_no_tools_tool_calls_become_empty_text_streaming() {
+    async fn handle_no_tools_tool_calls_return_stream_error() {
         let body = json!({
             "messages": [{"role": "user", "content": "hi"}],
             "model": "test-model",
@@ -2297,13 +2475,16 @@ mod tests {
         });
         let client = Arc::new(MockPassthroughToolCallClient);
         let ctx = Arc::new(Mutex::new(dummy_ctx()));
-        let result = handle_chat_completions(&body, &client, &ctx, 3, true).await;
-        let events = collect_stream_events(result.unwrap()).await;
-        assert_eq!(events[0]["choices"][0]["delta"]["content"], "");
-        assert_eq!(
-            events.last().unwrap()["choices"][0]["finish_reason"],
-            "stop"
-        );
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("stream body");
+        let HandlerResult::StreamBody(stream) = result else {
+            panic!("expected stream body");
+        };
+        let err = collect_openai_events(stream)
+            .await
+            .expect_err("unexpected tool calls should fail stream");
+        assert!(err.to_string().contains("without tools"));
     }
 
     #[tokio::test]
@@ -2768,6 +2949,105 @@ mod tests {
         assert_eq!(sent.len(), 2);
         let second_wire = serde_json::to_string(&sent[1]).expect("wire json");
         assert!(second_wire.contains("[StepEnforcementError]"));
+    }
+
+    #[tokio::test]
+    async fn proxy_required_steps_treat_absent_status_as_success_without_broad_text_heuristic() {
+        let mut respond_args = IndexMap::new();
+        respond_args.insert("message".into(), json!("done"));
+        let client = Arc::new(MockWorkflowContractClient::new(vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", respond_args)]),
+        ]));
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "audit account"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_list",
+                        "type": "function",
+                        "function": {"name": "legacy_list_accounts", "arguments": "{}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_list",
+                    "name": "legacy_list_accounts",
+                    "content": "0 failed checks"
+                }
+            ],
+            "model": "test-model",
+            "stream": false,
+            "tools": [legacy_list_accounts_tool()],
+            "_forge": {
+                "required_steps": ["legacy_list_accounts"],
+                "terminal_tools": ["respond"]
+            }
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["finish_reason"], "stop");
+                assert_eq!(v["choices"][0]["message"]["content"], "done");
+            }
+            _ => panic!("expected Response"),
+        }
+        let wire = serde_json::to_string(&client.sent_messages()).expect("wire json");
+        assert!(!wire.contains("[StepEnforcementError]"));
+    }
+
+    #[test]
+    fn record_completed_proxy_tool_results_keys_status_by_tool_call_id() {
+        let raw_messages = vec![
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_list",
+                "content": "[ToolError] stale text",
+                "_forge": {"tool_status": "ok"}
+            }),
+            json!({"role": "user", "content": "not the tool result index"}),
+        ];
+        let messages = vec![
+            Message::new(
+                MessageRole::Assistant,
+                "",
+                MessageMeta::new(MessageType::ToolCall),
+            )
+            .with_tool_calls(vec![ToolCallInfo::new(
+                "legacy_list_accounts",
+                Some(IndexMap::new()),
+                "call_list",
+            )]),
+            Message::new(
+                MessageRole::User,
+                "index padding",
+                MessageMeta::new(MessageType::UserInput),
+            ),
+            Message::new(
+                MessageRole::Tool,
+                "[ToolError] text would fail without keyed status",
+                MessageMeta::new(MessageType::ToolResult),
+            )
+            .with_tool_name("legacy_list_accounts")
+            .with_tool_call_id("call_list"),
+        ];
+        let mut enforcer = StepEnforcer::new(
+            vec!["legacy_list_accounts".to_string()],
+            IndexSet::from_iter(["respond".to_string()]),
+            None,
+            3,
+            2,
+        );
+
+        record_completed_proxy_tool_results(&raw_messages, &messages, &mut enforcer);
+
+        assert!(enforcer.is_satisfied());
     }
 
     #[tokio::test]

@@ -87,6 +87,54 @@ pub fn fold_and_serialize(messages: &[Message], api_format: &str) -> Vec<Value> 
 /// Callback type for streaming chunks.
 pub type OnChunkFn = Box<dyn Fn(&StreamChunk) + Send + Sync>;
 
+enum ContextAccess<'a> {
+    Direct(&'a mut ContextManager),
+    Shared(&'a tokio::sync::Mutex<ContextManager>),
+}
+
+impl ContextAccess<'_> {
+    async fn maybe_compact(
+        &mut self,
+        messages: &[Message],
+        step_index: i64,
+        step_hint: Option<&str>,
+    ) -> Option<Vec<Message>> {
+        match self {
+            Self::Direct(context) => match context.maybe_compact(messages, step_index, step_hint) {
+                std::borrow::Cow::Owned(new_msgs) => Some(new_msgs),
+                std::borrow::Cow::Borrowed(_) => None,
+            },
+            Self::Shared(context) => {
+                let mut context = context.lock().await;
+                match context.maybe_compact(messages, step_index, step_hint) {
+                    std::borrow::Cow::Owned(new_msgs) => Some(new_msgs),
+                    std::borrow::Cow::Borrowed(_) => None,
+                }
+            }
+        }
+    }
+
+    async fn check_thresholds(&mut self, messages: &[Message]) -> Option<String> {
+        match self {
+            Self::Direct(context) => context.check_thresholds(messages),
+            Self::Shared(context) => {
+                let mut context = context.lock().await;
+                context.check_thresholds(messages)
+            }
+        }
+    }
+
+    async fn update_token_count(&mut self, count: i64) {
+        match self {
+            Self::Direct(context) => context.update_token_count(count),
+            Self::Shared(context) => {
+                let mut context = context.lock().await;
+                context.update_token_count(count);
+            }
+        }
+    }
+}
+
 /// Core inference function.
 ///
 /// Takes a mutable message list (compaction modifies in-place), an LLM client,
@@ -145,6 +193,111 @@ pub async fn run_inference_with_options<C: LLMClient>(
     on_chunk: Option<&OnChunkFn>,
     options: LLMRequestOptions,
 ) -> Result<Option<InferenceResult>, ForgeError> {
+    run_inference_with_options_inner(
+        messages,
+        client,
+        ContextAccess::Direct(context_manager),
+        validator,
+        error_tracker,
+        tool_specs,
+        tool_call_counter,
+        step_index,
+        step_hint,
+        max_attempts,
+        stream,
+        on_chunk,
+        options,
+    )
+    .await
+}
+
+/// Core inference function that scopes a shared context lock to local mutations.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_inference_shared_context<C: LLMClient>(
+    messages: &mut Vec<Message>,
+    client: &C,
+    context_manager: &tokio::sync::Mutex<ContextManager>,
+    validator: &ResponseValidator,
+    error_tracker: &mut ErrorTracker,
+    tool_specs: &[ToolSpec],
+    tool_call_counter: &mut i64,
+    step_index: i64,
+    step_hint: &str,
+    max_attempts: Option<i32>,
+    stream: bool,
+    on_chunk: Option<&OnChunkFn>,
+    sampling: Option<&serde_json::Map<String, Value>>,
+) -> Result<Option<InferenceResult>, ForgeError> {
+    let options = LLMRequestOptions::from_sampling(sampling.cloned());
+    run_inference_with_options_shared_context(
+        messages,
+        client,
+        context_manager,
+        validator,
+        error_tracker,
+        tool_specs,
+        tool_call_counter,
+        step_index,
+        step_hint,
+        max_attempts,
+        stream,
+        on_chunk,
+        options,
+    )
+    .await
+}
+
+/// Core inference with full request options and scoped shared-context locking.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_inference_with_options_shared_context<C: LLMClient>(
+    messages: &mut Vec<Message>,
+    client: &C,
+    context_manager: &tokio::sync::Mutex<ContextManager>,
+    validator: &ResponseValidator,
+    error_tracker: &mut ErrorTracker,
+    tool_specs: &[ToolSpec],
+    tool_call_counter: &mut i64,
+    step_index: i64,
+    step_hint: &str,
+    max_attempts: Option<i32>,
+    stream: bool,
+    on_chunk: Option<&OnChunkFn>,
+    options: LLMRequestOptions,
+) -> Result<Option<InferenceResult>, ForgeError> {
+    run_inference_with_options_inner(
+        messages,
+        client,
+        ContextAccess::Shared(context_manager),
+        validator,
+        error_tracker,
+        tool_specs,
+        tool_call_counter,
+        step_index,
+        step_hint,
+        max_attempts,
+        stream,
+        on_chunk,
+        options,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_inference_with_options_inner<C: LLMClient>(
+    messages: &mut Vec<Message>,
+    client: &C,
+    mut context_manager: ContextAccess<'_>,
+    validator: &ResponseValidator,
+    error_tracker: &mut ErrorTracker,
+    tool_specs: &[ToolSpec],
+    tool_call_counter: &mut i64,
+    step_index: i64,
+    step_hint: &str,
+    max_attempts: Option<i32>,
+    stream: bool,
+    on_chunk: Option<&OnChunkFn>,
+    options: LLMRequestOptions,
+) -> Result<Option<InferenceResult>, ForgeError> {
     let mut new_messages: Vec<Message> = Vec::new();
     let mut attempts = 0;
     let retry_limit = error_tracker.max_retries().saturating_add(1);
@@ -155,24 +308,21 @@ pub async fn run_inference_with_options<C: LLMClient>(
     } else {
         Some(tool_specs.to_vec())
     };
-    let mut verbatim_anthropic_body = options.inbound_anthropic_body.clone();
 
     while attempts < max {
         attempts += 1;
 
         // Compact context.
-        let compacted = context_manager.maybe_compact(messages, step_index, Some(step_hint));
-        if let std::borrow::Cow::Owned(ref new_msgs) = compacted {
+        let compacted = context_manager
+            .maybe_compact(messages, step_index, Some(step_hint))
+            .await;
+        if let Some(new_msgs) = compacted {
             messages.clear();
-            messages.extend(new_msgs.iter().cloned());
-            verbatim_anthropic_body = None;
+            messages.extend(new_msgs);
         }
 
         // Check context thresholds and inject transient warning.
-        let transient_warning = context_manager.check_thresholds(messages);
-        if transient_warning.is_some() {
-            verbatim_anthropic_body = None;
-        }
+        let transient_warning = context_manager.check_thresholds(messages).await;
 
         // Fold and serialize.
         let mut wire = fold_and_serialize(messages, api_format);
@@ -189,8 +339,7 @@ pub async fn run_inference_with_options<C: LLMClient>(
             new_messages.push(warning_msg);
         }
 
-        let mut request_options = options.clone();
-        request_options.inbound_anthropic_body = verbatim_anthropic_body.clone();
+        let request_options = options.clone();
 
         // Send to LLM.
         let response = if stream {
@@ -219,14 +368,14 @@ pub async fn run_inference_with_options<C: LLMClient>(
                 .await
                 .map_err(ForgeError::from)?
         };
-        verbatim_anthropic_body = None;
 
         // Sync token count: prefer real usage from client, fall back to heuristic.
-        if let Some(usage) = client.last_usage() {
-            context_manager.update_token_count(usage.total_tokens);
+        let observed_tokens = if let Some(usage) = client.last_usage() {
+            usage.total_tokens
         } else {
-            context_manager.update_token_count(estimate_tokens_from_response(&response));
-        }
+            estimate_tokens_from_response(&response)
+        };
+        context_manager.update_token_count(observed_tokens).await;
 
         // Validate response.
         let validation = validator.validate(&response);
@@ -583,7 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_anthropic_body_is_cleared_after_retry_mutates_transcript() {
+    async fn raw_anthropic_body_is_preserved_after_retry_mutates_transcript() {
         let client = RetryRecordingClient::new();
         let raw = json!({
             "model": "claude-3",
@@ -637,6 +786,6 @@ mod tests {
 
         assert_eq!(result.attempts, 2);
         let raw_bodies = client.raw_bodies.lock().unwrap().clone();
-        assert_eq!(raw_bodies, vec![Some(raw), None]);
+        assert_eq!(raw_bodies, vec![Some(raw.clone()), Some(raw)]);
     }
 }

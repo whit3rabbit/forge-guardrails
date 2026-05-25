@@ -127,6 +127,11 @@ impl AnthropicClient {
                 }
                 obj.entry("model".to_string())
                     .or_insert_with(|| Value::String(self.model.clone()));
+                patch_raw_anthropic_transcript(
+                    obj,
+                    &messages,
+                    options.initial_openai_messages.as_deref(),
+                );
                 if let Some(tool_specs) = tools.as_deref().filter(|tools| !tools.is_empty()) {
                     merge_guarded_tools_into_raw_body(obj, tool_specs);
                 }
@@ -149,6 +154,53 @@ impl AnthropicClient {
         }
         body
     }
+}
+
+fn patch_raw_anthropic_transcript(
+    obj: &mut serde_json::Map<String, Value>,
+    messages: &[Value],
+    initial_openai_messages: Option<&[Value]>,
+) {
+    let Some(initial) = initial_openai_messages else {
+        return;
+    };
+    if messages.len() >= initial.len() && &messages[..initial.len()] == initial {
+        let tail = &messages[initial.len()..];
+        if tail.is_empty() || append_anthropic_retry_tail(obj, tail) {
+            return;
+        }
+    }
+
+    let (system, converted_messages) = convert::convert_messages(messages);
+    match system {
+        Some(system) => {
+            obj.insert("system".to_string(), system);
+        }
+        None => {
+            obj.remove("system");
+        }
+    }
+    obj.insert("messages".to_string(), Value::Array(converted_messages));
+}
+
+fn append_anthropic_retry_tail(
+    obj: &mut serde_json::Map<String, Value>,
+    tail_messages: &[Value],
+) -> bool {
+    let (tail_system, converted_tail) = convert::convert_messages(tail_messages);
+    if tail_system.is_some() {
+        return false;
+    }
+    if converted_tail.is_empty() {
+        return true;
+    }
+    match obj.get_mut("messages").and_then(Value::as_array_mut) {
+        Some(existing) => existing.extend(converted_tail),
+        None => {
+            obj.insert("messages".to_string(), Value::Array(converted_tail));
+        }
+    }
+    true
 }
 
 fn merge_guarded_tools_into_raw_body(obj: &mut serde_json::Map<String, Value>, tools: &[ToolSpec]) {
@@ -245,6 +297,185 @@ fn anthropic_usage_details(
     } else {
         Some(details)
     }
+}
+
+struct AnthropicToolBlock {
+    id: Option<String>,
+    name: String,
+    args_json: String,
+}
+
+#[derive(Default)]
+struct AnthropicStreamState {
+    accumulated_text: String,
+    tool_blocks: Vec<AnthropicToolBlock>,
+    current_tool_idx: Option<usize>,
+    usage_input: i64,
+    usage_output: i64,
+    usage_cache_creation: Option<i64>,
+    usage_cache_read: Option<i64>,
+}
+
+fn process_anthropic_sse_line(
+    line: &str,
+    state: &mut AnthropicStreamState,
+    last_usage: &Arc<Mutex<Option<TokenUsage>>>,
+    last_usage_details: &Arc<Mutex<Option<LLMUsageDetails>>>,
+) -> Result<Option<StreamChunk>, StreamError> {
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let data = data.trim_start();
+    if data == "[DONE]" {
+        return Ok(None);
+    }
+    let evt: Value = serde_json::from_str(data)
+        .map_err(|err| StreamError::new(format!("Malformed Anthropic SSE data: {err}")))?;
+
+    match evt.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "content_block_start" => {
+            if let Some(block) = evt
+                .get("content_block")
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+            {
+                let id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                state.tool_blocks.push(AnthropicToolBlock {
+                    id,
+                    name,
+                    args_json: String::new(),
+                });
+                state.current_tool_idx = Some(state.tool_blocks.len() - 1);
+            }
+        }
+        "content_block_delta" => {
+            if let Some(delta) = evt.get("delta") {
+                match delta.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "text_delta" => {
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            state.accumulated_text.push_str(text);
+                            return Ok(Some(
+                                StreamChunk::new(ChunkType::TextDelta).with_content(text),
+                            ));
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(idx) = state.current_tool_idx {
+                            if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
+                            {
+                                if let Some(block) = state.tool_blocks.get_mut(idx) {
+                                    block.args_json.push_str(partial);
+                                }
+                                return Ok(Some(
+                                    StreamChunk::new(ChunkType::ToolCallDelta)
+                                        .with_content(partial),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "content_block_stop" => {
+            state.current_tool_idx = None;
+        }
+        "message_delta" => {
+            if let Some(usage) = evt.get("usage") {
+                state.usage_input = usage
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(state.usage_input);
+                state.usage_output = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(state.usage_output);
+                state.usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens")
+                    .or(state.usage_cache_creation);
+                state.usage_cache_read =
+                    usage_i64(Some(usage), "cache_read_input_tokens").or(state.usage_cache_read);
+            }
+        }
+        "message_start" => {
+            if let Some(usage) = evt.get("message").and_then(|msg| msg.get("usage")) {
+                state.usage_input = usage
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                state.usage_output = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                state.usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens");
+                state.usage_cache_read = usage_i64(Some(usage), "cache_read_input_tokens");
+            }
+        }
+        "message_stop" => {
+            let prompt_total = state.usage_input
+                + state.usage_cache_creation.unwrap_or(0)
+                + state.usage_cache_read.unwrap_or(0);
+            if let Ok(mut guard) = last_usage.lock() {
+                *guard = Some(TokenUsage::new(
+                    prompt_total,
+                    state.usage_output,
+                    prompt_total + state.usage_output,
+                ));
+            }
+            if let Ok(mut guard) = last_usage_details.lock() {
+                *guard =
+                    anthropic_usage_details(state.usage_cache_creation, state.usage_cache_read);
+            }
+            let final_resp = if !state.tool_blocks.is_empty() {
+                let reasoning = if state.accumulated_text.is_empty() {
+                    None
+                } else {
+                    Some(state.accumulated_text.clone())
+                };
+                let calls: Vec<crate::clients::base::ToolCall> = state
+                    .tool_blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, block)| {
+                        let args = serde_json::from_str::<Value>(&block.args_json)
+                            .ok()
+                            .and_then(|v| v.as_object().cloned())
+                            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            .unwrap_or_default();
+                        let mut call =
+                            crate::clients::base::ToolCall::new(block.name.clone(), args);
+                        if let Some(id) = block.id.as_ref() {
+                            call = call.with_id(id.clone());
+                        }
+                        if i == 0 {
+                            if let Some(ref r) = reasoning {
+                                call = call.with_reasoning(r);
+                            }
+                        }
+                        call
+                    })
+                    .collect();
+                crate::clients::base::LLMResponse::ToolCalls(calls)
+            } else {
+                crate::clients::base::LLMResponse::Text(crate::clients::base::TextResponse::new(
+                    &state.accumulated_text,
+                ))
+            };
+            return Ok(Some(
+                StreamChunk::new(ChunkType::Final).with_response(final_resp),
+            ));
+        }
+        _ => {}
+    }
+
+    Ok(None)
 }
 
 impl LLMClient for AnthropicClient {
@@ -386,15 +617,7 @@ impl LLMClient for AnthropicClient {
             let mut line_buf = String::new();
             let mut inner = Box::pin(byte_stream);
 
-            // Accumulated stream state.
-            let mut accumulated_text = String::new();
-            // (name, args_json) per tool_use block.
-            let mut tool_blocks: Vec<(String, String)> = Vec::new();
-            let mut current_tool_idx: i64 = -1;
-            let mut usage_input: i64 = 0;
-            let mut usage_output: i64 = 0;
-            let mut usage_cache_creation: Option<i64> = None;
-            let mut usage_cache_read: Option<i64> = None;
+            let mut state = AnthropicStreamState::default();
 
             loop {
                 match inner.next().await {
@@ -412,118 +635,44 @@ impl LLMClient for AnthropicClient {
                     let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
                     line_buf = line_buf[newline_pos + 1..].to_string();
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" { continue; }
-                        let evt: Value = match serde_json::from_str(data) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-                        match evt.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                            "content_block_start" => {
-                                if let Some("tool_use") = evt
-                                    .get("content_block")
-                                    .and_then(|b| b.get("type"))
-                                    .and_then(|t| t.as_str())
-                                {
-                                    let name = evt
-                                        .get("content_block")
-                                        .and_then(|b| b.get("name"))
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    tool_blocks.push((name, String::new()));
-                                    current_tool_idx = (tool_blocks.len() as i64) - 1;
-                                }
-                            }
-                            "content_block_delta" => {
-                                if let Some(delta) = evt.get("delta") {
-                                    match delta.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                                        "text_delta" => {
-                                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                                accumulated_text.push_str(text);
-                                                yield Ok(StreamChunk::new(ChunkType::TextDelta).with_content(text));
-                                            }
-                                        }
-                                        "input_json_delta" => {
-                                            let idx = current_tool_idx;
-                                            if idx >= 0 {
-                                                if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str()) {
-                                                    if let Some(block) = tool_blocks.get_mut(idx as usize) {
-                                                        block.1.push_str(partial);
-                                                    }
-                                                    yield Ok(StreamChunk::new(ChunkType::ToolCallDelta).with_content(partial));
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            "content_block_stop" => {
-                                current_tool_idx = -1;
-                            }
-                            "message_delta" => {
-                                // Capture usage tokens from message_delta.
-                                if let Some(usage) = evt.get("usage") {
-                                    usage_input = usage.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(usage_input);
-                                    usage_output = usage.get("output_tokens").and_then(|t| t.as_i64()).unwrap_or(usage_output);
-                                    usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens").or(usage_cache_creation);
-                                    usage_cache_read = usage_i64(Some(usage), "cache_read_input_tokens").or(usage_cache_read);
-                                }
-                            }
-                            "message_start" => {
-                                // Initial usage (prompt tokens) from message_start.
-                                if let Some(msg) = evt.get("message") {
-                                    if let Some(usage) = msg.get("usage") {
-                                        usage_input = usage.get("input_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
-                                        usage_output = usage.get("output_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
-                                        usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens");
-                                        usage_cache_read = usage_i64(Some(usage), "cache_read_input_tokens");
-                                    }
-                                }
-                            }
-                            "message_stop" => {
-                                let prompt_total = usage_input
-                                    + usage_cache_creation.unwrap_or(0)
-                                    + usage_cache_read.unwrap_or(0);
-                                if let Ok(mut guard) = last_usage.lock() {
-                                    *guard = Some(TokenUsage::new(prompt_total, usage_output, prompt_total + usage_output));
-                                }
-                                if let Ok(mut guard) = last_usage_details.lock() {
-                                    *guard = anthropic_usage_details(usage_cache_creation, usage_cache_read);
-                                }
-                                // Build the final LLMResponse matching Python's message_stop handler.
-                                let final_resp = if !tool_blocks.is_empty() {
-                                    let reasoning = if accumulated_text.is_empty() { None } else { Some(accumulated_text.clone()) };
-                                    let calls: Vec<crate::clients::base::ToolCall> = tool_blocks
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, (name, args_json))| {
-                                            let args = serde_json::from_str::<Value>(args_json)
-                                                .ok()
-                                                .and_then(|v| v.as_object().cloned())
-                                                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-                                                .unwrap_or_default();
-                                            let mut call = crate::clients::base::ToolCall::new(name, args);
-                                            if i == 0 {
-                                                if let Some(ref r) = reasoning {
-                                                    call = call.with_reasoning(r);
-                                                }
-                                            }
-                                            call
-                                        })
-                                        .collect();
-                                    crate::clients::base::LLMResponse::ToolCalls(calls)
-                                } else {
-                                    crate::clients::base::LLMResponse::Text(
-                                        crate::clients::base::TextResponse::new(&accumulated_text)
-                                    )
-                                };
-                                yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_resp));
+                    match process_anthropic_sse_line(
+                        &line,
+                        &mut state,
+                        &last_usage,
+                        &last_usage_details,
+                    ) {
+                        Ok(Some(chunk)) => {
+                            let is_final = chunk.chunk_type == ChunkType::Final;
+                            yield Ok(chunk);
+                            if is_final {
                                 return;
                             }
-                            _ => {}
                         }
+                        Ok(None) => {}
+                        Err(err) => {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let final_line = line_buf.trim_end_matches('\r').to_string();
+            if !final_line.is_empty() {
+                match process_anthropic_sse_line(
+                    &final_line,
+                    &mut state,
+                    &last_usage,
+                    &last_usage_details,
+                ) {
+                    Ok(Some(chunk)) => {
+                        yield Ok(chunk);
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        yield Err(err);
+                        return;
                     }
                 }
             }
@@ -539,9 +688,10 @@ impl LLMClient for AnthropicClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::base::LLMResponse;
+    use crate::clients::base::{ChunkStream, LLMResponse, StreamChunk};
     use futures_util::StreamExt;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn make_tool_spec(name: &str, desc: &str, props: &[(&str, &str)]) -> ToolSpec {
         let mut properties = json!({});
@@ -551,6 +701,43 @@ mod tests {
         }
         let schema = json!({"type": "object", "properties": properties});
         ToolSpec::from_json_schema(name, desc, &schema).expect("valid spec")
+    }
+
+    async fn collect_chunks(mut stream: ChunkStream) -> Result<Vec<StreamChunk>, StreamError> {
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            chunks.push(chunk?);
+        }
+        Ok(chunks)
+    }
+
+    async fn split_sse_server(chunks: Vec<&'static str>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request_buf = [0_u8; 4096];
+            let _ = socket.read(&mut request_buf).await;
+            let content_len: usize = chunks.iter().map(|chunk| chunk.len()).sum();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {content_len}\r\n\r\n"
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write headers");
+            for chunk in chunks {
+                socket
+                    .write_all(chunk.as_bytes())
+                    .await
+                    .expect("write chunk");
+                socket.flush().await.expect("flush chunk");
+                tokio::task::yield_now().await;
+            }
+        });
+        format!("http://{addr}")
     }
 
     #[test]
@@ -871,6 +1058,157 @@ mod tests {
         mock.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn stream_processes_final_message_stop_without_trailing_newline() {
+        let mut server = mockito::Server::new_async().await;
+        let sse = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}"
+        );
+        let mock = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+
+        let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0);
+        let chunks = collect_chunks(
+            client
+                .send_stream_with_options(
+                    vec![json!({"role": "user", "content": "hi"})],
+                    None,
+                    LLMRequestOptions::default(),
+                )
+                .await
+                .expect("stream starts"),
+        )
+        .await
+        .expect("chunks");
+
+        assert!(chunks
+            .iter()
+            .any(|chunk| chunk.chunk_type == ChunkType::Final));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn stream_processes_final_line_split_across_byte_boundaries() {
+        let base_url = split_sse_server(vec![
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_",
+            "stop\"}",
+        ])
+        .await;
+        let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+            .with_base_url(base_url)
+            .with_timeout(5.0);
+        let chunks = collect_chunks(
+            client
+                .send_stream_with_options(
+                    vec![json!({"role": "user", "content": "hi"})],
+                    None,
+                    LLMRequestOptions::default(),
+                )
+                .await
+                .expect("stream starts"),
+        )
+        .await
+        .expect("chunks");
+
+        assert_eq!(
+            chunks.last().and_then(|chunk| chunk.response.as_ref()),
+            Some(&LLMResponse::Text(crate::clients::base::TextResponse::new(
+                "ok"
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_malformed_final_sse_line_returns_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {broken")
+            .create_async()
+            .await;
+        let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0);
+        let err = collect_chunks(
+            client
+                .send_stream_with_options(
+                    vec![json!({"role": "user", "content": "hi"})],
+                    None,
+                    LLMRequestOptions::default(),
+                )
+                .await
+                .expect("stream starts"),
+        )
+        .await
+        .expect_err("malformed data should fail");
+
+        assert!(err.to_string().contains("Malformed Anthropic SSE data"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn stream_tool_use_preserves_provider_id() {
+        let mut server = mockito::Server::new_async().await;
+        let sse = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_keep\",\"name\":\"search\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n",
+            "data: {\"type\":\"message_stop\"}"
+        );
+        let mock = server
+            .mock("POST", "/messages")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+        let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0);
+        let chunks = collect_chunks(
+            client
+                .send_stream_with_options(
+                    vec![json!({"role": "user", "content": "hi"})],
+                    Some(vec![make_tool_spec("search", "Search", &[])]),
+                    LLMRequestOptions::default(),
+                )
+                .await
+                .expect("stream starts"),
+        )
+        .await
+        .expect("chunks");
+
+        let final_response = chunks
+            .last()
+            .and_then(|chunk| chunk.response.as_ref())
+            .expect("final response");
+        match final_response {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].id.as_deref(), Some("toolu_keep"));
+                assert_eq!(calls[0].tool, "search");
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+        mock.assert_async().await;
+    }
+
     #[test]
     fn rebuilt_body_maps_passthrough_to_anthropic_fields() {
         let client = AnthropicClient::new("fallback-model", None);
@@ -967,5 +1305,163 @@ mod tests {
         let usage = client.last_usage().expect("usage");
         assert_eq!(usage.total_tokens, 12);
         mock.assert_async().await;
+    }
+
+    struct RetryBodyRecordingAnthropicClient {
+        inner: AnthropicClient,
+        bodies: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl RetryBodyRecordingAnthropicClient {
+        fn new() -> Self {
+            Self {
+                inner: AnthropicClient::new("fallback-model", None),
+                bodies: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LLMClient for RetryBodyRecordingAnthropicClient {
+        fn api_format(&self) -> ApiFormat {
+            ApiFormat::OpenAI
+        }
+
+        async fn send(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<LLMResponse, BackendError> {
+            Ok(LLMResponse::Text(crate::clients::base::TextResponse::new(
+                "unused",
+            )))
+        }
+
+        async fn send_with_options(
+            &self,
+            messages: Vec<Value>,
+            tools: Option<Vec<ToolSpec>>,
+            options: LLMRequestOptions,
+        ) -> Result<LLMResponse, BackendError> {
+            let body = self
+                .inner
+                .build_body_with_options(messages, tools, options, false);
+            let mut bodies = self.bodies.lock().unwrap();
+            let attempt = bodies.len();
+            bodies.push(body);
+            drop(bodies);
+
+            if attempt == 0 {
+                Ok(LLMResponse::Text(crate::clients::base::TextResponse::new(
+                    "not a tool call",
+                )))
+            } else {
+                let mut args = indexmap::IndexMap::new();
+                args.insert("message".to_string(), json!("ok"));
+                Ok(LLMResponse::ToolCalls(vec![
+                    crate::clients::base::ToolCall::new("respond", args),
+                ]))
+            }
+        }
+
+        async fn send_stream(
+            &self,
+            _messages: Vec<Value>,
+            _tools: Option<Vec<ToolSpec>>,
+            _sampling: Option<SamplingParams>,
+        ) -> Result<ChunkStream, StreamError> {
+            Err(StreamError::new("not implemented"))
+        }
+
+        async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+            Ok(Some(4096))
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_anthropic_body_preserves_annotated_prefix_after_retry() {
+        let raw = json!({
+            "model": "claude-request",
+            "max_tokens": 128,
+            "system": [{
+                "type": "text",
+                "text": "system",
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "hi",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }],
+            "metadata": {"user_id": "user-123"}
+        });
+        let client = RetryBodyRecordingAnthropicClient::new();
+        let mut messages = vec![crate::core::message::Message::new(
+            crate::core::message::MessageRole::User,
+            "hi",
+            crate::core::message::MessageMeta::new(crate::core::message::MessageType::UserInput),
+        )];
+        let initial_wire = crate::core::inference::fold_and_serialize(&messages, "openai");
+        let mut context = crate::context::manager::ContextManager::new(
+            Box::new(crate::context::strategies::NoCompact),
+            4096,
+            None,
+            None,
+            None,
+        );
+        let validator =
+            crate::guardrails::ResponseValidator::new(vec!["respond".to_string()], false, None);
+        let mut tracker = crate::guardrails::ErrorTracker::new(3, 2);
+        let mut counter = 0;
+        let tools = vec![crate::tools::respond::respond_spec()];
+
+        let result = crate::core::inference::run_inference_with_options(
+            &mut messages,
+            &client,
+            &mut context,
+            &validator,
+            &mut tracker,
+            &tools,
+            &mut counter,
+            0,
+            "",
+            Some(3),
+            false,
+            None,
+            LLMRequestOptions {
+                inbound_anthropic_body: Some(raw.clone()),
+                initial_openai_messages: Some(initial_wire),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("inference")
+        .expect("result");
+
+        assert_eq!(result.attempts, 2);
+        let bodies = client.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["metadata"]["user_id"], "user-123");
+        assert_eq!(bodies[0]["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            bodies[0]["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(bodies[0]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()));
+        assert_eq!(bodies[1]["metadata"]["user_id"], "user-123");
+        assert_eq!(bodies[1]["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            bodies[1]["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(
+            bodies[1]["messages"].as_array().expect("messages").len()
+                > raw["messages"].as_array().expect("raw messages").len()
+        );
     }
 }

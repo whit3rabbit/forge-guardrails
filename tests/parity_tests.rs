@@ -7,9 +7,9 @@ use forge_guardrails::{
     build_tool_prompt, extract_sampling, fold_and_serialize, format_tool, format_tool_call_id,
     handle_chat_completions, respond_spec, respond_tool, unknown_tool_nudge, AnthropicClient,
     ApiFormat, ChunkStream, CompactStrategy, ContextManager, ErrorTracker, ForgeError,
-    HandlerResult, LLMClient, LLMResponse, LlamafileClient, Message, MessageMeta, MessageRole,
-    MessageType, NoCompact, OllamaClient, SamplingParams, StepEnforcer, StreamChunk, TieredCompact,
-    ToolCallInfo, ToolDef, ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
+    HandlerError, HandlerResult, LLMClient, LLMResponse, LlamafileClient, Message, MessageMeta,
+    MessageRole, MessageType, NoCompact, OllamaClient, SamplingParams, StepEnforcer, StreamChunk,
+    TieredCompact, ToolCallInfo, ToolDef, ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
 };
 use futures_util::StreamExt;
 use indexmap::IndexMap;
@@ -1508,7 +1508,7 @@ fn python_golden_proxy_sampling_fields_match() {
 }
 
 #[tokio::test]
-async fn python_golden_proxy_no_tools_tool_calls_match() {
+async fn proxy_no_tools_tool_calls_fail_closed() {
     let fixtures = golden();
     let case = golden_case(&fixtures, "proxy_no_tools_tool_calls");
     let client = Arc::new(ScriptedClient::new(vec![LLMResponse::ToolCalls(vec![
@@ -1516,18 +1516,14 @@ async fn python_golden_proxy_no_tools_tool_calls_match() {
     ])]));
     let context = proxy_context();
 
-    let response = handle_chat_completions(&case["input"], &client, &context, 2, true)
+    let err = handle_chat_completions(&case["input"], &client, &context, 2, true)
         .await
-        .expect("proxy response");
+        .expect_err("unexpected no-tools tool call should fail closed");
 
-    match response {
-        HandlerResult::Response(value) => {
-            let choice = &value["choices"][0];
-            assert_eq!(choice["message"]["content"], case["expected"]["content"]);
-            assert_eq!(choice["finish_reason"], case["expected"]["finish_reason"]);
-        }
-        other => panic!("expected response, got {other:?}"),
-    }
+    assert_eq!(
+        err,
+        HandlerError::Upstream("backend returned tool calls for request without tools".to_string())
+    );
 }
 
 #[tokio::test]

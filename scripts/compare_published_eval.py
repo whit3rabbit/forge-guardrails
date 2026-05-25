@@ -155,7 +155,7 @@ def main() -> int:
     parser.add_argument(
         "--backend-mode",
         choices=["LS/N", "LS/P"],
-        default="LS/N",
+        default="LS/P",
         help="Published leaderboard backend/mode row",
     )
     parser.add_argument("--local-model", help="Local JSONL model identity filter")
@@ -179,7 +179,7 @@ def main() -> int:
         for row in selected
         if row.get("mode") == "proxy" or row.get("eval_target_backend") == "openai-proxy"
     ]
-    if proxy_rows and not args.force_proxy_compare:
+    if proxy_rows and published.backend_mode == "LS/N" and not args.force_proxy_compare:
         proxy_modes = sorted({
             f"{row.get('backend', 'unknown')}/{row.get('mode', 'unknown')}"
             for row in proxy_rows
@@ -189,7 +189,8 @@ def main() -> int:
         print(f"Local modes:        {', '.join(proxy_modes)}")
         print(
             "\nPublished comparison skipped: local rows are proxy-mode rows, "
-            "not direct LS/N rows. Pass --force-proxy-compare to compare anyway."
+            "not direct LS/N rows. Compare against LS/P or pass "
+            "--force-proxy-compare to compare anyway."
         )
         return 0
 

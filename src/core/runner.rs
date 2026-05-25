@@ -275,12 +275,10 @@ impl<C: LLMClient> WorkflowRunner<C> {
             let remaining = self.max_iterations - iteration;
             let step_hint = guardrails.step_enforcer.summary_hint();
 
-            let mut ctx = self.context_manager.lock().await;
-
-            let inference_result = inference::run_inference(
+            let inference_result = inference::run_inference_shared_context(
                 &mut messages,
                 self.client.as_ref(),
-                &mut ctx,
+                self.context_manager.as_ref(),
                 &guardrails.validator,
                 &mut guardrails.error_tracker,
                 &tool_specs,
@@ -293,8 +291,6 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 None,
             )
             .await?;
-
-            drop(ctx);
 
             // None means max_attempts exhausted — break to raise MaxIterationsError.
             // Python: `if result is None: break`

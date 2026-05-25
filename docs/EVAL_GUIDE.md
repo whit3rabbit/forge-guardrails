@@ -22,8 +22,9 @@ The wrapper imports scenarios from the upstream `forge/` submodule without
 editing it. It runs a proxy-aware OpenAI tool loop instead of wrapping the
 proxy in the upstream `WorkflowRunner`: returned `assistant.tool_calls` are
 executed locally, matching `tool` results are appended with the original tool
-call IDs, and final proxy-visible text is validated against the scenario
-terminal schema where possible. The wrapper does not send scenario-owned
+call IDs and `_forge.tool_status` (`ok` or `error`), and final proxy-visible
+text is validated against the scenario terminal schema where possible. The
+wrapper does not send scenario-owned
 `respond(...)` tools to the proxy because `respond` is proxy-reserved.
 For workflow parity checks it sends a private `_forge` extension object with
 `required_steps` and `terminal_tools` (`respond` plus any scenario terminal
@@ -59,8 +60,10 @@ results.
 
 Known classifications for the local Ministral proxy comparison:
 
-- `inconsistent_api_recovery_stateful`: required-step contract gap; proxy
-  workflow extensions should remove this from failed contract mismatches.
+- `terminal_redacted`: completed tool flow, but the model submitted exact
+  terminal content `[REDACTED]`; this remains an accuracy failure.
+- `inconsistent_api_recovery_stateful`: if this appears as a failed contract
+  mismatch, the proxy workflow extension path regressed.
 - `argument_transformation*`: model/scenario accuracy weakness in local runs.
 - `grounded_synthesis*`: model/scenario weakness; published direct LS/N is also
   0 for these columns.
@@ -137,9 +140,9 @@ python scripts/eval_openai_proxy.py --help
 ```
 
 `scripts/run_local_eval.sh --suite release` writes proxy rows and runs the
-published comparison helper. The helper skips direct published LS/N comparison
-for proxy rows by default; pass `--force-published-compare` only when you
-explicitly want that non-equivalent comparison.
+published comparison helper against the published LS/P row by default. If you
+select `--published-mode LS/N`, the helper skips direct comparison for proxy
+rows unless `--force-published-compare` is passed.
 
 Run live evals manually against real backends. CI should stay deterministic
 unless a job is explicitly marked as live-backend integration.

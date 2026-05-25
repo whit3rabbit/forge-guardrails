@@ -127,7 +127,7 @@ impl std::error::Error for OpenAiMessageError {}
 pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessageError> {
     let mut messages = Vec::new();
     for (message_index, item) in input.iter().enumerate() {
-        let content = extract_content(item);
+        let content = extract_content(item, message_index)?;
         let role = parse_message_role(item, message_index)?;
         let msg_type = match role {
             MessageRole::System => MessageType::SystemPrompt,
@@ -204,32 +204,47 @@ fn parse_message_role(
     }
 }
 
-/// Extract text content from an OpenAI message, handling null, string, and list.
-fn extract_content(item: &Value) -> String {
+/// Extract text content from an OpenAI message without silently dropping parts.
+fn extract_content(item: &Value, message_index: usize) -> Result<String, OpenAiMessageError> {
     match item.get("content") {
-        None => String::new(),
-        Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
+        None => Ok(String::new()),
+        Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => Ok(s.clone()),
         Some(Value::Array(parts)) => {
-            let texts: Vec<String> = parts
-                .iter()
-                .filter_map(|p| match p {
-                    Value::String(s) => Some(s.clone()),
-                    Value::Object(_) => {
-                        if p.get("type").and_then(|t| t.as_str()) == Some("text") {
-                            p.get("text")
-                                .and_then(|t| t.as_str())
-                                .map(|s| s.to_string())
-                        } else {
-                            None
+            let mut texts = Vec::new();
+            for (part_index, part) in parts.iter().enumerate() {
+                match part {
+                    Value::String(s) => texts.push(s.clone()),
+                    Value::Object(obj) => {
+                        let part_type = obj.get("type").and_then(Value::as_str).ok_or_else(|| {
+                            OpenAiMessageError::new(format!(
+                                "messages[{message_index}].content[{part_index}].type must be a string"
+                            ))
+                        })?;
+                        if part_type != "text" {
+                            return Err(OpenAiMessageError::new(format!(
+                                "messages[{message_index}].content[{part_index}] type '{part_type}' is unsupported; only text content parts are supported"
+                            )));
                         }
+                        let text = obj.get("text").and_then(Value::as_str).ok_or_else(|| {
+                            OpenAiMessageError::new(format!(
+                                "messages[{message_index}].content[{part_index}].text must be a string"
+                            ))
+                        })?;
+                        texts.push(text.to_string());
                     }
-                    _ => None,
-                })
-                .collect();
-            texts.join("\n")
+                    _ => {
+                        return Err(OpenAiMessageError::new(format!(
+                            "messages[{message_index}].content[{part_index}] must be a string or text content part"
+                        )));
+                    }
+                }
+            }
+            Ok(texts.join("\n"))
         }
-        _ => String::new(),
+        Some(_) => Err(OpenAiMessageError::new(format!(
+            "messages[{message_index}].content must be a string, null, or array of text parts"
+        ))),
     }
 }
 
@@ -834,6 +849,44 @@ mod tests {
         })];
         let msgs = openai_to_messages(&input).expect("messages");
         assert_eq!(msgs[0].content, "Hello\nWorld");
+    }
+
+    #[test]
+    fn openai_to_messages_rejects_image_content_part() {
+        let input = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {"url": "https://example.test/image.png"}
+            }]
+        })];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("type 'image_url' is unsupported"));
+    }
+
+    #[test]
+    fn openai_to_messages_rejects_audio_content_part() {
+        let input = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "input_audio": {"data": "abcd", "format": "wav"}
+            }]
+        })];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("type 'input_audio' is unsupported"));
+    }
+
+    #[test]
+    fn openai_to_messages_rejects_malformed_text_content_part() {
+        let input = vec![json!({
+            "role": "user",
+            "content": [{"type": "text", "text": 7}]
+        })];
+        let err = openai_to_messages(&input).unwrap_err();
+        assert!(err.to_string().contains("content[0].text must be a string"));
     }
 
     #[test]
