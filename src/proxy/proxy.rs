@@ -623,15 +623,7 @@ pub fn extract_sampling(body: &Value) -> Option<Map<String, Value>> {
 pub fn extract_passthrough(body: &Value) -> Option<Map<String, Value>> {
     let obj = body.as_object()?;
     let mut map = Map::new();
-    let forge_owned = [
-        "messages",
-        "tools",
-        "stream",
-        "system",
-        "forge_required_steps",
-        "forge_terminal_tools",
-        "forge_tool_prerequisites",
-    ];
+    let forge_owned = ["messages", "tools", "stream", "system", "_forge"];
     let sampling_fields = [
         "temperature",
         "top_p",

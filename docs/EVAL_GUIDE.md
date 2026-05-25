@@ -25,11 +25,11 @@ executed locally, matching `tool` results are appended with the original tool
 call IDs, and final proxy-visible text is validated against the scenario
 terminal schema where possible. The wrapper does not send scenario-owned
 `respond(...)` tools to the proxy because `respond` is proxy-reserved.
-For workflow parity checks it sends private Forge extension fields:
-`forge_required_steps`, `forge_terminal_tools`, and
-`forge_tool_prerequisites`. The proxy strips these before forwarding to the
-backend, uses them only for step/prerequisite nudging, and still returns
-client-owned tool calls for the wrapper to execute. Rows include
+For workflow parity checks it sends a private `_forge` extension object with
+`required_steps` and `terminal_tools` (`respond` plus any scenario terminal
+tools). The proxy strips `_forge` before forwarding to the backend, uses it only
+for step nudging/finalization, and still returns non-terminal client-owned tool
+calls for the wrapper to execute. Rows include
 `proxy_missing_required_steps`, `proxy_required_steps_satisfied`, and
 `proxy_failure_classification` so completed accuracy misses are not mislabeled
 as harness or protocol failures.
