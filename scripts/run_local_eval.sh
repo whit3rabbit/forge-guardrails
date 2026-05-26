@@ -329,10 +329,11 @@ prepare_classifier_binaries() {
 }
 
 start_proxy() {
-  local budget label
+  local budget classifier_log label
   budget="$1"
   label="$2"
   CURRENT_PROXY_LOG="$OUTPUT_DIR/proxy_${label}.log"
+  classifier_log="$OUTPUT_DIR/proxy_classifier_${label}.jsonl"
 
   phase "Start proxy: $label"
   log "Budget tokens: $budget"
@@ -349,12 +350,14 @@ start_proxy() {
   )
   if classifier_enabled; then
     env_args+=("FORGE_PROXY_BIN=$REPO_ROOT/target/debug/forge-guardrails-proxy")
+    env_args+=("FORGE_CLASSIFIER_LOG=$classifier_log")
     proxy_args+=(
       --classifier-dir "$CLASSIFIER_DIR"
       --classifier-mode "$CLASSIFIER_MODE"
       --classifier-model "$CLASSIFIER_MODEL"
     )
     log "Classifier: enabled, mode=$CLASSIFIER_MODE, model=$CLASSIFIER_MODEL"
+    log "Classifier JSONL: $classifier_log"
   else
     log "Classifier: disabled"
   fi
@@ -561,6 +564,7 @@ classifier_enabled=$classifier_enabled_value
 classifier_dir=$CLASSIFIER_DIR
 classifier_mode=$CLASSIFIER_MODE
 classifier_model=$CLASSIFIER_MODEL
+classifier_jsonl_pattern=$OUTPUT_DIR/proxy_classifier_*.jsonl
 EOF
   log "Metadata: $metadata"
 }

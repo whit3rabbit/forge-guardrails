@@ -10,6 +10,7 @@ pub(crate) struct SmokeScenario {
     pub(crate) name: String,
     pub(crate) workflow: Workflow,
     pub(crate) user_message: String,
+    pub(crate) required_facts: Vec<String>,
     pub(crate) capture: Arc<StdMutex<Option<IndexMap<String, Value>>>>,
     pub(crate) corrected_positive: Option<Value>,
 }
@@ -80,8 +81,14 @@ fn basic_2step(use_required_steps: bool) -> Result<SmokeScenario, String> {
         name: "basic_2step".to_string(),
         workflow,
         user_message: "What is the capital of France?".to_string(),
+        required_facts: vec!["Paris".to_string(), "capital".to_string()],
         capture,
-        corrected_positive: Some(json!({"final_text": "The capital of France is Paris."})),
+        corrected_positive: Some(json!({
+            "final_text": "The capital of France is Paris.",
+            "candidate_calls": [
+                {"name": "summarize", "arguments": {"content": "The capital of France is Paris."}}
+            ]
+        })),
     })
 }
 
@@ -148,10 +155,23 @@ fn sequential_3step(use_required_steps: bool) -> Result<SmokeScenario, String> {
         name: "sequential_3step".to_string(),
         workflow,
         user_message: "Generate a sales report from the Q4 2024 dataset.".to_string(),
+        required_facts: vec![
+            "23% YoY growth".to_string(),
+            "Widget Pro".to_string(),
+            "APAC".to_string(),
+        ],
         capture,
-        corrected_positive: Some(
-            json!({"final_text": "Q4 sales were 1200 units with 15% growth."}),
-        ),
+        corrected_positive: Some(json!({
+            "final_text": "Revenue grew 23% YoY. Top product: Widget Pro. Weakest region: APAC.",
+            "candidate_calls": [
+                {
+                    "name": "report",
+                    "arguments": {
+                        "findings": "Revenue grew 23% YoY. Top product: Widget Pro. Weakest region: APAC."
+                    }
+                }
+            ]
+        })),
     })
 }
 
@@ -214,10 +234,15 @@ fn error_recovery(use_required_steps: bool) -> Result<SmokeScenario, String> {
         name: "error_recovery".to_string(),
         workflow,
         user_message: "Fetch 10 records and summarize them.".to_string(),
+        required_facts: vec!["10 records".to_string()],
         capture,
-        corrected_positive: Some(
-            json!({"final_text": "Fetched 10 records and summarized the record count."}),
-        ),
+        corrected_positive: Some(json!({
+            "final_text": "Fetched 10 records and summarized the record count.",
+            "candidate_calls": [
+                {"name": "fetch", "arguments": {"count": "0010"}},
+                {"name": "summarize", "arguments": {"content": "Fetched 10 records and summarized the record count."}}
+            ]
+        })),
     })
 }
 
@@ -270,10 +295,20 @@ fn inconsistent_api_recovery_stateful(use_required_steps: bool) -> Result<SmokeS
             "compliance_status PASS in the submitted report."
         )
         .to_string(),
+        required_facts: vec!["ACC-12345".to_string(), "PASS".to_string()],
         capture,
         corrected_positive: Some(json!({
+            "final_text": "Account ACC-12345 compliance_status PASS.",
             "account_id": "ACC-12345",
-            "compliance_status": "PASS"
+            "compliance_status": "PASS",
+            "candidate_calls": [
+                {
+                    "name": "legacy_submit_audit",
+                    "arguments": {
+                        "report": "account_id=ACC-12345; compliance_status=PASS"
+                    }
+                }
+            ]
         })),
     })
 }

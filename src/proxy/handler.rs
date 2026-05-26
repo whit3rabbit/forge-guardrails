@@ -30,8 +30,12 @@ use futures_util::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use serde_json::{json, Map, Value};
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 /// Stream of OpenAI chat completion chunk objects.
@@ -55,6 +59,7 @@ const FORGE_TERMINAL_TOOLS_FIELD: &str = "terminal_tools";
 const FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD: &str = "return_raw_on_guardrail_failure";
 const FORGE_TOOL_STATUS_FIELD: &str = "tool_status";
 const FORGE_TOOL_STATUS_OK: &str = "ok";
+const FORGE_CLASSIFIER_LOG_ENV: &str = "FORGE_CLASSIFIER_LOG";
 const PROXY_STEP_INDEX: i64 = 0;
 
 #[derive(Debug, Clone)]
@@ -1063,6 +1068,20 @@ fn score_proxy_tool_calls(
                     tool = %call.tool,
                     "tool-call classifier score"
                 );
+                emit_proxy_classifier_jsonl(json!({
+                    "kind": "tool_call",
+                    "unix_ms": unix_ms(),
+                    "user_request": ctx.user_request.as_str(),
+                    "initial_user_request": initial_proxy_user_request(messages).unwrap_or_default(),
+                    "workflow_state": &ctx.workflow_state,
+                    "candidate_call": proxy_tool_call_for_json(call),
+                    "tool": call.tool.as_str(),
+                    "label": score.label.as_label().as_ref(),
+                    "confidence": score.confidence,
+                    "action": score.action.as_str(),
+                    "latency_ms": score.latency_ms,
+                    "model_version": score.model_version.as_str(),
+                }));
                 if matches!(
                     score.action,
                     ClassifierAction::AdvisoryNudge | ClassifierAction::Block
@@ -1184,6 +1203,25 @@ fn score_proxy_final_candidate(
                 terminal_tool = terminal_tool.unwrap_or("text"),
                 "final-response classifier score"
             );
+            emit_proxy_classifier_jsonl(json!({
+                "kind": "final_response",
+                "unix_ms": unix_ms(),
+                "user_request": ctx.user_request.as_str(),
+                "initial_user_request": initial_proxy_user_request(messages).unwrap_or_default(),
+                "workflow_state": &ctx.workflow_state,
+                "required_facts": &ctx.required_facts,
+                "tool_trace": &ctx.tool_trace,
+                "tool_results": ctx.tool_results.iter().map(|result| {
+                    json!({"tool_name": result.tool_name.as_str(), "content": result.content.as_str()})
+                }).collect::<Vec<_>>(),
+                "candidate_final_response": ctx.candidate_final_response.as_str(),
+                "terminal_tool": terminal_tool.unwrap_or("text"),
+                "label": score.label.as_label().as_ref(),
+                "confidence": score.confidence,
+                "action": score.action.as_str(),
+                "latency_ms": score.latency_ms,
+                "model_version": score.model_version.as_str(),
+            }));
             if matches!(
                 score.action,
                 ClassifierAction::AdvisoryNudge | ClassifierAction::Block
@@ -1268,12 +1306,77 @@ fn latest_proxy_user_request(messages: &[Message]) -> Option<&str> {
         .map(|message| message.content.as_str())
 }
 
+fn initial_proxy_user_request(messages: &[Message]) -> Option<&str> {
+    messages
+        .iter()
+        .find(|message| {
+            message.role == MessageRole::User
+                && message.metadata.msg_type == MessageType::UserInput
+                && !message.content.trim().is_empty()
+        })
+        .map(|message| message.content.as_str())
+}
+
 fn proxy_terminal_tools_for_scoring(tool_specs: &[ToolSpec]) -> Vec<String> {
     tool_specs
         .iter()
         .filter(|spec| spec.name == RESPOND_TOOL_NAME)
         .map(|spec| spec.name.clone())
         .collect()
+}
+
+fn proxy_tool_call_for_json(call: &ToolCall) -> Value {
+    Value::Object(
+        [
+            ("name".to_string(), Value::String(call.tool.clone())),
+            (
+                "arguments".to_string(),
+                Value::Object(
+                    call.args
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
+fn emit_proxy_classifier_jsonl(event: Value) {
+    let Some(path) = std::env::var_os(FORGE_CLASSIFIER_LOG_ENV) else {
+        return;
+    };
+    if path.is_empty() {
+        return;
+    }
+    let path = Path::new(&path);
+    if let Err(err) = append_proxy_classifier_jsonl(path, &event) {
+        tracing::warn!(
+            target: "forge.classifier",
+            error = %err,
+            path = %path.display(),
+            "failed to write proxy classifier JSONL event"
+        );
+    }
+}
+
+fn append_proxy_classifier_jsonl(path: &Path, event: &Value) -> Result<(), String> {
+    let line = serde_json::to_string(event).map_err(|err| err.to_string())?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| err.to_string())?;
+    writeln!(file, "{line}").map_err(|err| err.to_string())
+}
+
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 fn emit_proxy_step_nudge_or_error(
@@ -1904,6 +2007,29 @@ mod tests {
             }
             _ => panic!("expected Response"),
         }
+    }
+
+    #[test]
+    fn append_proxy_classifier_jsonl_writes_one_event_per_line() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "forge-proxy-classifier-{}-{}.jsonl",
+            std::process::id(),
+            unix_ms()
+        ));
+        let first = json!({"kind": "tool_call", "tool": "search"});
+        let second = json!({"kind": "tool_call", "tool": "read"});
+
+        append_proxy_classifier_jsonl(&path, &first).expect("first write");
+        append_proxy_classifier_jsonl(&path, &second).expect("second write");
+
+        let text = std::fs::read_to_string(&path).expect("jsonl");
+        let rows = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("json row"))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![first, second]);
+        std::fs::remove_file(path).ok();
     }
 
     async fn collect_stream_events(result: HandlerResult) -> Vec<Value> {

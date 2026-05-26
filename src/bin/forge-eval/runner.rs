@@ -159,7 +159,7 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 final_response_report,
             );
             write_row(cli.output.as_deref(), &row)?;
-            write_hard_negatives(cli.output.as_deref(), &row, &scenario)?;
+            write_hard_negatives(cli.output.as_deref(), &row, &scenario, &messages)?;
         }
     }
 

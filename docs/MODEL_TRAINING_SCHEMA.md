@@ -427,25 +427,72 @@ Rows use this envelope:
 ```json
 {
   "kind": "tool_call",
+  "context": {
+    "user_request": "Generate a sales report from the Q4 2024 dataset.",
+    "workflow_state": {
+      "required_steps": ["fetch_sales_data", "analyze_sales"],
+      "completed_steps": ["fetch_sales_data"],
+      "pending_steps": ["analyze_sales"],
+      "terminal_tools": ["report"],
+      "recent_errors": []
+    },
+    "available_tools": [
+      {
+        "name": "report",
+        "description": "Produce final report.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "findings": { "type": "string" }
+          },
+          "required": ["findings"]
+        }
+      }
+    ],
+    "required_facts": ["23% YoY growth", "Widget Pro", "APAC"]
+  },
   "candidate": {
     "tool_sequence": ["fetch_sales_data", "report"],
-    "tool_args": [{ "quarter": 4, "year": 2024 }, { "findings": "Done." }]
+    "tool_args": [{ "quarter": 4, "year": 2024 }, { "findings": "Done." }],
+    "candidate_call": { "name": "report", "arguments": { "findings": "Done." } },
+    "candidate_calls": [
+      { "name": "fetch_sales_data", "arguments": { "quarter": 4, "year": 2024 } },
+      { "name": "report", "arguments": { "findings": "Done." } }
+    ]
   },
   "classifier_scores": [],
   "outcome": {
     "scenario": "sequential_3step",
     "scenario_family": "sequential_3step",
+    "user_request": "Generate a sales report from the Q4 2024 dataset.",
     "run": 1,
     "failure_kind": "accuracy_false",
     "accuracy": false,
     "corrected_positive": {
       "final_text": "Revenue grew 23%; Widget Pro led sales; APAC was weakest."
-    }
+    },
+    "corrected_candidate_call": {
+      "name": "report",
+      "arguments": {
+        "findings": "Revenue grew 23%; Widget Pro led sales; APAC was weakest."
+      }
+    },
+    "corrected_candidate_calls": [
+      {
+        "name": "report",
+        "arguments": {
+          "findings": "Revenue grew 23%; Widget Pro led sales; APAC was weakest."
+        }
+      }
+    ],
+    "corrected_final_response": "Revenue grew 23%; Widget Pro led sales; APAC was weakest."
   }
 }
 ```
 
-Final-response hard negatives use the same envelope with `kind: "final_response"`, `candidate.final_text`, and `final_response_classifier_scores`.
+Final-response hard negatives use the same context and outcome envelope with
+`kind: "final_response"`, `candidate.final_text`, and
+`final_response_classifier_scores`.
 
 ## Deployment Modes
 

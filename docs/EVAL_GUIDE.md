@@ -208,6 +208,8 @@ The classifier default is `shadow`, but the supported modes are `disabled`,
 completeness, success, retries, or nudges. In enforce mode it can retry/block
 only labels whose artifact threshold is met; labels with thresholds above `1.0`
 remain telemetry-only, and deterministic guardrails remain authoritative for
-schema/protocol invalidity. Use proxy logs and Rust smoke JSONL classifier
-fields to inspect classifier scores; use the Python oracle JSONL and reports to
-confirm behavior changes.
+schema/protocol invalidity. `scripts/run_local_eval.sh` writes proxy classifier
+telemetry to `proxy_classifier_<budget>.jsonl` whenever the classifier is
+enabled, using the `FORGE_CLASSIFIER_LOG` environment variable. Use that JSONL
+and Rust smoke JSONL classifier fields to inspect classifier scores; use the
+Python oracle JSONL and reports to confirm behavior changes.
