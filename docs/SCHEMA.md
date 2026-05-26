@@ -43,7 +43,7 @@ When using the Forge proxy, client requests to `/v1/chat/completions` (OpenAI fo
 ```
 
 ### Struct Representation
-The Rust implementation maps this contract via `ProxyStepContract` in [handler.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/handler.rs#L53-L57):
+The Rust implementation maps this contract via `ProxyStepContract` in [handler.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/handler.rs#L60-L64):
 
 ```rust
 struct ProxyStepContract {
@@ -164,7 +164,7 @@ The proxy splits other top-level fields in the request body into sampling parame
 ### Sampling Schema
 Sampling options are extracted by the proxy to configure parameters that vary from call to call. They do not persist across requests.
 
-The following fields are extracted in `extract_sampling` in [proxy.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy.rs#L653-L679):
+The following fields are extracted in `extract_sampling` in [proxy.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy.rs#L654-L678):
 - `temperature`: Floating point number (e.g., `0.7`)
 - `top_p`: Floating point number (e.g., `0.9`)
 - `top_k`: Integer value
@@ -175,7 +175,7 @@ The following fields are extracted in `extract_sampling` in [proxy.rs](file:///U
 - `chat_template_kwargs`: Object containing arbitrary provider template settings (e.g., `{"enable_thinking": true}`)
 
 ### Passthrough Schema
-Any properties in the request body that are **not** forge-owned (i.e. not `messages`, `tools`, `stream`, `system`, or `_forge`) and **not** sampling parameters are gathered by `extract_passthrough` in [proxy.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy.rs#L681-L709) and forwarded transparently to the LLM client.
+Any properties in the request body that are **not** forge-owned (i.e. not `messages`, `tools`, `stream`, `system`, or `_forge`) and **not** sampling parameters are gathered by `extract_passthrough` in [proxy.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy.rs#L681-L708) and forwarded transparently to the LLM client.
 
 Common passthrough fields include:
 - `model`: String (e.g. `"gpt-4o-mini"`)
@@ -242,4 +242,221 @@ Proxy step reconstruction can only trust successful client-owned tool results. T
 | :--- | :--- |
 | `"ok"` | Count the matching prior assistant tool call as a completed required step. |
 | Any other string | Do not count the tool result as a completed required step. |
-| Omitted | Count the result unless the content looks like an error, such as `[ToolError]`, `error:`, `failed`, `exception`, or `timeout`. |
+| Omitted | Count the result unless the content starts with an explicit tool error prefix, such as `[ToolError]`, `[ToolResolutionError]`, `[ToolExecutionError]`, or `[tool_error]`. |
+
+---
+
+## 5. Semantic Verifier Schemas
+
+Forge can attach semantic verifier scorers to the guardrail path. The current Rust implementation supports a tool-call verifier and final-response verifier infrastructure. Full training and artifact contracts are defined in [MODEL_TRAINING_SCHEMA.md](MODEL_TRAINING_SCHEMA.md).
+
+### Scorer Modes and Actions
+
+All verifier modes use the same stable names:
+
+| Mode | Runtime behavior |
+| :--- | :--- |
+| `disabled` | Do not score. |
+| `shadow` | Score for telemetry only. |
+| `advisory` | Score and emit a retry nudge when a label passes its advisory threshold. |
+| `enforce` | Score and block/retry when a label passes its enforce threshold. If it misses the enforce threshold but passes the advisory threshold, the advisory nudge still fires. |
+
+Score actions are:
+
+| Action | Meaning |
+| :--- | :--- |
+| `allow` | Accept the candidate. |
+| `shadow_only` | Record telemetry without changing behavior. |
+| `advisory_nudge` | Retry with a model-facing nudge. |
+| `block` | Block the candidate and retry within the existing retry budget. |
+
+Thresholds remain label-specific. A label with advisory and enforce thresholds above `1.0` is effectively telemetry-only even when the runtime mode is `enforce`.
+
+### Tool-Call Classifier Context
+
+The current tool-call classifier context is represented by `ScoringContext`:
+
+```json
+{
+  "schema_version": "toolcall-verifier-input/v2",
+  "user_request": "Generate a sales report from the Q4 2024 dataset.",
+  "workflow_state": {
+    "required_steps": ["fetch_sales_data", "analyze_sales"],
+    "completed_steps": ["fetch_sales_data"],
+    "pending_steps": ["analyze_sales"],
+    "terminal_tools": ["report"],
+    "recent_errors": []
+  },
+  "available_tools": [
+    {
+      "name": "report",
+      "description": "Produce final report.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "findings": { "type": "string" }
+        },
+        "required": ["findings"]
+      }
+    }
+  ],
+  "metadata": {
+    "scenario_family": "argument_transformation",
+    "requires_transform": true,
+    "requires_synthesis": false,
+    "requires_all_tool_facts": true,
+    "must_acknowledge_missing_data": false
+  }
+}
+```
+
+The candidate tool call is scored alongside the context:
+
+```json
+{
+  "name": "report",
+  "arguments": {
+    "findings": "Done."
+  }
+}
+```
+
+`serialize_state_v1` remains byte-stable for legacy ONNX artifacts and ignores `metadata`. `serialize_state_v2` includes the generic metadata block for future training artifacts.
+
+### Tool-Call Labels
+
+Rust accepts both legacy five-label artifacts and future six-label artifacts.
+
+Legacy order:
+
+```json
+[
+  "valid",
+  "wrong_tool_semantic",
+  "tool_not_needed",
+  "needs_clarification",
+  "deterministic_invalid"
+]
+```
+
+Six-label order:
+
+```json
+[
+  "valid",
+  "wrong_tool_semantic",
+  "wrong_arguments_semantic",
+  "tool_not_needed",
+  "needs_clarification",
+  "deterministic_invalid"
+]
+```
+
+`wrong_arguments_semantic` means the chosen tool and JSON shape are plausible, but the argument values are semantically wrong for the user request or workflow state. `deterministic_invalid` is non-authoritative: deterministic Rust validation and step enforcement remain the source of truth for schema and protocol failures.
+
+### Final-Response Verifier Context
+
+The final-response verifier runs only on terminal answers: `respond`, real terminal tools, or proxy text responses.
+
+```json
+{
+  "schema_version": "final-response-verifier-input/v1",
+  "user_request": "Summarize the Q4 2024 sales findings.",
+  "workflow_state": {
+    "required_steps": ["fetch_sales_data", "analyze_sales"],
+    "completed_steps": ["fetch_sales_data", "analyze_sales"],
+    "pending_steps": [],
+    "terminal_tools": ["report"],
+    "recent_errors": []
+  },
+  "required_facts": ["23% YoY growth", "Widget Pro", "APAC"],
+  "tool_trace": ["fetch_sales_data", "analyze_sales", "report"],
+  "tool_results": [
+    {
+      "tool_name": "analyze_sales",
+      "content": "Revenue grew 23% YoY. Top product: Widget Pro. Weakest region: APAC."
+    }
+  ],
+  "candidate_final_response": "Sales improved and the report is complete.",
+  "metadata": {
+    "scenario_family": "grounded_synthesis",
+    "requires_transform": false,
+    "requires_synthesis": true,
+    "requires_all_tool_facts": true,
+    "must_acknowledge_missing_data": false
+  }
+}
+```
+
+Final-response labels:
+
+```json
+[
+  "valid_final_response",
+  "missing_tool_fact",
+  "contradicts_tool_result",
+  "unsupported_claim",
+  "failed_to_acknowledge_data_gap"
+]
+```
+
+### Classifier Artifact Thresholds
+
+Tool-call artifacts include `thresholds.json`:
+
+```json
+{
+  "schema_version": "toolcall-verifier-thresholds/v1",
+  "mode": "enforce",
+  "default_action": "allow",
+  "labels": {
+    "wrong_arguments_semantic": {
+      "action": "advisory_then_enforce_after_eval",
+      "advisory_min_confidence": 0.9,
+      "enforce_min_confidence": 0.995
+    },
+    "deterministic_invalid": {
+      "action": "deterministic_only",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
+    }
+  }
+}
+```
+
+The object above is abbreviated; production threshold files must include all labels in the artifact. Forge applies advisory or enforce behavior only when both runtime mode and per-label thresholds allow it.
+
+### Eval Telemetry Fields
+
+`forge-eval` rows may include tool-call classifier fields:
+
+```json
+{
+  "classifier_enabled": true,
+  "classifier_mode": "enforce",
+  "classifier_model_version": "cowWhySo/toolcall-verifier-classifier-production",
+  "classifier_scores": [
+    {
+      "tool": "report",
+      "label": "wrong_arguments_semantic",
+      "confidence": 0.997,
+      "action": "block",
+      "latency_ms": 3.8,
+      "model_version": "cowWhySo/toolcall-verifier-classifier-production"
+    }
+  ],
+  "classifier_max_confidence": 0.997,
+  "classifier_predicted_label": "wrong_arguments_semantic"
+}
+```
+
+Final-response verifier rows use the same shape with the `final_response_classifier_` prefix and `final_response_classifier_scores`.
+
+When `forge-eval --output path.jsonl` is used and a corrected positive exists, Rust writes:
+
+```text
+path.tool_call_hard_negatives.jsonl
+path.final_response_hard_negatives.jsonl
+```
+
+These files are intended as reviewed hard-negative sources for the next training run.

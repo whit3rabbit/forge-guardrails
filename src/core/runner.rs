@@ -16,8 +16,10 @@ use crate::error::{
     ToolError, ToolExecutionError, WorkflowCancelledError,
 };
 use crate::guardrails::{
-    recent_errors_from_messages, ErrorTracker, ResponseValidator, RetryNudgeFn, ScoringContext,
-    StepEnforcer, StepPrerequisite, ToolCallScore, ToolCallScorer,
+    recent_errors_from_messages, ClassifierAction, ErrorTracker, FinalResponseContext,
+    FinalResponseScore, FinalResponseScorer, FinalResponseToolResult, ResponseValidator,
+    RetryNudgeFn, ScoringContext, StepEnforcer, StepPrerequisite, ToolCallScore, ToolCallScorer,
+    WorkflowStateForScoring,
 };
 use crate::prompts::nudges;
 use indexmap::{IndexMap, IndexSet};
@@ -33,6 +35,8 @@ pub type NudgeCallbackFn = dyn Fn(&str) -> String + Send + Sync;
 
 /// Callback type for classifier score events during a run.
 pub type ToolCallScoreFn = dyn Fn(&ToolCall, &ToolCallScore) + Send + Sync;
+/// Callback type for final-response classifier score events during a run.
+pub type FinalResponseScoreFn = dyn Fn(&FinalResponseScore) + Send + Sync;
 
 /// Workflow runner orchestrating multi-turn LLM tool-calling loops.
 ///
@@ -51,6 +55,8 @@ pub struct WorkflowRunner<C: LLMClient> {
     retry_nudge_fn: Option<Arc<NudgeCallbackFn>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
     on_tool_call_score: Option<Arc<ToolCallScoreFn>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    on_final_response_score: Option<Arc<FinalResponseScoreFn>>,
 }
 
 struct RunnerGuardrails {
@@ -130,6 +136,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             retry_nudge_fn,
             scorer: None,
             on_tool_call_score: None,
+            final_response_scorer: None,
+            on_final_response_score: None,
         }
     }
 
@@ -160,6 +168,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
             retry_nudge_fn,
             scorer: None,
             on_tool_call_score: None,
+            final_response_scorer: None,
+            on_final_response_score: None,
         }
     }
 
@@ -171,6 +181,17 @@ impl<C: LLMClient> WorkflowRunner<C> {
     ) -> Self {
         self.scorer = Some(scorer);
         self.on_tool_call_score = on_tool_call_score;
+        self
+    }
+
+    /// Attach a final-response scorer that runs before terminal answers are accepted.
+    pub fn with_final_response_scorer(
+        mut self,
+        scorer: Arc<dyn FinalResponseScorer>,
+        on_final_response_score: Option<Arc<FinalResponseScoreFn>>,
+    ) -> Self {
+        self.final_response_scorer = Some(scorer);
+        self.on_final_response_score = on_final_response_score;
         self
     }
 
@@ -438,13 +459,78 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 continue;
             }
 
-            self.score_tool_calls(
+            if let Some(nudge_content) = self.score_tool_calls(
                 user_message,
                 &messages,
                 &tool_calls,
                 &guardrails.step_enforcer,
                 &tool_specs,
-            );
+            ) {
+                guardrails.error_tracker.record_retry();
+                if guardrails.error_tracker.retries_exhausted() {
+                    let raw =
+                        inference::response_to_raw_string(&LLMResponse::ToolCalls(tool_calls))
+                            .unwrap_or_default();
+                    return Err(ForgeError::ToolCall(
+                        ToolCallError::new(format!(
+                            "Retries exhausted after {} consecutive classifier objections",
+                            guardrails.error_tracker.max_retries()
+                        ))
+                        .with_raw_response(raw),
+                    ));
+                }
+                let calls = self.emit_assistant_tool_calls(
+                    tool_calls,
+                    &mut messages,
+                    &mut tool_call_counter,
+                    iteration as i64,
+                );
+                self.emit_guardrail_nudge_results(
+                    &calls,
+                    &mut messages,
+                    iteration as i64,
+                    MessageType::RetryNudge,
+                    "[ClassifierNudge]",
+                    &nudge_content,
+                );
+                continue;
+            }
+
+            if let Some(nudge_content) = self.score_candidate_final_responses(
+                user_message,
+                &messages,
+                &tool_calls,
+                &guardrails.step_enforcer,
+            ) {
+                guardrails.error_tracker.record_retry();
+                if guardrails.error_tracker.retries_exhausted() {
+                    let raw =
+                        inference::response_to_raw_string(&LLMResponse::ToolCalls(tool_calls))
+                            .unwrap_or_default();
+                    return Err(ForgeError::ToolCall(
+                        ToolCallError::new(format!(
+                            "Retries exhausted after {} consecutive final-response objections",
+                            guardrails.error_tracker.max_retries()
+                        ))
+                        .with_raw_response(raw),
+                    ));
+                }
+                let calls = self.emit_assistant_tool_calls(
+                    tool_calls,
+                    &mut messages,
+                    &mut tool_call_counter,
+                    iteration as i64,
+                );
+                self.emit_guardrail_nudge_results(
+                    &calls,
+                    &mut messages,
+                    iteration as i64,
+                    MessageType::RetryNudge,
+                    "[FinalResponseNudge]",
+                    &nudge_content,
+                );
+                continue;
+            }
 
             let calls = self.emit_assistant_tool_calls(
                 tool_calls,
@@ -485,10 +571,8 @@ impl<C: LLMClient> WorkflowRunner<C> {
         tool_calls: &[ToolCall],
         step_enforcer: &StepEnforcer,
         tool_specs: &[ToolSpec],
-    ) {
-        let Some(scorer) = self.scorer.as_ref() else {
-            return;
-        };
+    ) -> Option<String> {
+        let scorer = self.scorer.as_ref()?;
         let user_request = latest_user_request(messages).unwrap_or(fallback_user_message);
         let ctx = ScoringContext::from_step_enforcer(
             user_request,
@@ -497,6 +581,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
             recent_errors_from_messages(messages, 8),
             tool_specs,
         );
+        let mut nudge: Option<String> = None;
         for call in tool_calls {
             match scorer.score(&ctx, call) {
                 Ok(score) => {
@@ -512,6 +597,15 @@ impl<C: LLMClient> WorkflowRunner<C> {
                     if let Some(callback) = &self.on_tool_call_score {
                         callback(call, &score);
                     }
+                    if matches!(
+                        score.action,
+                        ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+                    ) {
+                        let content = nudges::classifier_nudge(score.label.as_label().as_ref());
+                        if score.action == ClassifierAction::Block || nudge.is_none() {
+                            nudge = Some(content);
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -523,6 +617,123 @@ impl<C: LLMClient> WorkflowRunner<C> {
                 }
             }
         }
+        nudge
+    }
+
+    fn score_candidate_final_responses(
+        &self,
+        fallback_user_message: &str,
+        messages: &[Message],
+        tool_calls: &[ToolCall],
+        step_enforcer: &StepEnforcer,
+    ) -> Option<String> {
+        let scorer = self.final_response_scorer.as_ref()?;
+        let terminal_calls = tool_calls
+            .iter()
+            .filter(|call| step_enforcer.terminal_tools.contains(&call.tool))
+            .collect::<Vec<_>>();
+        if terminal_calls.is_empty() {
+            return None;
+        }
+
+        let user_request = latest_user_request(messages).unwrap_or(fallback_user_message);
+        let base_trace = Self::tool_trace_from_messages(messages);
+        let tool_results = Self::tool_results_from_messages(messages);
+        let mut nudge: Option<String> = None;
+        for call in terminal_calls {
+            let mut tool_trace = base_trace.clone();
+            tool_trace.push(call.tool.clone());
+            let ctx = FinalResponseContext {
+                schema_version: "final-response-verifier-input/v1".to_string(),
+                user_request: user_request.to_string(),
+                workflow_state: WorkflowStateForScoring {
+                    required_steps: step_enforcer.tracker.required_steps().to_vec(),
+                    completed_steps: step_enforcer.completed_steps().keys().cloned().collect(),
+                    pending_steps: step_enforcer.pending(),
+                    terminal_tools: step_enforcer.terminal_tools.iter().cloned().collect(),
+                    recent_errors: recent_errors_from_messages(messages, 8),
+                },
+                required_facts: Vec::new(),
+                tool_trace,
+                tool_results: tool_results.clone(),
+                candidate_final_response: Self::candidate_final_response_from_call(call),
+                metadata: None,
+            };
+            match scorer.score(&ctx) {
+                Ok(score) => {
+                    tracing::info!(
+                        target: "forge.classifier",
+                        label = %score.label.as_label(),
+                        confidence = score.confidence,
+                        action = %score.action.as_str(),
+                        latency_ms = score.latency_ms,
+                        terminal_tool = %call.tool,
+                        "final-response classifier score"
+                    );
+                    if let Some(callback) = &self.on_final_response_score {
+                        callback(&score);
+                    }
+                    if matches!(
+                        score.action,
+                        ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+                    ) {
+                        let content =
+                            crate::prompts::classifier_nudge(score.label.as_label().as_ref());
+                        if score.action == ClassifierAction::Block || nudge.is_none() {
+                            nudge = Some(content);
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "forge.classifier",
+                        error = %err,
+                        terminal_tool = %call.tool,
+                        "final-response classifier scoring failed; allowing deterministic path"
+                    );
+                }
+            }
+        }
+        nudge
+    }
+
+    fn candidate_final_response_from_call(call: &ToolCall) -> String {
+        for key in ["message", "answer", "content", "report", "summary"] {
+            if let Some(value) = call.args.get(key) {
+                return value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string());
+            }
+        }
+        Value::Object(
+            call.args
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+        .to_string()
+    }
+
+    fn tool_trace_from_messages(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| message.tool_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|call| call.name.clone()))
+            .collect()
+    }
+
+    fn tool_results_from_messages(messages: &[Message]) -> Vec<FinalResponseToolResult> {
+        messages
+            .iter()
+            .filter(|message| message.metadata.msg_type == MessageType::ToolResult)
+            .filter_map(|message| {
+                Some(FinalResponseToolResult {
+                    tool_name: message.tool_name.clone()?,
+                    content: message.content.clone(),
+                })
+            })
+            .collect()
     }
 
     fn emit_guardrail_nudge_results(

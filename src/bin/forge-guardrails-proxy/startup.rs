@@ -2,7 +2,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use forge_guardrails::{
-    AnyLlmRuntimeClient, LLMClient, LlamafileClient, ScorerMode, ServerManager, ToolCallScorer,
+    AnyLlmRuntimeClient, FinalResponseScorer, LLMClient, LlamafileClient, ScorerMode,
+    ServerManager, ToolCallScorer,
+};
+#[cfg(feature = "classifier")]
+use forge_guardrails::{
+    FinalResponseContext, FinalResponseScore, ScoringContext, ToolCall, ToolCallScore,
 };
 use reqwest::Url;
 
@@ -11,10 +16,10 @@ use crate::client::ClientFactory;
 use crate::config::ProxyConfig;
 use crate::config::{
     apply_env_cli_overrides, classifier_settings_from_env_cli, cli_host, cli_max_retries,
-    cli_model, cli_port, normalized_extra_flags, require_cli_gguf, require_cli_llamafile_runtime,
-    require_cli_model, resolve_serialize, validate_nonempty, validate_nonzero_u16,
-    validate_optional_positive_i64, validate_positive_i64, DEFAULT_ENV_CONTEXT_TOKENS,
-    DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_EXTERNAL_MODEL,
+    cli_model, cli_port, final_response_classifier_settings_from_env_cli, normalized_extra_flags,
+    require_cli_gguf, require_cli_llamafile_runtime, require_cli_model, resolve_serialize,
+    validate_nonempty, validate_nonzero_u16, validate_optional_positive_i64, validate_positive_i64,
+    DEFAULT_ENV_CONTEXT_TOKENS, DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_EXTERNAL_MODEL,
 };
 use crate::upstream::{
     direct_anthropic_api_key, direct_local_openai_upstream_from_env, direct_openai_api_key,
@@ -25,6 +30,7 @@ pub(crate) struct Startup {
     pub(crate) client_factory: ClientFactory,
     pub(crate) managed_server: Option<ServerManager>,
     pub(crate) scorer: Option<Arc<dyn ToolCallScorer>>,
+    pub(crate) final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 }
 
 pub(crate) fn build_startup(cli: Cli) -> Result<Startup, String> {
@@ -37,6 +43,7 @@ pub(crate) fn build_startup(cli: Cli) -> Result<Startup, String> {
         build_managed_startup(&cli, backend)?
     };
     startup.scorer = build_classifier_scorer(&startup.config)?;
+    startup.final_response_scorer = build_final_response_classifier_scorer(&startup.config)?;
     Ok(startup)
 }
 
@@ -66,6 +73,7 @@ fn build_env_startup(cli: &Cli) -> Result<Startup, String> {
         client_factory,
         managed_server: None,
         scorer: None,
+        final_response_scorer: None,
     })
 }
 
@@ -95,6 +103,11 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
     };
     let (classifier_dir, classifier_mode, classifier_model) =
         classifier_settings_from_env_cli(cli)?;
+    let (
+        final_response_classifier_dir,
+        final_response_classifier_mode,
+        final_response_classifier_model,
+    ) = final_response_classifier_settings_from_env_cli(cli)?;
     let config = ProxyConfig {
         host: cli_host(cli)?,
         port: cli_port(cli)?,
@@ -107,6 +120,11 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
         classifier_dir,
         classifier_mode,
         classifier_model,
+        classifier_max_latency_ms: cli.classifier_max_latency_ms,
+        final_response_classifier_dir,
+        final_response_classifier_mode,
+        final_response_classifier_model,
+        final_response_classifier_max_latency_ms: cli.final_response_classifier_max_latency_ms,
     };
     let client_factory = match (cli.backend_protocol, cli.mode) {
         (CliBackendProtocol::Anthropic, _) => ClientFactory::DirectAnthropic {
@@ -130,6 +148,7 @@ fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Startup, Strin
         client_factory,
         managed_server: None,
         scorer: None,
+        final_response_scorer: None,
     })
 }
 
@@ -154,6 +173,11 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
     let serialize_requests = resolve_serialize(cli, true);
     let (classifier_dir, classifier_mode, classifier_model) =
         classifier_settings_from_env_cli(cli)?;
+    let (
+        final_response_classifier_dir,
+        final_response_classifier_mode,
+        final_response_classifier_model,
+    ) = final_response_classifier_settings_from_env_cli(cli)?;
 
     let (default_model, client_factory, managed_server, context_tokens) = match backend {
         CliBackend::Ollama => {
@@ -287,6 +311,11 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
         classifier_dir,
         classifier_mode,
         classifier_model,
+        classifier_max_latency_ms: cli.classifier_max_latency_ms,
+        final_response_classifier_dir,
+        final_response_classifier_mode,
+        final_response_classifier_model,
+        final_response_classifier_max_latency_ms: cli.final_response_classifier_max_latency_ms,
     };
 
     Ok(Startup {
@@ -294,6 +323,7 @@ fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<Startup, Stri
         client_factory,
         managed_server,
         scorer: None,
+        final_response_scorer: None,
     })
 }
 
@@ -315,13 +345,125 @@ fn build_classifier_scorer(
             config.classifier_model,
         )
         .map_err(|err| format!("failed to load classifier artifact: {err}"))?;
-        Ok(Some(Arc::new(scorer) as Arc<dyn ToolCallScorer>))
+        let scorer: Arc<dyn ToolCallScorer> = Arc::new(scorer);
+        Ok(Some(wrap_tool_latency_warning(
+            scorer,
+            config.classifier_max_latency_ms,
+        )))
     }
 
     #[cfg(not(feature = "classifier"))]
     {
         let _ = dir;
         Err("classifier support requires building with --features classifier".to_string())
+    }
+}
+
+fn build_final_response_classifier_scorer(
+    config: &ProxyConfig,
+) -> Result<Option<Arc<dyn FinalResponseScorer>>, String> {
+    if config.final_response_classifier_mode == ScorerMode::Disabled {
+        return Ok(None);
+    }
+    let Some(dir) = config.final_response_classifier_dir.as_deref() else {
+        return Ok(None);
+    };
+
+    #[cfg(feature = "classifier")]
+    {
+        let scorer = forge_guardrails::OnnxFinalResponseScorer::from_dir_with_model(
+            dir,
+            Some(config.final_response_classifier_mode),
+            config.final_response_classifier_model,
+        )
+        .map_err(|err| format!("failed to load final-response classifier artifact: {err}"))?;
+        let scorer: Arc<dyn FinalResponseScorer> = Arc::new(scorer);
+        Ok(Some(wrap_final_response_latency_warning(
+            scorer,
+            config.final_response_classifier_max_latency_ms,
+        )))
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = dir;
+        Err(
+            "final-response classifier support requires building with --features classifier"
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(feature = "classifier")]
+struct ToolCallLatencyWarningScorer {
+    inner: Arc<dyn ToolCallScorer>,
+    max_latency_ms: u64,
+}
+
+#[cfg(feature = "classifier")]
+impl ToolCallScorer for ToolCallLatencyWarningScorer {
+    fn score(&self, ctx: &ScoringContext, candidate: &ToolCall) -> anyhow::Result<ToolCallScore> {
+        let score = self.inner.score(ctx, candidate)?;
+        if score.latency_ms > self.max_latency_ms as f64 {
+            tracing::warn!(
+                target: "forge.classifier",
+                tool = %candidate.tool,
+                latency_ms = score.latency_ms,
+                max_latency_ms = self.max_latency_ms,
+                "tool-call classifier latency exceeded configured warning limit"
+            );
+        }
+        Ok(score)
+    }
+}
+
+#[cfg(feature = "classifier")]
+fn wrap_tool_latency_warning(
+    scorer: Arc<dyn ToolCallScorer>,
+    max_latency_ms: Option<u64>,
+) -> Arc<dyn ToolCallScorer> {
+    match max_latency_ms {
+        Some(max_latency_ms) => Arc::new(ToolCallLatencyWarningScorer {
+            inner: scorer,
+            max_latency_ms,
+        }),
+        None => scorer,
+    }
+}
+
+#[cfg(feature = "classifier")]
+struct FinalResponseLatencyWarningScorer {
+    inner: Arc<dyn FinalResponseScorer>,
+    max_latency_ms: u64,
+}
+
+#[cfg(feature = "classifier")]
+impl FinalResponseScorer for FinalResponseLatencyWarningScorer {
+    fn score(&self, ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore> {
+        let score = self.inner.score(ctx)?;
+        if score.latency_ms > self.max_latency_ms as f64 {
+            tracing::warn!(
+                target: "forge.classifier",
+                latency_ms = score.latency_ms,
+                max_latency_ms = self.max_latency_ms,
+                "final-response classifier latency exceeded configured warning limit"
+            );
+        }
+        Ok(score)
+    }
+}
+
+#[cfg(feature = "classifier")]
+fn wrap_final_response_latency_warning(
+    scorer: Arc<dyn FinalResponseScorer>,
+    max_latency_ms: Option<u64>,
+) -> Arc<dyn FinalResponseScorer> {
+    match max_latency_ms {
+        Some(max_latency_ms) => Arc::new(FinalResponseLatencyWarningScorer {
+            inner: scorer,
+            max_latency_ms,
+        }),
+        None => scorer,
     }
 }
 

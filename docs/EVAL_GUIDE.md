@@ -158,7 +158,7 @@ baseline. Do not use the skipped `LS/N` behavior to explain an `LS/P` warning.
 Run live evals manually against real backends. CI should stay deterministic
 unless a job is explicitly marked as live-backend integration.
 
-## ONNX Classifier Shadow Runs
+## ONNX Classifier Mode Runs
 
 Download the local classifier artifact once:
 
@@ -179,7 +179,9 @@ The shortcut below downloads the quantized artifact first when needed:
 scripts/run_local_eval.sh --suite release --runs 10 --download-classifier
 ```
 
-For a side-by-side comparison, keep output directories explicit:
+For a side-by-side comparison, keep output directories explicit and include
+enforce mode when evaluating whether ONNX thresholds can safely change
+behavior:
 
 ```bash
 scripts/run_local_eval.sh --suite release --runs 10 \
@@ -188,10 +190,18 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 scripts/run_local_eval.sh --suite release --runs 10 \
   --classifier-dir target/classifier-artifacts/onnx \
   --output-dir target/local-eval/release-onnx-shadow
+
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classifier-dir target/classifier-artifacts/onnx \
+  --classifier-mode enforce \
+  --output-dir target/local-eval/release-onnx-enforce
 ```
 
-The classifier is shadow-only unless `--classifier-mode` is changed. In shadow
-mode it should not change completeness, success, retries, or nudges. Use the
-proxy logs and Rust smoke JSONL classifier fields to inspect classifier scores;
-use the Python oracle JSONL and reports to confirm execution behavior stayed
-unchanged.
+The classifier default is `shadow`, but the supported modes are `disabled`,
+`shadow`, `advisory`, and `enforce`. In shadow mode it should not change
+completeness, success, retries, or nudges. In enforce mode it can retry/block
+only labels whose artifact threshold is met; labels with thresholds above `1.0`
+remain telemetry-only, and deterministic guardrails remain authoritative for
+schema/protocol invalidity. Use proxy logs and Rust smoke JSONL classifier
+fields to inspect classifier scores; use the Python oracle JSONL and reports to
+confirm behavior changes.

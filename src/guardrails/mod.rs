@@ -27,8 +27,12 @@ pub mod step_enforcer;
 pub mod onnx_scorer;
 
 pub use classifier_artifact::{
-    ArtifactManifest, ClassifierArtifact, ClassifierModelKind, LabelThreshold, LabelsFile,
-    Thresholds, DEFAULT_CLASSIFIER_REPO, DEFAULT_CLASSIFIER_REVISION, EXPECTED_LABELS,
+    ArtifactManifest, ClassifierArtifact, ClassifierModelKind, FinalResponseClassifierArtifact,
+    LabelThreshold, LabelsFile, Thresholds, DEFAULT_CLASSIFIER_REPO, DEFAULT_CLASSIFIER_REVISION,
+    EXPECTED_LABELS, FINAL_RESPONSE_ARTIFACT_SCHEMA_VERSION, FINAL_RESPONSE_EXPECTED_LABELS,
+    FINAL_RESPONSE_INPUT_SCHEMA_VERSION, FINAL_RESPONSE_SERIALIZER,
+    FINAL_RESPONSE_THRESHOLDS_SCHEMA_VERSION, LEGACY_EXPECTED_LABELS, NEXT_INPUT_SCHEMA_VERSION,
+    NEXT_SERIALIZER,
 };
 pub use error_tracker::ErrorTracker;
 pub use guardrails::{CheckResult, GuardAction, Guardrails, TerminalTool};
@@ -40,13 +44,15 @@ pub use policy::{
 };
 pub use response_validator::{ResponseValidator, RetryNudgeFn, ValidationResult};
 pub use scoring::{
-    ClassifierAction, NoopToolCallScorer, ScorerMode, ToolCallClass, ToolCallScore, ToolCallScorer,
+    serialize_final_response_state_v1, ClassifierAction, FinalResponseClass, FinalResponseContext,
+    FinalResponseScore, FinalResponseScorer, FinalResponseToolResult, NoopFinalResponseScorer,
+    NoopToolCallScorer, ScorerMode, ToolCallClass, ToolCallScore, ToolCallScorer,
 };
 pub use scoring_context::{
-    recent_errors_from_messages, serialize_state_v1, CandidateCallForScoring, ScoringContext,
-    ToolSpecForScoring, WorkflowStateForScoring,
+    recent_errors_from_messages, serialize_state_v1, serialize_state_v2, CandidateCallForScoring,
+    ScoringContext, ScoringMetadata, ToolSpecForScoring, WorkflowStateForScoring,
 };
 pub use step_enforcer::{StepCheck, StepEnforcer, StepPrerequisite};
 
 #[cfg(feature = "classifier")]
-pub use onnx_scorer::OnnxToolCallScorer;
+pub use onnx_scorer::{OnnxFinalResponseScorer, OnnxToolCallScorer};

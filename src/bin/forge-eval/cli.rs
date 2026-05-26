@@ -20,6 +20,11 @@ pub(crate) struct Cli {
     pub(crate) classifier_dir: Option<String>,
     pub(crate) classifier_mode: String,
     pub(crate) classifier_model: String,
+    pub(crate) classifier_max_latency_ms: Option<u64>,
+    pub(crate) final_response_classifier_dir: Option<String>,
+    pub(crate) final_response_classifier_mode: String,
+    pub(crate) final_response_classifier_model: String,
+    pub(crate) final_response_classifier_max_latency_ms: Option<u64>,
 }
 
 pub(crate) fn parse_args<I>(args: I) -> Result<Cli, String>
@@ -43,6 +48,16 @@ where
         classifier_dir: env_optional("FORGE_CLASSIFIER_DIR"),
         classifier_mode: env_or("FORGE_CLASSIFIER_MODE", "shadow"),
         classifier_model: env_classifier_model(),
+        classifier_max_latency_ms: env_optional_u64("FORGE_CLASSIFIER_MAX_LATENCY_MS")?,
+        final_response_classifier_dir: env_optional("FORGE_FINAL_RESPONSE_CLASSIFIER_DIR"),
+        final_response_classifier_mode: env_or("FORGE_FINAL_RESPONSE_CLASSIFIER_MODE", "shadow"),
+        final_response_classifier_model: env_or(
+            "FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL",
+            "quantized",
+        ),
+        final_response_classifier_max_latency_ms: env_optional_u64(
+            "FORGE_FINAL_RESPONSE_CLASSIFIER_MAX_LATENCY_MS",
+        )?,
     };
 
     let values: Vec<String> = args.into_iter().collect();
@@ -91,6 +106,35 @@ where
             "--classifier-model" => {
                 cli.classifier_model = take_one(&values, &mut index, "--classifier-model")?
             }
+            "--classifier-max-latency-ms" => {
+                cli.classifier_max_latency_ms = Some(take_u64(
+                    &values,
+                    &mut index,
+                    "--classifier-max-latency-ms",
+                )?)
+            }
+            "--final-response-classifier-dir" => {
+                cli.final_response_classifier_dir = Some(take_one(
+                    &values,
+                    &mut index,
+                    "--final-response-classifier-dir",
+                )?)
+            }
+            "--final-response-classifier-mode" => {
+                cli.final_response_classifier_mode =
+                    take_one(&values, &mut index, "--final-response-classifier-mode")?
+            }
+            "--final-response-classifier-model" => {
+                cli.final_response_classifier_model =
+                    take_one(&values, &mut index, "--final-response-classifier-model")?
+            }
+            "--final-response-classifier-max-latency-ms" => {
+                cli.final_response_classifier_max_latency_ms = Some(take_u64(
+                    &values,
+                    &mut index,
+                    "--final-response-classifier-max-latency-ms",
+                )?)
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown flag: {flag}")),
             value => return Err(format!("unexpected argument: {value}")),
         }
@@ -106,6 +150,8 @@ where
     parse_ablation(&cli.ablation)?;
     ScorerMode::from_str(&cli.classifier_mode)?;
     ClassifierModelKind::from_str(&cli.classifier_model)?;
+    ScorerMode::from_str(&cli.final_response_classifier_mode)?;
+    ClassifierModelKind::from_str(&cli.final_response_classifier_model)?;
     Ok(cli)
 }
 
@@ -116,6 +162,12 @@ fn take_one(values: &[String], index: &mut usize, flag: &str) -> Result<String, 
         .filter(|value| !value.starts_with("--"))
         .cloned()
         .ok_or_else(|| format!("{flag} requires a value"))
+}
+
+fn take_u64(values: &[String], index: &mut usize, flag: &str) -> Result<u64, String> {
+    let raw = take_one(values, index, flag)?;
+    raw.parse::<u64>()
+        .map_err(|_| format!("{flag} must be a non-negative integer, got '{raw}'"))
 }
 
 fn take_many(values: &[String], index: &mut usize, flag: &str) -> Result<Vec<String>, String> {
@@ -165,6 +217,15 @@ fn env_classifier_model() -> String {
     }
 }
 
+fn env_optional_u64(key: &str) -> Result<Option<u64>, String> {
+    let Some(raw) = env_optional(key) else {
+        return Ok(None);
+    };
+    raw.parse::<u64>()
+        .map(Some)
+        .map_err(|_| format!("{key} must be a non-negative integer, got '{raw}'"))
+}
+
 pub(crate) fn print_help() {
     println!(
         "forge-eval\n\n\
@@ -185,7 +246,12 @@ pub(crate) fn print_help() {
            --anthropic-api-key KEY\n\
            --classifier-dir PATH\n\
            --classifier-mode disabled|shadow|advisory|enforce (default: shadow)\n\
-           --classifier-model quantized|full (default: quantized)"
+           --classifier-model quantized|full (default: quantized)\n\
+           --classifier-max-latency-ms MS\n\
+           --final-response-classifier-dir PATH\n\
+           --final-response-classifier-mode disabled|shadow|advisory|enforce (default: shadow)\n\
+           --final-response-classifier-model quantized|full (default: quantized)\n\
+           --final-response-classifier-max-latency-ms MS"
     );
 }
 
@@ -218,6 +284,11 @@ mod tests {
         assert_eq!(cli.classifier_dir, None);
         assert_eq!(cli.classifier_mode, "shadow");
         assert_eq!(cli.classifier_model, "quantized");
+        assert_eq!(cli.classifier_max_latency_ms, None);
+        assert_eq!(cli.final_response_classifier_dir, None);
+        assert_eq!(cli.final_response_classifier_mode, "shadow");
+        assert_eq!(cli.final_response_classifier_model, "quantized");
+        assert_eq!(cli.final_response_classifier_max_latency_ms, None);
     }
 
     #[test]
@@ -247,6 +318,8 @@ mod tests {
             "shadow",
             "--classifier-model",
             "quantized",
+            "--classifier-max-latency-ms",
+            "25",
         ]);
         assert_eq!(
             cli.classifier_dir.as_deref(),
@@ -254,5 +327,27 @@ mod tests {
         );
         assert_eq!(cli.classifier_mode, "shadow");
         assert_eq!(cli.classifier_model, "quantized");
+        assert_eq!(cli.classifier_max_latency_ms, Some(25));
+    }
+
+    #[test]
+    fn parses_final_response_classifier_flags() {
+        let cli = parse(&[
+            "--final-response-classifier-dir",
+            "target/final-response-artifacts/onnx",
+            "--final-response-classifier-mode",
+            "advisory",
+            "--final-response-classifier-model",
+            "full",
+            "--final-response-classifier-max-latency-ms",
+            "40",
+        ]);
+        assert_eq!(
+            cli.final_response_classifier_dir.as_deref(),
+            Some("target/final-response-artifacts/onnx")
+        );
+        assert_eq!(cli.final_response_classifier_mode, "advisory");
+        assert_eq!(cli.final_response_classifier_model, "full");
+        assert_eq!(cli.final_response_classifier_max_latency_ms, Some(40));
     }
 }

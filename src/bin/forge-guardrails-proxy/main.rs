@@ -34,5 +34,6 @@ fn run_main(cli: Cli) -> Result<(), String> {
         startup.client_factory,
         startup.managed_server,
         startup.scorer,
+        startup.final_response_scorer,
     ))
 }

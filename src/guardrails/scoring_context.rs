@@ -54,6 +54,29 @@ pub struct ScoringContext {
     pub workflow_state: WorkflowStateForScoring,
     /// Tools available to the model.
     pub available_tools: Vec<ToolSpecForScoring>,
+    /// Optional generic eval or workflow contracts for semantic scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ScoringMetadata>,
+}
+
+/// Optional generic contracts included in v2 classifier input.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ScoringMetadata {
+    /// Broad scenario family, not an exact scenario name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_family: Option<String>,
+    /// Whether the task requires semantic argument transformation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_transform: Option<bool>,
+    /// Whether the task requires final synthesis from tool results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_synthesis: Option<bool>,
+    /// Whether all relevant tool facts must be carried into the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_all_tool_facts: Option<bool>,
+    /// Whether missing data must be explicitly acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub must_acknowledge_missing_data: Option<bool>,
 }
 
 impl ScoringContext {
@@ -91,7 +114,14 @@ impl ScoringContext {
                 recent_errors,
             },
             available_tools,
+            metadata: None,
         }
+    }
+
+    /// Return a copy of this context with scoring metadata attached.
+    pub fn with_metadata(mut self, metadata: ScoringMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 
     /// Build a scoring context from the current step enforcer.
@@ -244,6 +274,20 @@ fn python_json_string(value: &str) -> String {
     out
 }
 
+fn optional_json_string(value: Option<&str>) -> String {
+    value
+        .map(python_json_string)
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn optional_json_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    }
+}
+
 /// Serialize classifier input with the artifact's `serialize_state_v1` format.
 pub fn serialize_state_v1(ctx: &ScoringContext, candidate: &ToolCall) -> String {
     let mut out = String::new();
@@ -305,6 +349,36 @@ pub fn serialize_state_v1(ctx: &ScoringContext, candidate: &ToolCall) -> String 
 
     out.push_str("\n\nCANDIDATE_CALL:\n");
     out.push_str(&python_json_dumps_sort_keys(&candidate_json));
+
+    out
+}
+
+/// Serialize classifier input with the metadata-aware `serialize_state_v2` format.
+pub fn serialize_state_v2(ctx: &ScoringContext, candidate: &ToolCall) -> String {
+    let mut out = serialize_state_v1(ctx, candidate);
+
+    out.push_str("\n\nSCORING_METADATA:\n");
+    let metadata = ctx.metadata.as_ref();
+    out.push_str(&format!(
+        "scenario_family={}\n",
+        optional_json_string(metadata.and_then(|value| value.scenario_family.as_deref()))
+    ));
+    out.push_str(&format!(
+        "requires_transform={}\n",
+        optional_json_bool(metadata.and_then(|value| value.requires_transform))
+    ));
+    out.push_str(&format!(
+        "requires_synthesis={}\n",
+        optional_json_bool(metadata.and_then(|value| value.requires_synthesis))
+    ));
+    out.push_str(&format!(
+        "requires_all_tool_facts={}\n",
+        optional_json_bool(metadata.and_then(|value| value.requires_all_tool_facts))
+    ));
+    out.push_str(&format!(
+        "must_acknowledge_missing_data={}",
+        optional_json_bool(metadata.and_then(|value| value.must_acknowledge_missing_data))
+    ));
 
     out
 }

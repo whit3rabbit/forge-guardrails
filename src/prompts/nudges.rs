@@ -78,6 +78,39 @@ pub fn unsafe_batch_nudge(allowed_next_tools: &[&str], blocked_tools: &[&str]) -
     )
 }
 
+/// Generate a nudge from semantic classifier feedback.
+pub fn classifier_nudge(label: &str) -> String {
+    match label {
+        "wrong_arguments_semantic" => {
+            "The tool choice is plausible, but the argument values do not match the user request or current workflow state. Re-read the requested transformation and regenerate only the tool call.".to_string()
+        }
+        "wrong_tool_semantic" => {
+            "The selected tool does not match the user request or current workflow state. Re-read the request and choose the correct tool call.".to_string()
+        }
+        "tool_not_needed" => {
+            "A tool call is not needed for this step. Answer directly or use the terminal response tool if the workflow is complete.".to_string()
+        }
+        "needs_clarification" => {
+            "The request is too ambiguous for a safe tool call. Ask for the missing clarification instead of guessing.".to_string()
+        }
+        "missing_tool_fact" => {
+            "The final response is missing facts that are present in the tool results. Re-read the tool results and regenerate the final response with all required facts.".to_string()
+        }
+        "contradicts_tool_result" => {
+            "The final response contradicts the tool results. Re-read the tool results and regenerate a grounded final response.".to_string()
+        }
+        "unsupported_claim" => {
+            "The final response contains a claim that is not supported by the tool results. Remove unsupported claims and regenerate the final response.".to_string()
+        }
+        "failed_to_acknowledge_data_gap" => {
+            "The final response fails to acknowledge missing data. Regenerate the response and explicitly identify unavailable facts.".to_string()
+        }
+        _ => {
+            "The proposed tool call does not match the user request or workflow state. Re-read the context and regenerate only the corrected tool call.".to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +185,12 @@ mod tests {
         assert!(result.contains("search"));
         assert!(result.contains("respond"));
         assert!(result.contains("Do not combine"));
+    }
+
+    #[test]
+    fn classifier_nudge_for_wrong_arguments_is_specific() {
+        let result = classifier_nudge("wrong_arguments_semantic");
+        assert!(result.contains("tool choice is plausible"));
+        assert!(result.contains("argument values"));
     }
 }

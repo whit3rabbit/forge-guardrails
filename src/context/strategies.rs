@@ -239,7 +239,7 @@ fn apply_phase1(
         match msg.metadata.msg_type {
             // Drop nudge types entirely.
             MessageType::StepNudge | MessageType::PrerequisiteNudge | MessageType::RetryNudge => {
-                continue
+                continue;
             }
             // Truncate long tool results.
             MessageType::ToolResult => {

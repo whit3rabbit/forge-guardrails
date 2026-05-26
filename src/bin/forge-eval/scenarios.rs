@@ -11,6 +11,7 @@ pub(crate) struct SmokeScenario {
     pub(crate) workflow: Workflow,
     pub(crate) user_message: String,
     pub(crate) capture: Arc<StdMutex<Option<IndexMap<String, Value>>>>,
+    pub(crate) corrected_positive: Option<Value>,
 }
 
 pub(crate) fn build_scenario(
@@ -80,6 +81,7 @@ fn basic_2step(use_required_steps: bool) -> Result<SmokeScenario, String> {
         workflow,
         user_message: "What is the capital of France?".to_string(),
         capture,
+        corrected_positive: Some(json!({"final_text": "The capital of France is Paris."})),
     })
 }
 
@@ -147,6 +149,9 @@ fn sequential_3step(use_required_steps: bool) -> Result<SmokeScenario, String> {
         workflow,
         user_message: "Generate a sales report from the Q4 2024 dataset.".to_string(),
         capture,
+        corrected_positive: Some(
+            json!({"final_text": "Q4 sales were 1200 units with 15% growth."}),
+        ),
     })
 }
 
@@ -210,6 +215,9 @@ fn error_recovery(use_required_steps: bool) -> Result<SmokeScenario, String> {
         workflow,
         user_message: "Fetch 10 records and summarize them.".to_string(),
         capture,
+        corrected_positive: Some(
+            json!({"final_text": "Fetched 10 records and summarized the record count."}),
+        ),
     })
 }
 
@@ -263,6 +271,10 @@ fn inconsistent_api_recovery_stateful(use_required_steps: bool) -> Result<SmokeS
         )
         .to_string(),
         capture,
+        corrected_positive: Some(json!({
+            "account_id": "ACC-12345",
+            "compliance_status": "PASS"
+        })),
     })
 }
 

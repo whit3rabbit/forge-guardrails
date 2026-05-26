@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use forge_guardrails::{
-    ClassifierModelKind, CompactEvent, ContextManager, LLMClient, Message, NoCompact, ScorerMode,
-    StreamChunk, ToolCall, ToolCallScore, ToolCallScoreFn, ToolCallScorer, WorkflowRunner,
+    ClassifierModelKind, CompactEvent, ContextManager, FinalResponseScore, FinalResponseScoreFn,
+    FinalResponseScorer, LLMClient, Message, NoCompact, ScorerMode, StreamChunk, ToolCall,
+    ToolCallScore, ToolCallScoreFn, ToolCallScorer, WorkflowRunner,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -11,7 +12,9 @@ use tokio::sync::Mutex;
 use crate::ablation::parse_ablation;
 use crate::cli::Cli;
 use crate::counting_client::CountingClient;
-use crate::report::{row_for_result, write_row, ClassifierReport};
+use crate::report::{
+    row_for_result, write_hard_negatives, write_row, ClassifierReport, FinalResponseReport,
+};
 use crate::scenarios::build_scenario;
 
 pub(crate) async fn run_with_client<C: LLMClient + 'static>(
@@ -31,6 +34,7 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
     };
     let ablation = parse_ablation(&cli.ablation)?;
     let classifier = build_classifier(cli)?;
+    let final_response_classifier = build_final_response_classifier(cli)?;
 
     for scenario_name in &scenario_names {
         for run_idx in 1..=cli.runs {
@@ -52,6 +56,8 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 None,
             )));
             let classifier_scores: Arc<StdMutex<Vec<Value>>> = Arc::new(StdMutex::new(Vec::new()));
+            let final_response_scores: Arc<StdMutex<Vec<Value>>> =
+                Arc::new(StdMutex::new(Vec::new()));
             let mut runner = WorkflowRunner::new(
                 client.clone(),
                 context,
@@ -71,14 +77,42 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
             );
             if let Some(scorer) = classifier.clone() {
                 let scores_cb = classifier_scores.clone();
+                let max_latency_ms = cli.classifier_max_latency_ms;
                 let callback: Arc<ToolCallScoreFn> =
                     Arc::new(move |call: &ToolCall, score: &ToolCallScore| {
+                        if let Some(max_latency_ms) = max_latency_ms {
+                            if score.latency_ms > max_latency_ms as f64 {
+                                eprintln!(
+                                    "warning: tool-call classifier latency {:.1}ms exceeded {}ms",
+                                    score.latency_ms, max_latency_ms
+                                );
+                            }
+                        }
                         scores_cb
                             .lock()
                             .expect("classifier score capture lock")
                             .push(classifier_score_json(call, score));
                     });
                 runner = runner.with_tool_call_scorer(scorer, Some(callback));
+            }
+            if let Some(scorer) = final_response_classifier.clone() {
+                let scores_cb = final_response_scores.clone();
+                let max_latency_ms = cli.final_response_classifier_max_latency_ms;
+                let callback: Arc<FinalResponseScoreFn> = Arc::new(move |score| {
+                    if let Some(max_latency_ms) = max_latency_ms {
+                        if score.latency_ms > max_latency_ms as f64 {
+                            eprintln!(
+                                "warning: final-response classifier latency {:.1}ms exceeded {}ms",
+                                score.latency_ms, max_latency_ms
+                            );
+                        }
+                    }
+                    scores_cb
+                        .lock()
+                        .expect("final response score capture lock")
+                        .push(final_response_score_json(score));
+                });
+                runner = runner.with_final_response_scorer(scorer, Some(callback));
             }
 
             let before_calls = client.calls();
@@ -94,10 +128,21 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 .lock()
                 .expect("classifier score capture lock")
                 .clone();
+            let final_response_scores = final_response_scores
+                .lock()
+                .expect("final response score capture lock")
+                .clone();
             let classifier_report = classifier.as_ref().map(|_| ClassifierReport {
                 mode: cli.classifier_mode.as_str(),
                 scores: classifier_scores.as_slice(),
             });
+            let final_response_report =
+                final_response_classifier
+                    .as_ref()
+                    .map(|_| FinalResponseReport {
+                        mode: cli.final_response_classifier_mode.as_str(),
+                        scores: final_response_scores.as_slice(),
+                    });
             let row = row_for_result(
                 &cli.backend,
                 model,
@@ -111,8 +156,10 @@ pub(crate) async fn run_with_client<C: LLMClient + 'static>(
                 &messages,
                 compaction_events,
                 classifier_report,
+                final_response_report,
             );
             write_row(cli.output.as_deref(), &row)?;
+            write_hard_negatives(cli.output.as_deref(), &row, &scenario)?;
         }
     }
 
@@ -150,9 +197,58 @@ fn build_classifier(cli: &Cli) -> Result<Option<Arc<dyn ToolCallScorer>>, String
     }
 }
 
+fn build_final_response_classifier(
+    cli: &Cli,
+) -> Result<Option<Arc<dyn FinalResponseScorer>>, String> {
+    let mode = cli
+        .final_response_classifier_mode
+        .parse::<ScorerMode>()
+        .map_err(|err| err.to_string())?;
+    if mode == ScorerMode::Disabled {
+        return Ok(None);
+    }
+    let Some(dir) = cli.final_response_classifier_dir.as_deref() else {
+        return Ok(None);
+    };
+    let model_kind = cli
+        .final_response_classifier_model
+        .parse::<ClassifierModelKind>()
+        .map_err(|err| err.to_string())?;
+
+    #[cfg(feature = "classifier")]
+    {
+        let scorer = forge_guardrails::OnnxFinalResponseScorer::from_dir_with_model(
+            dir,
+            Some(mode),
+            model_kind,
+        )
+        .map_err(|err| format!("failed to load final-response classifier artifact: {err}"))?;
+        Ok(Some(Arc::new(scorer) as Arc<dyn FinalResponseScorer>))
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = (dir, model_kind);
+        Err(
+            "final-response classifier eval requires building with --features classifier"
+                .to_string(),
+        )
+    }
+}
+
 fn classifier_score_json(call: &ToolCall, score: &ToolCallScore) -> Value {
     json!({
         "tool": call.tool.as_str(),
+        "label": score.label.as_label().as_ref(),
+        "confidence": score.confidence,
+        "action": score.action.as_str(),
+        "latency_ms": score.latency_ms,
+        "model_version": score.model_version.as_str(),
+    })
+}
+
+fn final_response_score_json(score: &FinalResponseScore) -> Value {
+    json!({
         "label": score.label.as_label().as_ref(),
         "confidence": score.confidence,
         "action": score.action.as_str(),

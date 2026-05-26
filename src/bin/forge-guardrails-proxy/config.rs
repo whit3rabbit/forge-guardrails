@@ -27,6 +27,11 @@ pub(crate) struct ProxyConfig {
     pub(crate) classifier_dir: Option<String>,
     pub(crate) classifier_mode: ScorerMode,
     pub(crate) classifier_model: ClassifierModelKind,
+    pub(crate) classifier_max_latency_ms: Option<u64>,
+    pub(crate) final_response_classifier_dir: Option<String>,
+    pub(crate) final_response_classifier_mode: ScorerMode,
+    pub(crate) final_response_classifier_model: ClassifierModelKind,
+    pub(crate) final_response_classifier_max_latency_ms: Option<u64>,
 }
 
 impl ProxyConfig {
@@ -55,6 +60,18 @@ impl ProxyConfig {
             classifier_dir: env_optional_string("FORGE_CLASSIFIER_DIR"),
             classifier_mode: env_scoring_mode("FORGE_CLASSIFIER_MODE", ScorerMode::Shadow)?,
             classifier_model: env_classifier_model()?,
+            classifier_max_latency_ms: env_optional_u64("FORGE_CLASSIFIER_MAX_LATENCY_MS")?,
+            final_response_classifier_dir: env_optional_string(
+                "FORGE_FINAL_RESPONSE_CLASSIFIER_DIR",
+            ),
+            final_response_classifier_mode: env_scoring_mode(
+                "FORGE_FINAL_RESPONSE_CLASSIFIER_MODE",
+                ScorerMode::Shadow,
+            )?,
+            final_response_classifier_model: env_final_response_classifier_model()?,
+            final_response_classifier_max_latency_ms: env_optional_u64(
+                "FORGE_FINAL_RESPONSE_CLASSIFIER_MAX_LATENCY_MS",
+            )?,
         })
     }
 }
@@ -95,6 +112,22 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     if let Some(model) = cli.classifier_model.as_deref() {
         config.classifier_model = ClassifierModelKind::from_str(model)?;
     }
+    if let Some(value) = cli.classifier_max_latency_ms {
+        config.classifier_max_latency_ms = Some(value);
+    }
+    if let Some(dir) = cli.final_response_classifier_dir.as_deref() {
+        config.final_response_classifier_dir =
+            Some(validate_nonempty(dir, "--final-response-classifier-dir")?.to_string());
+    }
+    if let Some(mode) = cli.final_response_classifier_mode.as_deref() {
+        config.final_response_classifier_mode = ScorerMode::from_str(mode)?;
+    }
+    if let Some(model) = cli.final_response_classifier_model.as_deref() {
+        config.final_response_classifier_model = ClassifierModelKind::from_str(model)?;
+    }
+    if let Some(value) = cli.final_response_classifier_max_latency_ms {
+        config.final_response_classifier_max_latency_ms = Some(value);
+    }
     Ok(())
 }
 
@@ -112,6 +145,26 @@ pub(crate) fn classifier_settings_from_env_cli(
         mode = ScorerMode::from_str(raw)?;
     }
     if let Some(raw) = cli.classifier_model.as_deref() {
+        model = ClassifierModelKind::from_str(raw)?;
+    }
+
+    Ok((dir, mode, model))
+}
+
+pub(crate) fn final_response_classifier_settings_from_env_cli(
+    cli: &Cli,
+) -> Result<(Option<String>, ScorerMode, ClassifierModelKind), String> {
+    let mut dir = env_optional_string("FORGE_FINAL_RESPONSE_CLASSIFIER_DIR");
+    let mut mode = env_scoring_mode("FORGE_FINAL_RESPONSE_CLASSIFIER_MODE", ScorerMode::Shadow)?;
+    let mut model = env_final_response_classifier_model()?;
+
+    if let Some(raw) = cli.final_response_classifier_dir.as_deref() {
+        dir = Some(validate_nonempty(raw, "--final-response-classifier-dir")?.to_string());
+    }
+    if let Some(raw) = cli.final_response_classifier_mode.as_deref() {
+        mode = ScorerMode::from_str(raw)?;
+    }
+    if let Some(raw) = cli.final_response_classifier_model.as_deref() {
         model = ClassifierModelKind::from_str(raw)?;
     }
 
@@ -269,6 +322,22 @@ fn env_classifier_model() -> Result<ClassifierModelKind, String> {
     }
 }
 
+fn env_final_response_classifier_model() -> Result<ClassifierModelKind, String> {
+    if let Some(raw) = env_optional_string("FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL") {
+        return ClassifierModelKind::from_str(&raw);
+    }
+    Ok(ClassifierModelKind::Quantized)
+}
+
+fn env_optional_u64(key: &str) -> Result<Option<u64>, String> {
+    let Some(raw) = env_optional_string(key) else {
+        return Ok(None);
+    };
+    raw.parse::<u64>()
+        .map(Some)
+        .map_err(|_| format!("{key} must be a non-negative integer, got '{raw}'"))
+}
+
 fn env_u16(keys: &[&str], default: u16, label: &str) -> Result<u16, String> {
     match keys.iter().find_map(|key| env::var(key).ok()) {
         Some(raw) => {
@@ -349,6 +418,11 @@ mod tests {
             classifier_dir: None,
             classifier_mode: ScorerMode::Shadow,
             classifier_model: ClassifierModelKind::Quantized,
+            classifier_max_latency_ms: None,
+            final_response_classifier_dir: None,
+            final_response_classifier_mode: ScorerMode::Shadow,
+            final_response_classifier_model: ClassifierModelKind::Quantized,
+            final_response_classifier_max_latency_ms: None,
         }
     }
 
@@ -382,6 +456,57 @@ mod tests {
         assert_eq!(config.classifier_dir, None);
         assert_eq!(config.classifier_mode, ScorerMode::Shadow);
         assert_eq!(config.classifier_model, ClassifierModelKind::Quantized);
+        assert_eq!(config.classifier_max_latency_ms, None);
+        assert_eq!(config.final_response_classifier_dir, None);
+        assert_eq!(config.final_response_classifier_mode, ScorerMode::Shadow);
+        assert_eq!(
+            config.final_response_classifier_model,
+            ClassifierModelKind::Quantized
+        );
+        assert_eq!(config.final_response_classifier_max_latency_ms, None);
+    }
+
+    #[test]
+    fn classifier_cli_overrides_include_final_response_settings() {
+        let cli = parse(&[
+            "--classifier-dir",
+            "target/classifier-artifacts/onnx",
+            "--classifier-mode",
+            "advisory",
+            "--classifier-model",
+            "full",
+            "--classifier-max-latency-ms",
+            "25",
+            "--final-response-classifier-dir",
+            "target/final-response-artifacts/onnx",
+            "--final-response-classifier-mode",
+            "enforce",
+            "--final-response-classifier-model",
+            "quantized",
+            "--final-response-classifier-max-latency-ms",
+            "40",
+        ]);
+        let mut config = sample_config();
+
+        apply_env_cli_overrides(&mut config, &cli).expect("overrides");
+
+        assert_eq!(
+            config.classifier_dir.as_deref(),
+            Some("target/classifier-artifacts/onnx")
+        );
+        assert_eq!(config.classifier_mode, ScorerMode::Advisory);
+        assert_eq!(config.classifier_model, ClassifierModelKind::Full);
+        assert_eq!(config.classifier_max_latency_ms, Some(25));
+        assert_eq!(
+            config.final_response_classifier_dir.as_deref(),
+            Some("target/final-response-artifacts/onnx")
+        );
+        assert_eq!(config.final_response_classifier_mode, ScorerMode::Enforce);
+        assert_eq!(
+            config.final_response_classifier_model,
+            ClassifierModelKind::Quantized
+        );
+        assert_eq!(config.final_response_classifier_max_latency_ms, Some(40));
     }
 
     #[test]

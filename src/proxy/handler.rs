@@ -13,7 +13,9 @@ use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolC
 use crate::core::tool_spec::ToolSpec;
 use crate::error::StreamError;
 use crate::guardrails::{
-    recent_errors_from_messages, ScoringContext, StepCheck, StepEnforcer, ToolCallScorer,
+    recent_errors_from_messages, ClassifierAction, FinalResponseContext, FinalResponseScorer,
+    FinalResponseToolResult, ScoringContext, StepCheck, StepEnforcer, ToolCallScorer,
+    WorkflowStateForScoring,
 };
 use crate::proxy::{
     extract_passthrough, extract_sampling, openai_to_messages, strip_respond_calls,
@@ -182,6 +184,31 @@ pub async fn handle_anthropic_messages_with_scorer<C: LLMClient + 'static>(
     rescue_enabled: bool,
     scorer: Option<Arc<dyn ToolCallScorer>>,
 ) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
+    handle_anthropic_messages_with_scorers(
+        body,
+        raw_body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        None,
+    )
+    .await
+}
+
+/// Handle /v1/messages with optional tool-call and final-response scorers.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_anthropic_messages_with_scorers<C: LLMClient + 'static>(
+    body: &MessageCreateRequest,
+    raw_body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
     let config = anyllm_translate::TranslationConfig::default();
     let openai_req = anyllm_translate::translate_request(body, &config)
         .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
@@ -202,6 +229,7 @@ pub async fn handle_anthropic_messages_with_scorer<C: LLMClient + 'static>(
         rescue_enabled,
         Some(raw_body.clone()),
         scorer,
+        final_response_scorer,
     )
     .await
     .map_err(chat_error_to_anthropic)?
@@ -447,6 +475,29 @@ pub async fn handle_chat_completions_with_scorer<C: LLMClient + 'static>(
     rescue_enabled: bool,
     scorer: Option<Arc<dyn ToolCallScorer>>,
 ) -> Result<HandlerResult, HandlerError> {
+    handle_chat_completions_with_scorers(
+        body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        None,
+    )
+    .await
+}
+
+/// Main handler with optional tool-call and final-response scorers.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_chat_completions_with_scorers<C: LLMClient + 'static>(
+    body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+) -> Result<HandlerResult, HandlerError> {
     handle_chat_completions_impl(
         body,
         client,
@@ -455,6 +506,7 @@ pub async fn handle_chat_completions_with_scorer<C: LLMClient + 'static>(
         rescue_enabled,
         None,
         scorer,
+        final_response_scorer,
     )
     .await
 }
@@ -468,6 +520,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     rescue_enabled: bool,
     inbound_anthropic_body: Option<Value>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 ) -> Result<HandlerResult, HandlerError> {
     let messages = body
         .get("messages")
@@ -490,7 +543,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         Some(_) => {
             return Err(HandlerError::BadRequest(
                 "tools must be an array".to_string(),
-            ))
+            ));
         }
         None => Vec::new(),
     };
@@ -620,16 +673,63 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
         let response = result.response;
         let Some(enforcer) = step_enforcer.as_mut() else {
-            if let LLMResponse::ToolCalls(tool_calls) = &response {
-                score_proxy_tool_calls(
-                    scorer.as_deref(),
-                    &internal_msgs,
-                    tool_calls,
-                    None,
-                    &tool_specs,
-                );
+            match response {
+                LLMResponse::ToolCalls(tool_calls) => {
+                    if let Some(nudge) = score_proxy_tool_calls(
+                        scorer.as_deref(),
+                        &internal_msgs,
+                        &tool_calls,
+                        None,
+                        &tool_specs,
+                    ) {
+                        emit_proxy_classifier_nudge_or_error(
+                            &mut error_tracker,
+                            tool_calls,
+                            &mut internal_msgs,
+                            &mut tool_call_counter,
+                            &nudge,
+                        )
+                        .map_err(HandlerError::Upstream)?;
+                        continue;
+                    }
+                    if let Some(nudge) = score_proxy_final_tool_calls(
+                        final_response_scorer.as_deref(),
+                        &internal_msgs,
+                        &tool_calls,
+                        None,
+                        &tool_specs,
+                    ) {
+                        emit_proxy_final_response_tool_nudge_or_error(
+                            &mut error_tracker,
+                            tool_calls,
+                            &mut internal_msgs,
+                            &mut tool_call_counter,
+                            &nudge,
+                        )
+                        .map_err(HandlerError::Upstream)?;
+                        continue;
+                    }
+                    break LLMResponse::ToolCalls(tool_calls);
+                }
+                LLMResponse::Text(text) => {
+                    if let Some(nudge) = score_proxy_final_text(
+                        final_response_scorer.as_deref(),
+                        &internal_msgs,
+                        &text.content,
+                        None,
+                        &tool_specs,
+                    ) {
+                        emit_proxy_user_classifier_nudge_or_error(
+                            &mut error_tracker,
+                            &mut internal_msgs,
+                            &nudge,
+                        )
+                        .map_err(HandlerError::Upstream)?;
+                        continue;
+                    }
+                    break LLMResponse::Text(text);
+                }
             }
-            break response;
         };
 
         match response {
@@ -649,13 +749,40 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     }
                 }
 
-                score_proxy_tool_calls(
+                if let Some(nudge) = score_proxy_tool_calls(
                     scorer.as_deref(),
                     &internal_msgs,
                     &tool_calls,
                     Some(enforcer),
                     &tool_specs,
-                );
+                ) {
+                    emit_proxy_classifier_nudge_or_error(
+                        &mut error_tracker,
+                        tool_calls,
+                        &mut internal_msgs,
+                        &mut tool_call_counter,
+                        &nudge,
+                    )
+                    .map_err(HandlerError::Upstream)?;
+                    continue;
+                }
+                if let Some(nudge) = score_proxy_final_tool_calls(
+                    final_response_scorer.as_deref(),
+                    &internal_msgs,
+                    &tool_calls,
+                    Some(enforcer),
+                    &tool_specs,
+                ) {
+                    emit_proxy_final_response_tool_nudge_or_error(
+                        &mut error_tracker,
+                        tool_calls,
+                        &mut internal_msgs,
+                        &mut tool_call_counter,
+                        &nudge,
+                    )
+                    .map_err(HandlerError::Upstream)?;
+                    continue;
+                }
                 break LLMResponse::ToolCalls(tool_calls);
             }
             LLMResponse::Text(text) => {
@@ -675,6 +802,21 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     }
                 }
 
+                if let Some(nudge) = score_proxy_final_text(
+                    final_response_scorer.as_deref(),
+                    &internal_msgs,
+                    &text.content,
+                    Some(enforcer),
+                    &tool_specs,
+                ) {
+                    emit_proxy_user_classifier_nudge_or_error(
+                        &mut error_tracker,
+                        &mut internal_msgs,
+                        &nudge,
+                    )
+                    .map_err(HandlerError::Upstream)?;
+                    continue;
+                }
                 break LLMResponse::Text(text);
             }
         }
@@ -885,10 +1027,8 @@ fn score_proxy_tool_calls(
     tool_calls: &[ToolCall],
     step_enforcer: Option<&StepEnforcer>,
     tool_specs: &[ToolSpec],
-) {
-    let Some(scorer) = scorer else {
-        return;
-    };
+) -> Option<String> {
+    let scorer = scorer?;
     let user_request = latest_proxy_user_request(messages).unwrap_or_default();
     let recent_errors = recent_errors_from_messages(messages, 8);
     let ctx = match step_enforcer {
@@ -910,6 +1050,7 @@ fn score_proxy_tool_calls(
         ),
     };
 
+    let mut nudge: Option<String> = None;
     for call in tool_calls {
         match scorer.score(&ctx, call) {
             Ok(score) => {
@@ -922,6 +1063,15 @@ fn score_proxy_tool_calls(
                     tool = %call.tool,
                     "tool-call classifier score"
                 );
+                if matches!(
+                    score.action,
+                    ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+                ) {
+                    let content = crate::prompts::classifier_nudge(score.label.as_label().as_ref());
+                    if score.action == ClassifierAction::Block || nudge.is_none() {
+                        nudge = Some(content);
+                    }
+                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -933,6 +1083,181 @@ fn score_proxy_tool_calls(
             }
         }
     }
+    nudge
+}
+
+fn score_proxy_final_tool_calls(
+    scorer: Option<&dyn FinalResponseScorer>,
+    messages: &[Message],
+    tool_calls: &[ToolCall],
+    step_enforcer: Option<&StepEnforcer>,
+    tool_specs: &[ToolSpec],
+) -> Option<String> {
+    let terminal_tools = proxy_terminal_tool_set(step_enforcer, tool_specs);
+    let mut nudge = None;
+    for call in tool_calls
+        .iter()
+        .filter(|call| terminal_tools.contains(call.tool.as_str()))
+    {
+        let candidate = proxy_candidate_final_response_from_call(call);
+        let mut trace = proxy_tool_trace_from_messages(messages);
+        trace.push(call.tool.clone());
+        if let Some(content) = score_proxy_final_candidate(
+            scorer,
+            messages,
+            &candidate,
+            trace,
+            step_enforcer,
+            tool_specs,
+            Some(call.tool.as_str()),
+        ) {
+            nudge = Some(content);
+            break;
+        }
+    }
+    nudge
+}
+
+fn score_proxy_final_text(
+    scorer: Option<&dyn FinalResponseScorer>,
+    messages: &[Message],
+    candidate: &str,
+    step_enforcer: Option<&StepEnforcer>,
+    tool_specs: &[ToolSpec],
+) -> Option<String> {
+    score_proxy_final_candidate(
+        scorer,
+        messages,
+        candidate,
+        proxy_tool_trace_from_messages(messages),
+        step_enforcer,
+        tool_specs,
+        None,
+    )
+}
+
+fn score_proxy_final_candidate(
+    scorer: Option<&dyn FinalResponseScorer>,
+    messages: &[Message],
+    candidate: &str,
+    tool_trace: Vec<String>,
+    step_enforcer: Option<&StepEnforcer>,
+    tool_specs: &[ToolSpec],
+    terminal_tool: Option<&str>,
+) -> Option<String> {
+    let scorer = scorer?;
+    let user_request = latest_proxy_user_request(messages).unwrap_or_default();
+    let workflow_state = match step_enforcer {
+        Some(enforcer) => WorkflowStateForScoring {
+            required_steps: enforcer.tracker.required_steps().to_vec(),
+            completed_steps: enforcer.completed_steps().keys().cloned().collect(),
+            pending_steps: enforcer.pending(),
+            terminal_tools: enforcer.terminal_tools.iter().cloned().collect(),
+            recent_errors: recent_errors_from_messages(messages, 8),
+        },
+        None => WorkflowStateForScoring {
+            required_steps: Vec::new(),
+            completed_steps: Vec::new(),
+            pending_steps: Vec::new(),
+            terminal_tools: proxy_terminal_tools_for_scoring(tool_specs),
+            recent_errors: recent_errors_from_messages(messages, 8),
+        },
+    };
+    let ctx = FinalResponseContext {
+        schema_version: "final-response-verifier-input/v1".to_string(),
+        user_request: user_request.to_string(),
+        workflow_state,
+        required_facts: Vec::new(),
+        tool_trace,
+        tool_results: proxy_tool_results_from_messages(messages),
+        candidate_final_response: candidate.to_string(),
+        metadata: None,
+    };
+    match scorer.score(&ctx) {
+        Ok(score) => {
+            tracing::info!(
+                target: "forge.classifier",
+                label = %score.label.as_label(),
+                confidence = score.confidence,
+                action = %score.action.as_str(),
+                latency_ms = score.latency_ms,
+                terminal_tool = terminal_tool.unwrap_or("text"),
+                "final-response classifier score"
+            );
+            if matches!(
+                score.action,
+                ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+            ) {
+                Some(crate::prompts::classifier_nudge(
+                    score.label.as_label().as_ref(),
+                ))
+            } else {
+                None
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "forge.classifier",
+                error = %err,
+                terminal_tool = terminal_tool.unwrap_or("text"),
+                "final-response classifier scoring failed; allowing deterministic path"
+            );
+            None
+        }
+    }
+}
+
+fn proxy_terminal_tool_set<'a>(
+    step_enforcer: Option<&'a StepEnforcer>,
+    tool_specs: &'a [ToolSpec],
+) -> std::collections::HashSet<&'a str> {
+    match step_enforcer {
+        Some(enforcer) => enforcer.terminal_tools.iter().map(String::as_str).collect(),
+        None => tool_specs
+            .iter()
+            .filter(|spec| spec.name == RESPOND_TOOL_NAME)
+            .map(|spec| spec.name.as_str())
+            .collect(),
+    }
+}
+
+fn proxy_candidate_final_response_from_call(call: &ToolCall) -> String {
+    for key in ["message", "answer", "content", "report", "summary"] {
+        if let Some(value) = call.args.get(key) {
+            return value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+        }
+    }
+    Value::Object(
+        call.args
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+    .to_string()
+}
+
+fn proxy_tool_trace_from_messages(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| message.tool_calls.as_ref())
+        .flat_map(|calls| calls.iter().map(|call| call.name.clone()))
+        .collect()
+}
+
+fn proxy_tool_results_from_messages(messages: &[Message]) -> Vec<FinalResponseToolResult> {
+    messages
+        .iter()
+        .filter(|message| message.metadata.msg_type == MessageType::ToolResult)
+        .filter_map(|message| {
+            Some(FinalResponseToolResult {
+                tool_name: message.tool_name.clone()?,
+                content: message.content.clone(),
+            })
+        })
+        .collect()
 }
 
 fn latest_proxy_user_request(messages: &[Message]) -> Option<&str> {
@@ -976,6 +1301,80 @@ fn emit_proxy_step_nudge_or_error(
         "[StepEnforcementError]",
         &nudge.content,
     );
+    Ok(())
+}
+
+fn emit_proxy_classifier_nudge_or_error(
+    error_tracker: &mut crate::guardrails::ErrorTracker,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "classifier objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::RetryNudge,
+        "[ClassifierNudge]",
+        nudge_content,
+    );
+    Ok(())
+}
+
+fn emit_proxy_final_response_tool_nudge_or_error(
+    error_tracker: &mut crate::guardrails::ErrorTracker,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "final-response classifier objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::RetryNudge,
+        "[FinalResponseNudge]",
+        nudge_content,
+    );
+    Ok(())
+}
+
+fn emit_proxy_user_classifier_nudge_or_error(
+    error_tracker: &mut crate::guardrails::ErrorTracker,
+    messages: &mut Vec<Message>,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "final-response classifier objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    messages.push(Message::new(
+        MessageRole::User,
+        format!("[FinalResponseNudge] {nudge_content}"),
+        MessageMeta::new(MessageType::RetryNudge).with_step_index(PROXY_STEP_INDEX),
+    ));
     Ok(())
 }
 
@@ -1463,6 +1862,7 @@ mod tests {
         TokenUsage, ToolCall,
     };
     use crate::clients::AnthropicClient;
+    use crate::{FinalResponseClass, FinalResponseScore};
     use anyllm_translate::anthropic::MessageCreateRequest;
     use indexmap::IndexMap;
     use serde_json::json;
@@ -1856,6 +2256,43 @@ mod tests {
     }
 
     struct MockToolCallClient;
+
+    struct SequenceFinalScorer {
+        calls: AtomicUsize,
+    }
+
+    impl SequenceFinalScorer {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl FinalResponseScorer for SequenceFinalScorer {
+        fn score(&self, _ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore> {
+            let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+            if idx == 0 {
+                Ok(FinalResponseScore {
+                    label: FinalResponseClass::MissingToolFact,
+                    confidence: 0.99,
+                    logits: vec![0.0, 9.0, 0.0, 0.0, 0.0],
+                    action: ClassifierAction::AdvisoryNudge,
+                    model_version: "fake-final".to_string(),
+                    latency_ms: 1.0,
+                })
+            } else {
+                Ok(FinalResponseScore {
+                    label: FinalResponseClass::ValidFinalResponse,
+                    confidence: 1.0,
+                    logits: vec![9.0, 0.0, 0.0, 0.0, 0.0],
+                    action: ClassifierAction::Allow,
+                    model_version: "fake-final".to_string(),
+                    latency_ms: 1.0,
+                })
+            }
+        }
+    }
 
     impl LLMClient for MockToolCallClient {
         fn api_format(&self) -> ApiFormat {
@@ -2763,6 +3200,49 @@ mod tests {
         ) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
             Ok(Some(4096))
         }
+    }
+
+    #[tokio::test]
+    async fn final_response_scorer_retries_proxy_respond_before_returning() {
+        let mut bad_args = IndexMap::new();
+        bad_args.insert("message".into(), json!("bad"));
+        let mut good_args = IndexMap::new();
+        good_args.insert("message".into(), json!("good"));
+        let responses = vec![
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", bad_args)]),
+            LLMResponse::ToolCalls(vec![ToolCall::new("respond", good_args)]),
+        ];
+        let client = Arc::new(MockWorkflowContractClient::new(responses));
+        let final_scorer = Arc::new(SequenceFinalScorer::new());
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "test-model",
+            "stream": false,
+            "tools": [search_tool_json()]
+        });
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+        let result = handle_chat_completions_with_scorers(
+            &body,
+            &client,
+            &ctx,
+            3,
+            true,
+            None,
+            Some(final_scorer),
+        )
+        .await
+        .expect("handler result");
+
+        match result {
+            HandlerResult::Response(v) => {
+                assert_eq!(v["choices"][0]["message"]["content"], "good");
+            }
+            _ => panic!("expected Response"),
+        }
+        assert_eq!(*client.calls.lock().unwrap(), 2);
+        let sent_messages = serde_json::to_string(&client.sent_messages()).expect("messages");
+        assert!(sent_messages.contains("[FinalResponseNudge]"));
     }
 
     fn legacy_list_accounts_tool() -> Value {

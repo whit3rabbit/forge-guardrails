@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bash reads scripts incrementally; run from a temp copy so long evals keep
+# using the version they started with even if this file is edited mid-run.
+if [[ -z "${RUN_LOCAL_EVAL_SCRIPT_COPY:-}" ]]; then
+  script_original="${BASH_SOURCE[0]}"
+  if [[ "$script_original" != */* ]]; then
+    script_original="$(command -v "$script_original")"
+  elif [[ "$script_original" != /* ]]; then
+    script_original="$(pwd -P)/$script_original"
+  fi
+  script_original="$(cd "$(dirname "$script_original")" && pwd -P)/$(basename "$script_original")"
+  script_copy="$(mktemp "${TMPDIR:-/tmp}/run_local_eval.XXXXXX")"
+  cp "$script_original" "$script_copy"
+  chmod +x "$script_copy"
+  export RUN_LOCAL_EVAL_SCRIPT_COPY="$script_copy"
+  export RUN_LOCAL_EVAL_ORIGINAL="$script_original"
+  exec /usr/bin/env bash "$script_copy" "$@"
+fi
+
+trap 'rm -f "${RUN_LOCAL_EVAL_SCRIPT_COPY:-}"' EXIT
+
 DEFAULT_GGUF="mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf"
 DEFAULT_PROXY_PORT="8081"
 DEFAULT_BACKEND_PORT="8080"
@@ -9,8 +29,10 @@ DEFAULT_MODEL="Ministral-3-8B-Instruct-2512-Q8_0"
 DEFAULT_PROXY_BACKEND_MODE="native"
 DEFAULT_MANAGED_BACKEND="llamaserver"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_SOURCE="${RUN_LOCAL_EVAL_ORIGINAL:-${BASH_SOURCE[0]}}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+PROGRAM_NAME="$(basename "$SCRIPT_SOURCE")"
 
 SUITE="smoke"
 RUNS="1"
@@ -50,7 +72,7 @@ CURRENT_PROXY_LOG=""
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [options]
+Usage: $PROGRAM_NAME [options]
 
 Runs local Forge evals against the Rust proxy using managed llama-server.
 
@@ -78,10 +100,10 @@ Options:
   -h, --help                Show this help
 
 Examples:
-  $(basename "$0") --suite smoke --runs 1
-  $(basename "$0") --suite release --runs 10
-  $(basename "$0") --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
-  $(basename "$0") --suite release --runs 10 --download-classifier
+  $PROGRAM_NAME --suite smoke --runs 1
+  $PROGRAM_NAME --suite release --runs 10
+  $PROGRAM_NAME --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
+  $PROGRAM_NAME --suite release --runs 10 --download-classifier
 EOF
 }
 
@@ -92,6 +114,11 @@ die() {
 
 log() {
   printf '%s\n' "$*" >&2
+}
+
+phase() {
+  log ""
+  log "==> $*"
 }
 
 valid_positive_int() {
@@ -216,6 +243,7 @@ cleanup() {
   local status="$?"
   trap - EXIT INT TERM HUP
   stop_proxy
+  rm -f "${RUN_LOCAL_EVAL_SCRIPT_COPY:-}"
   exit "$status"
 }
 
@@ -234,6 +262,7 @@ wait_for_health() {
   pid="$1"
   elapsed=0
 
+  log "Waiting for proxy health at $url"
   while (( elapsed < HEALTH_TIMEOUT )); do
     if ! kill -0 "$pid" 2>/dev/null; then
       tail -n 80 "$CURRENT_PROXY_LOG" >&2 || true
@@ -242,6 +271,9 @@ wait_for_health() {
     if curl -fsS "$url" >/dev/null 2>&1; then
       log "Proxy healthy at $url"
       return 0
+    fi
+    if (( elapsed > 0 && elapsed % 10 == 0 )); then
+      log "Still waiting for proxy health: ${elapsed}s elapsed"
     fi
     sleep 1
     elapsed=$((elapsed + 1))
@@ -267,7 +299,9 @@ download_classifier_artifacts() {
     CLASSIFIER_DIR="$CLASSIFIER_DIR/onnx"
   fi
 
+  phase "Download classifier artifacts"
   log "Downloading classifier artifacts -> $CLASSIFIER_DIR"
+  log "Classifier model: $CLASSIFIER_MODEL"
   (cd "$REPO_ROOT" && cargo run --features classifier --bin download-classifier -- \
     --output-dir "$output_dir" \
     --classifier-model "$CLASSIFIER_MODEL")
@@ -289,7 +323,8 @@ prepare_classifier_binaries() {
       ;;
   esac
 
-  log "Building classifier-enabled proxy/eval binaries"
+  phase "Build classifier-enabled binaries"
+  log "Building forge-guardrails-proxy and forge-eval with classifier feature"
   (cd "$REPO_ROOT" && cargo build --features classifier --bin forge-guardrails-proxy --bin forge-eval)
 }
 
@@ -299,7 +334,10 @@ start_proxy() {
   label="$2"
   CURRENT_PROXY_LOG="$OUTPUT_DIR/proxy_${label}.log"
 
-  log "Starting proxy with budget_tokens=$budget"
+  phase "Start proxy: $label"
+  log "Budget tokens: $budget"
+  log "Proxy backend mode: $PROXY_BACKEND_MODE"
+  log "Proxy log: $CURRENT_PROXY_LOG"
   local env_args=(
     "FORGE_PROXY_PORT=$PROXY_PORT"
     "FORGE_BACKEND_PORT=$BACKEND_PORT"
@@ -316,6 +354,9 @@ start_proxy() {
       --classifier-mode "$CLASSIFIER_MODE"
       --classifier-model "$CLASSIFIER_MODEL"
     )
+    log "Classifier: enabled, mode=$CLASSIFIER_MODE, model=$CLASSIFIER_MODEL"
+  else
+    log "Classifier: disabled"
   fi
   env "${env_args[@]}" "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" "${proxy_args[@]}" \
     >"$CURRENT_PROXY_LOG" 2>&1 &
@@ -324,12 +365,28 @@ start_proxy() {
 }
 
 run_rust_smoke() {
-  local output
+  local count elapsed eval_pid expected_rows initial_rows new_rows output started status
   output="$OUTPUT_DIR/rust_smoke.jsonl"
   local scenarios
   scenarios=($(scenario_names smoke))
+  expected_rows=$(( RUNS * ${#scenarios[@]} ))
+  if [[ -f "$output" ]]; then
+    initial_rows="$(wc -l <"$output" | tr -d '[:space:]')"
+  else
+    initial_rows=0
+  fi
 
-  log "Running Rust smoke eval -> $output"
+  phase "Rust smoke eval"
+  log "Scenarios: ${#scenarios[@]}, runs: $RUNS, expected rows: $expected_rows"
+  log "Output: $output"
+  if classifier_enabled; then
+    log "Classifier capture: enabled"
+  else
+    log "Classifier capture: disabled"
+  fi
+  if [[ "$initial_rows" -gt 0 ]]; then
+    log "Rust smoke output already has ${initial_rows} rows; progress reports new rows"
+  fi
   local cmd=(cargo run)
   if classifier_enabled; then
     cmd+=(--features classifier)
@@ -354,19 +411,52 @@ run_rust_smoke() {
       --classifier-model "$CLASSIFIER_MODEL"
     )
   fi
-  (cd "$REPO_ROOT" && "${cmd[@]}")
+
+  (cd "$REPO_ROOT" && "${cmd[@]}") &
+  eval_pid="$!"
+  started="$(date +%s)"
+  while kill -0 "$eval_pid" 2>/dev/null; do
+    if [[ -f "$output" ]]; then
+      count="$(wc -l <"$output" | tr -d '[:space:]')"
+    else
+      count=0
+    fi
+    new_rows=$(( count - initial_rows ))
+    elapsed=$(( $(date +%s) - started ))
+    log "Rust smoke progress: ${new_rows}/${expected_rows} new rows, ${elapsed}s elapsed"
+    sleep 10
+  done
+
+  set +e
+  wait "$eval_pid"
+  status="$?"
+  set -e
+
+  if [[ -f "$output" ]]; then
+    count="$(wc -l <"$output" | tr -d '[:space:]')"
+  else
+    count=0
+  fi
+  new_rows=$(( count - initial_rows ))
+  elapsed=$(( $(date +%s) - started ))
+  log "Rust smoke complete: ${new_rows}/${expected_rows} new rows, ${elapsed}s elapsed"
+  return "$status"
 }
 
 run_python_oracle() {
-  local budget output
+  local budget expected_rows output
   budget="$1"
   shift
   output="$OUTPUT_DIR/python_oracle.jsonl"
 
   local scenarios=("$@")
   [[ "${#scenarios[@]}" -gt 0 ]] || die "no Python oracle scenarios selected"
+  expected_rows=$(( RUNS * ${#scenarios[@]} ))
 
-  log "Running Python oracle with budget_tokens=$budget -> $output"
+  phase "Python oracle eval"
+  log "Budget tokens: $budget"
+  log "Scenarios: ${#scenarios[@]}, runs: $RUNS, expected rows: $expected_rows"
+  log "Output: $output"
   local cmd=(
     scripts/eval_openai_proxy.py
     --base-url "http://127.0.0.1:${PROXY_PORT}/v1"
@@ -375,7 +465,7 @@ run_python_oracle() {
     --scenario "${scenarios[@]}"
     --budget-tokens "$budget"
     --backend-label "$DEFAULT_MANAGED_BACKEND"
-    --mode-label proxy
+    --mode-label "$PROXY_BACKEND_MODE"
     --proxy-backend-mode "$PROXY_BACKEND_MODE"
     --eval-target-backend openai-proxy
     --output "$output"
@@ -391,8 +481,12 @@ run_python_report() {
   output="$OUTPUT_DIR/python_oracle.jsonl"
   report="$OUTPUT_DIR/python_report.txt"
   summary="$OUTPUT_DIR/proxy_summary.txt"
-  [[ -f "$output" ]] || return 0
+  if [[ ! -f "$output" ]]; then
+    log "Skipping Python report; oracle output not found: $output"
+    return 0
+  fi
 
+  phase "Python reports"
   log "Generating Python report -> $report"
   if command -v uv >/dev/null 2>&1; then
     (cd "$REPO_ROOT/forge" && env -u VIRTUAL_ENV uv run python -m tests.eval.report "$output" --include-partial 2>&1) | tee "$report"
@@ -411,8 +505,12 @@ run_published_compare() {
   output="$OUTPUT_DIR/python_oracle.jsonl"
   compare_report="$OUTPUT_DIR/published_compare.txt"
   published_model="${PUBLISHED_MODEL:-$MODEL}"
-  [[ -f "$output" ]] || return 0
+  if [[ ! -f "$output" ]]; then
+    log "Skipping published compare; oracle output not found: $output"
+    return 0
+  fi
 
+  phase "Published baseline compare"
   log "Comparing against published baseline -> $compare_report"
   local cmd=(
     scripts/compare_published_eval.py "$output"
@@ -622,6 +720,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
+phase "Eval setup"
 log "Output directory: $OUTPUT_DIR"
 log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, proxy_backend_mode: $PROXY_BACKEND_MODE"
 if classifier_enabled; then
@@ -659,8 +758,11 @@ fi
 run_python_report
 if [[ "$SUITE" == "release" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
   run_published_compare
+elif [[ "$SUITE" == "release" ]]; then
+  log "Skipping published compare because --skip-published-compare was set"
 fi
 
+phase "Complete"
 log "Local eval complete"
 log "Rust smoke:    $OUTPUT_DIR/rust_smoke.jsonl"
 log "Python oracle: $OUTPUT_DIR/python_oracle.jsonl"

@@ -114,6 +114,26 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "quantized|full")]
     pub(crate) classifier_model: Option<String>,
 
+    /// Warn when tool-call classifier latency exceeds this many milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub(crate) classifier_max_latency_ms: Option<u64>,
+
+    /// Local final-response classifier artifact directory.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) final_response_classifier_dir: Option<String>,
+
+    /// Final-response classifier mode.
+    #[arg(long, value_name = "disabled|shadow|advisory|enforce")]
+    pub(crate) final_response_classifier_mode: Option<String>,
+
+    /// Final-response classifier ONNX model file.
+    #[arg(long, value_name = "quantized|full")]
+    pub(crate) final_response_classifier_model: Option<String>,
+
+    /// Warn when final-response classifier latency exceeds this many milliseconds.
+    #[arg(long, value_name = "MS")]
+    pub(crate) final_response_classifier_max_latency_ms: Option<u64>,
+
     /// Disable rescue parsing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_rescue: bool,
@@ -220,6 +240,11 @@ mod tests {
         assert_eq!(cli.classifier_dir, None);
         assert_eq!(cli.classifier_mode, None);
         assert_eq!(cli.classifier_model, None);
+        assert_eq!(cli.classifier_max_latency_ms, None);
+        assert_eq!(cli.final_response_classifier_dir, None);
+        assert_eq!(cli.final_response_classifier_mode, None);
+        assert_eq!(cli.final_response_classifier_model, None);
+        assert_eq!(cli.final_response_classifier_max_latency_ms, None);
     }
 
     #[test]
@@ -331,6 +356,16 @@ mod tests {
             "shadow",
             "--classifier-model",
             "quantized",
+            "--classifier-max-latency-ms",
+            "25",
+            "--final-response-classifier-dir",
+            "target/final-response-artifacts/onnx",
+            "--final-response-classifier-mode",
+            "advisory",
+            "--final-response-classifier-model",
+            "full",
+            "--final-response-classifier-max-latency-ms",
+            "40",
         ]);
         assert_eq!(
             cli.classifier_dir.as_deref(),
@@ -338,6 +373,17 @@ mod tests {
         );
         assert_eq!(cli.classifier_mode.as_deref(), Some("shadow"));
         assert_eq!(cli.classifier_model.as_deref(), Some("quantized"));
+        assert_eq!(cli.classifier_max_latency_ms, Some(25));
+        assert_eq!(
+            cli.final_response_classifier_dir.as_deref(),
+            Some("target/final-response-artifacts/onnx")
+        );
+        assert_eq!(
+            cli.final_response_classifier_mode.as_deref(),
+            Some("advisory")
+        );
+        assert_eq!(cli.final_response_classifier_model.as_deref(), Some("full"));
+        assert_eq!(cli.final_response_classifier_max_latency_ms, Some(40));
     }
 
     #[test]

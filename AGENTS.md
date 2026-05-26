@@ -70,6 +70,7 @@ The reference Python implementation is available in the [forge](file:///Users/wh
   - `USER_GUIDE.md`: Developer guide to library APIs, configurations, and use cases
   - `WORKFLOW.md`: Explanation of guardrails loop and sequential step enforcement
   - `SCHEMA.md`: Data contracts, JSON specs, and internal `_forge` metadata structures
+  - `MODEL_TRAINING_SCHEMA.md`: Tool-call and final-response verifier training, artifact, threshold, telemetry, and hard-negative schemas
   - `PARITY.md`: Specifications for maintaining strict parity with Python Forge
   - `CLEANROOM.md`: Summary of clean-room implementation history
   - `BACKEND_SETUP.md`: Setup configurations for local and remote providers
@@ -99,6 +100,34 @@ cargo test --bin forge-eval
 python scripts/eval_openai_proxy.py --help
 scripts/run_local_eval.sh --suite smoke --runs 1
 ```
+
+Verifier model training:
+
+- The production notebook is
+  `notebook/toolcall_verifier_training_production_colab_v4.ipynb`.
+- The notebook is Google Colab-first. Do not use local notebook execution as a
+  test or release gate. For local edits, validate only JSON/static syntax and
+  Rust runtime compatibility, then run the notebook in Colab.
+- `UPLOAD_TO_HUB=True` is the default. Keep uploads private unless explicitly
+  told otherwise, and keep new verifier artifacts shadow-first until eval replay
+  proves safety.
+- Follow `docs/MODEL_TRAINING_SCHEMA.md` for row schemas, label order,
+  artifact manifests, thresholds, calibration files, ONNX parity reports, and
+  hard-negative envelopes.
+- Tool-call artifacts may be legacy five-label or six-label. New production
+  artifacts should use six labels in this exact order: `valid`,
+  `wrong_tool_semantic`, `wrong_arguments_semantic`, `tool_not_needed`,
+  `needs_clarification`, `deterministic_invalid`.
+- `serialize_state_v1` must remain byte-stable and is the default deployable
+  serializer. `serialize_state_v2` is an explicit metadata-aware ablation; do
+  not silently publish v2 inputs as v1 artifacts.
+- `deterministic_invalid` is telemetry-only. Rust deterministic validation and
+  step enforcement remain authoritative.
+- Final-response verifier artifacts are separate from tool-call classifier
+  artifacts and use `final-response-verifier-artifact/v1` with
+  `serialize_final_response_state_v1`.
+- Do not commit ONNX classifier artifacts, downloaded model snapshots, Colab
+  workdirs, Hugging Face caches, or generated `target/local-eval` outputs.
 
 Local managed llama-server proxy launcher:
 
@@ -207,7 +236,7 @@ Standard local release benchmark:
 scripts/run_local_eval.sh --suite release --runs 10
 ```
 
-ONNX classifier shadow comparison:
+ONNX classifier mode comparison:
 
 ```bash
 scripts/run_local_eval.sh --suite release --runs 10 \
@@ -216,15 +245,47 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 scripts/run_local_eval.sh --suite release --runs 10 \
   --classifier-dir target/classifier-artifacts/onnx \
   --output-dir target/local-eval/release-onnx-shadow
+
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classifier-dir target/classifier-artifacts/onnx \
+  --classifier-mode enforce \
+  --output-dir target/local-eval/release-onnx-enforce
 ```
+
+When evaluating a final-response verifier, include the matching
+`--final-response-classifier-dir`, `--final-response-classifier-mode`, and
+`--final-response-classifier-model` flags.
 
 Use `--download-classifier` to populate
 `target/classifier-artifacts/onnx` before a classifier run. The default
-classifier mode is `shadow`; keep it shadow-only for eval comparison unless the
-task explicitly asks to test advisory or enforcement behavior. ONNX classifier
-artifacts are local test data and must not be committed. Compare Python oracle
-reports for behavior, and inspect `rust_smoke.jsonl` plus proxy logs for
-classifier scores.
+classifier mode is `shadow`, but ONNX evals should include `enforce` when
+testing whether thresholds can safely improve behavior. Enforcement only acts
+when the runtime mode is `enforce` and the artifact threshold for the predicted
+label is met. Labels with thresholds above `1.0` remain telemetry-only even in
+enforce mode, and `deterministic_invalid` must stay non-authoritative. ONNX
+classifier artifacts are local test data and must not be committed. Compare
+Python oracle reports for behavior, and inspect `rust_smoke.jsonl` plus proxy
+logs for classifier scores.
+
+Verifier promotion gates are intentionally conservative:
+
+1. Start in `shadow`.
+2. Move to `advisory` only after eval replay shows no completeness regression
+   and no unacceptable valid-call false objections.
+3. Move to `enforce` only after advisory replay proves the label-specific
+   threshold is safe.
+
+Minimum classifier replay matrix:
+
+```text
+no_classifier
+classifier_fp32_onnx_shadow
+classifier_quantized_onnx_shadow
+classifier_fp32_onnx_advisory
+classifier_quantized_onnx_advisory
+```
+
+Add final-response variants when evaluating grounded-synthesis recovery.
 
 `scripts/run_local_eval.sh` starts
 `scripts/start_llamaserver_proxy.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf`

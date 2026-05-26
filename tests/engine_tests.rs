@@ -7,9 +7,10 @@ use forge_guardrails::{
     fold_and_serialize, format_tool_call_id,
     respond::{respond_spec, respond_tool},
     workflow::{IntoToolCallable, TerminalToolInput, ToolDef},
-    ApiFormat, ChunkStream, ContextManager, ForgeError, LLMClient, LLMResponse, Message,
-    MessageMeta, MessageRole, MessageType, OnMessageFn, SamplingParams, StreamChunk, ToolCallInfo,
-    ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
+    ApiFormat, ChunkStream, ClassifierAction, ContextManager, FinalResponseClass,
+    FinalResponseContext, FinalResponseScore, FinalResponseScorer, ForgeError, LLMClient,
+    LLMResponse, Message, MessageMeta, MessageRole, MessageType, OnMessageFn, SamplingParams,
+    StreamChunk, ToolCallInfo, ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
 };
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -29,6 +30,43 @@ struct MockClient {
 
 struct BackendErrorClient {
     call_count: AtomicI32,
+}
+
+struct SequenceFinalResponseScorer {
+    call_count: AtomicI32,
+}
+
+impl SequenceFinalResponseScorer {
+    fn new() -> Self {
+        Self {
+            call_count: AtomicI32::new(0),
+        }
+    }
+}
+
+impl FinalResponseScorer for SequenceFinalResponseScorer {
+    fn score(&self, _ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore> {
+        let idx = self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+        if idx == 0 {
+            Ok(FinalResponseScore {
+                label: FinalResponseClass::MissingToolFact,
+                confidence: 0.99,
+                logits: vec![0.0, 9.0, 0.0, 0.0, 0.0],
+                action: ClassifierAction::AdvisoryNudge,
+                model_version: "fake-final".to_string(),
+                latency_ms: 1.0,
+            })
+        } else {
+            Ok(FinalResponseScore {
+                label: FinalResponseClass::ValidFinalResponse,
+                confidence: 1.0,
+                logits: vec![9.0, 0.0, 0.0, 0.0, 0.0],
+                action: ClassifierAction::Allow,
+                model_version: "fake-final".to_string(),
+                latency_ms: 1.0,
+            })
+        }
+    }
 }
 
 impl BackendErrorClient {
@@ -282,6 +320,58 @@ async fn ts001_simple_two_step_workflow() {
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
     let val = result.expect("ok");
     assert_eq!(val, Value::String("final answer".to_string()));
+}
+
+#[tokio::test]
+async fn final_response_scorer_retries_terminal_answer_before_execution() {
+    let collected: Arc<std::sync::Mutex<Vec<Message>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let collected_clone = collected.clone();
+    let cb: OnMessageFn = Box::new(move |msg: &Message| {
+        if let Ok(mut messages) = collected_clone.lock() {
+            messages.push(msg.clone());
+        }
+    });
+
+    let mut search_args = IndexMap::new();
+    search_args.insert("query".to_string(), Value::String("test".to_string()));
+    let mut bad_args = IndexMap::new();
+    bad_args.insert("message".to_string(), Value::String("bad".to_string()));
+    let mut good_args = IndexMap::new();
+    good_args.insert("message".to_string(), Value::String("good".to_string()));
+
+    let client = Arc::new(MockClient::new(vec![
+        make_tool_call("search", search_args),
+        make_tool_call("respond", bad_args),
+        make_tool_call("respond", good_args),
+    ]));
+    let final_scorer = Arc::new(SequenceFinalResponseScorer::new());
+    let runner = WorkflowRunner::new(
+        client.clone(),
+        make_context_manager(),
+        10,
+        3,
+        2,
+        false,
+        None,
+        Some(cb),
+        true,
+        None,
+    )
+    .with_final_response_scorer(final_scorer, None);
+    let workflow = make_simple_workflow();
+
+    let result = runner
+        .run(&workflow, "search for test", None, None, None)
+        .await;
+
+    assert_eq!(result.expect("ok"), Value::String("good".to_string()));
+    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+    assert!(collected
+        .lock()
+        .expect("messages lock")
+        .iter()
+        .any(|message| message.content.contains("[FinalResponseNudge]")));
 }
 
 // ---------------------------------------------------------------------------

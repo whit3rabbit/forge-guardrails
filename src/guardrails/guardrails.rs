@@ -1,10 +1,11 @@
 use super::error_tracker::ErrorTracker;
 use super::nudge::Nudge;
 use super::response_validator::{ResponseValidator, RetryNudgeFn};
-use super::scoring::{ToolCallScore, ToolCallScorer};
+use super::scoring::{ClassifierAction, ToolCallScore, ToolCallScorer};
 use super::scoring_context::ScoringContext;
 use super::step_enforcer::{StepEnforcer, StepPrerequisite};
 use crate::clients::base::{LLMResponse, ToolCall};
+use crate::prompts::nudges;
 use indexmap::IndexSet;
 use std::sync::Arc;
 
@@ -212,6 +213,7 @@ impl Guardrails {
         }
 
         if let (Some(scorer), Some(ctx)) = (self.scorer.as_ref(), scoring_context) {
+            let mut classifier_nudge: Option<Nudge> = None;
             for call in &tool_calls {
                 match scorer.score(ctx, call) {
                     Ok(score) => {
@@ -225,6 +227,21 @@ impl Guardrails {
                             model_version = %score.model_version,
                             "tool-call classifier score"
                         );
+                        if matches!(
+                            score.action,
+                            ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+                        ) {
+                            let label = score.label.as_label();
+                            let nudge = Nudge::new(
+                                "user",
+                                nudges::classifier_nudge(label.as_ref()),
+                                "classifier",
+                            );
+                            if score.action == ClassifierAction::Block || classifier_nudge.is_none()
+                            {
+                                classifier_nudge = Some(nudge);
+                            }
+                        }
                         self.last_scores.push(score);
                     }
                     Err(err) => {
@@ -236,6 +253,13 @@ impl Guardrails {
                         );
                     }
                 }
+            }
+            if let Some(nudge) = classifier_nudge {
+                self.error_tracker.record_retry();
+                if self.error_tracker.retries_exhausted() {
+                    return CheckResult::fatal("Too many classifier objections");
+                }
+                return CheckResult::retry(nudge);
             }
         }
 

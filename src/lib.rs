@@ -44,9 +44,10 @@ pub use context::{
     HardwareProfile, MemoryKind, NoCompact, SlidingWindowCompact, TieredCompact,
 };
 pub use core::{
-    fold_and_serialize, format_tool_call_id, run_inference, InferenceResult, Message, MessageMeta,
-    MessageRole, MessageType, OnChunkFn, OnMessageFn, ParamModel, PrerequisiteCheck, SlotWorker,
-    StepTracker, ToolCallInfo, ToolCallScoreFn, ToolDef, ToolSpec, Workflow, WorkflowRunner,
+    fold_and_serialize, format_tool_call_id, run_inference, FinalResponseScoreFn, InferenceResult,
+    Message, MessageMeta, MessageRole, MessageType, OnChunkFn, OnMessageFn, ParamModel,
+    PrerequisiteCheck, SlotWorker, StepTracker, ToolCallInfo, ToolCallScoreFn, ToolDef, ToolSpec,
+    Workflow, WorkflowRunner,
 };
 pub use error::{
     BackendError, BudgetResolutionError, ContextBudgetExceeded, ContextDiscoveryError, ForgeError,
@@ -54,30 +55,38 @@ pub use error::{
     StreamError, ThinkingNotSupportedError, ToolCallError, ToolExecutionError, ToolResolutionError,
     UnsupportedModelError, WorkflowCancelledError,
 };
-#[cfg(feature = "classifier")]
-pub use guardrails::OnnxToolCallScorer;
 pub use guardrails::{
-    recent_errors_from_messages, serialize_state_v1, validate_tool_arguments,
-    validate_tool_call_batch, ArgValidationError, ArgValidationKind, ArtifactManifest,
-    CandidateCallForScoring, CheckResult, ClassifierAction, ClassifierArtifact,
-    ClassifierModelKind, ErrorTracker, GuardAction, GuardrailDecision, GuardrailHistory,
-    GuardrailState, GuardrailViolation, Guardrails, LabelThreshold, LabelsFile, NoopToolCallScorer,
-    Nudge, RetryNudgeFn, ScorerMode, ScoringContext, StepCheck, StepEnforcer, StepPrerequisite,
-    TerminalTool, Thresholds, ToolCallClass, ToolCallScore, ToolCallScorer, ToolSpecForScoring,
-    ValidationResult, WorkflowStateForScoring, DEFAULT_CLASSIFIER_REPO,
-    DEFAULT_CLASSIFIER_REVISION, EXPECTED_LABELS,
+    recent_errors_from_messages, serialize_final_response_state_v1, serialize_state_v1,
+    serialize_state_v2, validate_tool_arguments, validate_tool_call_batch, ArgValidationError,
+    ArgValidationKind, ArtifactManifest, CandidateCallForScoring, CheckResult, ClassifierAction,
+    ClassifierArtifact, ClassifierModelKind, ErrorTracker, FinalResponseClass,
+    FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScore, FinalResponseScorer,
+    FinalResponseToolResult, GuardAction, GuardrailDecision, GuardrailHistory, GuardrailState,
+    GuardrailViolation, Guardrails, LabelThreshold, LabelsFile, NoopFinalResponseScorer,
+    NoopToolCallScorer, Nudge, RetryNudgeFn, ScorerMode, ScoringContext, ScoringMetadata,
+    StepCheck, StepEnforcer, StepPrerequisite, TerminalTool, Thresholds, ToolCallClass,
+    ToolCallScore, ToolCallScorer, ToolSpecForScoring, ValidationResult, WorkflowStateForScoring,
+    DEFAULT_CLASSIFIER_REPO, DEFAULT_CLASSIFIER_REVISION, EXPECTED_LABELS,
+    FINAL_RESPONSE_ARTIFACT_SCHEMA_VERSION, FINAL_RESPONSE_EXPECTED_LABELS,
+    FINAL_RESPONSE_INPUT_SCHEMA_VERSION, FINAL_RESPONSE_SERIALIZER,
+    FINAL_RESPONSE_THRESHOLDS_SCHEMA_VERSION, LEGACY_EXPECTED_LABELS, NEXT_INPUT_SCHEMA_VERSION,
+    NEXT_SERIALIZER,
 };
+#[cfg(feature = "classifier")]
+pub use guardrails::{OnnxFinalResponseScorer, OnnxToolCallScorer};
 pub use prompts::{
-    build_tool_prompt, extract_tool_call, prerequisite_nudge, rescue_tool_call, retry_nudge,
-    step_nudge, unknown_tool_nudge, unsafe_batch_nudge,
+    build_tool_prompt, classifier_nudge, extract_tool_call, prerequisite_nudge, rescue_tool_call,
+    retry_nudge, step_nudge, unknown_tool_nudge, unsafe_batch_nudge,
 };
 pub use proxy::{
     extract_passthrough, extract_sampling, handle_anthropic_messages,
-    handle_anthropic_messages_with_scorer, handle_chat_completions,
-    handle_chat_completions_with_scorer, has_respond_tool, openai_to_messages, respond_tool_openai,
-    strip_respond_calls, text_response_to_openai, text_to_sse_events, tool_calls_to_openai,
-    tool_calls_to_sse_events, AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult,
-    HTTPServer, HandlerError, HandlerResult, OpenAiEventStream, OpenAiMessageError,
+    handle_anthropic_messages_with_scorer, handle_anthropic_messages_with_scorers,
+    handle_chat_completions, handle_chat_completions_with_scorer,
+    handle_chat_completions_with_scorers, has_respond_tool, openai_to_messages,
+    respond_tool_openai, strip_respond_calls, text_response_to_openai, text_to_sse_events,
+    tool_calls_to_openai, tool_calls_to_sse_events, AnthropicEventStream, AnthropicHandlerError,
+    AnthropicHandlerResult, HTTPServer, HandlerError, HandlerResult, OpenAiEventStream,
+    OpenAiMessageError,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};

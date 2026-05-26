@@ -7,9 +7,9 @@ use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    handle_anthropic_messages_with_scorer, handle_chat_completions_with_scorer,
-    AnthropicHandlerError, AnthropicHandlerResult, ContextManager, HandlerError, HandlerResult,
-    LLMClient, NoCompact, ServerManager, ToolCallScorer,
+    handle_anthropic_messages_with_scorers, handle_chat_completions_with_scorers,
+    AnthropicHandlerError, AnthropicHandlerResult, ContextManager, FinalResponseScorer,
+    HandlerError, HandlerResult, LLMClient, NoCompact, ServerManager, ToolCallScorer,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
@@ -26,6 +26,7 @@ struct AppState {
     client_factory: Arc<ClientFactory>,
     request_mutex: Arc<TokioMutex<()>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 }
 
 pub(crate) async fn serve(
@@ -33,8 +34,9 @@ pub(crate) async fn serve(
     client_factory: ClientFactory,
     managed_server: Option<ServerManager>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 ) -> Result<(), String> {
-    let result = serve_inner(config, client_factory, scorer).await;
+    let result = serve_inner(config, client_factory, scorer, final_response_scorer).await;
     if let Some(server) = managed_server {
         if let Err(err) = server.stop() {
             let stop_err = format!("failed to stop managed backend: {err}");
@@ -51,6 +53,7 @@ async fn serve_inner(
     config: ProxyConfig,
     client_factory: ClientFactory,
     scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 ) -> Result<(), String> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
@@ -60,6 +63,7 @@ async fn serve_inner(
         client_factory: Arc::new(client_factory),
         request_mutex: Arc::new(TokioMutex::new(())),
         scorer,
+        final_response_scorer,
     };
 
     eprintln!(
@@ -182,13 +186,14 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
         None
     };
 
-    match handle_chat_completions_with_scorer(
+    match handle_chat_completions_with_scorers(
         &parsed,
         &client,
         &context_manager,
         state.config.max_retries,
         state.config.rescue_enabled,
         state.scorer.clone(),
+        state.final_response_scorer.clone(),
     )
     .await
     {
@@ -226,8 +231,15 @@ async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Respo
     };
     let model = extract_model_from_value(&raw, &state.config.default_model);
     let client = Arc::new(state.client_factory.client_for_model(model));
-    anthropic_messages_with_raw_client(state.config, state.request_mutex, state.scorer, client, raw)
-        .await
+    anthropic_messages_with_raw_client(
+        state.config,
+        state.request_mutex,
+        state.scorer,
+        state.final_response_scorer,
+        client,
+        raw,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -255,13 +267,14 @@ async fn anthropic_messages_with_client<C: LLMClient + 'static>(
             );
         }
     };
-    anthropic_messages_with_raw_client(config, request_mutex, None, client, raw).await
+    anthropic_messages_with_raw_client(config, request_mutex, None, None, client, raw).await
 }
 
 async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
     config: Arc<ProxyConfig>,
     request_mutex: Arc<TokioMutex<()>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
     client: Arc<C>,
     raw: Value,
 ) -> Response {
@@ -290,7 +303,7 @@ async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
         None
     };
 
-    match handle_anthropic_messages_with_scorer(
+    match handle_anthropic_messages_with_scorers(
         &parsed,
         &raw,
         &client,
@@ -298,6 +311,7 @@ async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
         config.max_retries,
         config.rescue_enabled,
         scorer,
+        final_response_scorer,
     )
     .await
     {
@@ -487,6 +501,11 @@ mod tests {
                 classifier_dir: None,
                 classifier_mode: ScorerMode::Shadow,
                 classifier_model: ClassifierModelKind::Quantized,
+                classifier_max_latency_ms: None,
+                final_response_classifier_dir: None,
+                final_response_classifier_mode: ScorerMode::Shadow,
+                final_response_classifier_model: ClassifierModelKind::Quantized,
+                final_response_classifier_max_latency_ms: None,
             }),
             client_factory: Arc::new(ClientFactory::DirectOpenAi {
                 base_url: upstream.url(),
@@ -495,6 +514,7 @@ mod tests {
             }),
             request_mutex: Arc::new(TokioMutex::new(())),
             scorer: None,
+            final_response_scorer: None,
         };
         let body = Bytes::from(
             json!({
@@ -526,6 +546,11 @@ mod tests {
             classifier_dir: None,
             classifier_mode: ScorerMode::Shadow,
             classifier_model: ClassifierModelKind::Quantized,
+            classifier_max_latency_ms: None,
+            final_response_classifier_dir: None,
+            final_response_classifier_mode: ScorerMode::Shadow,
+            final_response_classifier_model: ClassifierModelKind::Quantized,
+            final_response_classifier_max_latency_ms: None,
         });
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let client = Arc::new(BinaryChannelStreamClient::new(rx));
