@@ -166,6 +166,12 @@ Download the local classifier artifact once:
 cargo run --features classifier --bin download-classifier -- --classifier-model quantized
 ```
 
+The downloader defaults to the pinned Hugging Face revision used by Rust's
+`DEFAULT_CLASSIFIER_REVISION`. It writes the runnable ONNX artifact under
+`target/classifier-artifacts/onnx` and also downloads published schema/report
+sidecars such as `input_schema_v1.json`, `input_schema_v2.json`, and
+`serializer_fixture_v2.json` when they are present in the model repo.
+
 Then run the same local release eval with the classifier loaded by the proxy:
 
 ```bash

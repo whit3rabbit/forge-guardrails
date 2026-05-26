@@ -11,9 +11,10 @@
   "labels": [
     "valid",
     "wrong_tool_semantic",
+    "wrong_arguments_semantic",
     "tool_not_needed",
     "needs_clarification",
     "deterministic_invalid"
   ],
-  "created_unix": 1779735826
+  "created_unix": 1779764865
 }

@@ -13,6 +13,11 @@
       "advisory_min_confidence": 1.01,
       "enforce_min_confidence": 1.01
     },
+    "wrong_arguments_semantic": {
+      "action": "advisory_then_enforce_after_eval",
+      "advisory_min_confidence": 0.9,
+      "enforce_min_confidence": 0.995
+    },
     "tool_not_needed": {
       "action": "advisory_then_enforce_after_eval",
       "advisory_min_confidence": 0.8,
@@ -20,8 +25,8 @@
     },
     "needs_clarification": {
       "action": "advisory_then_enforce_after_eval",
-      "advisory_min_confidence": 1.01,
-      "enforce_min_confidence": 1.01
+      "advisory_min_confidence": 0.8,
+      "enforce_min_confidence": 0.95
     },
     "deterministic_invalid": {
       "action": "deterministic_only",

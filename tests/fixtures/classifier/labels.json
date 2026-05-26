@@ -3,6 +3,7 @@
   "labels": [
     "valid",
     "wrong_tool_semantic",
+    "wrong_arguments_semantic",
     "tool_not_needed",
     "needs_clarification",
     "deterministic_invalid"
@@ -10,15 +11,17 @@
   "label2id": {
     "valid": 0,
     "wrong_tool_semantic": 1,
-    "tool_not_needed": 2,
-    "needs_clarification": 3,
-    "deterministic_invalid": 4
+    "wrong_arguments_semantic": 2,
+    "tool_not_needed": 3,
+    "needs_clarification": 4,
+    "deterministic_invalid": 5
   },
   "id2label": {
     "0": "valid",
     "1": "wrong_tool_semantic",
-    "2": "tool_not_needed",
-    "3": "needs_clarification",
-    "4": "deterministic_invalid"
+    "2": "wrong_arguments_semantic",
+    "3": "tool_not_needed",
+    "4": "needs_clarification",
+    "5": "deterministic_invalid"
   }
 }

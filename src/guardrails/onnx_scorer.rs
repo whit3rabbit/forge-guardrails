@@ -534,9 +534,10 @@ mod tests {
         .expect("serializer fixture json");
         let ctx = scoring_context_from_fixture(&fixture);
         let candidate = candidate_from_fixture(&fixture);
+        let expected_logits = scorer.labels.len();
         let score = scorer.score(&ctx, &candidate).expect("score");
 
-        assert_eq!(score.logits.len(), 5);
+        assert_eq!(score.logits.len(), expected_logits);
     }
 
     fn scoring_context_from_fixture(value: &Value) -> ScoringContext {

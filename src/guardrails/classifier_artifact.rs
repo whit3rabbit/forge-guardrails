@@ -12,7 +12,7 @@ use crate::guardrails::scoring::{FinalResponseClass, ToolCallClass};
 /// Default Hugging Face model repository for the tool-call verifier.
 pub const DEFAULT_CLASSIFIER_REPO: &str = "cowWhySo/toolcall-verifier-classifier-production";
 /// Pinned Hugging Face revision used by the downloader unless overridden.
-pub const DEFAULT_CLASSIFIER_REVISION: &str = "24403e1820d5a9b2279b67766e629477dd1577ee";
+pub const DEFAULT_CLASSIFIER_REVISION: &str = "662e7783c0aa25af9d8e8b74c16ef67e8bb45f03";
 /// Expected classifier artifact schema version.
 pub const EXPECTED_ARTIFACT_SCHEMA_VERSION: &str = "toolcall-verifier-artifact/v1";
 /// Expected classifier input schema version.
@@ -241,6 +241,23 @@ impl Thresholds {
         Ok(())
     }
 
+    /// Validate threshold file fields against an already-validated label order.
+    pub fn validate_tool_call_for_labels(&self, labels: &[String]) -> AnyResult<()> {
+        self.validate_tool_call()?;
+        for label in labels {
+            let threshold = self
+                .labels
+                .get(label.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing classifier threshold for '{label}'"))?;
+            anyhow::ensure!(
+                threshold.advisory_min_confidence.is_finite()
+                    && threshold.enforce_min_confidence.is_finite(),
+                "classifier thresholds for '{label}' must be finite"
+            );
+        }
+        Ok(())
+    }
+
     /// Validate threshold file fields required by the final-response scorer.
     pub fn validate_final_response(&self) -> AnyResult<()> {
         anyhow::ensure!(
@@ -374,7 +391,7 @@ impl ClassifierArtifact {
         let labels: LabelsFile = read_json(&dir.join("labels.json"))?;
         labels.validate()?;
         let thresholds: Thresholds = read_json(&dir.join("thresholds.json"))?;
-        thresholds.validate()?;
+        thresholds.validate_tool_call_for_labels(&labels.labels)?;
         Ok(Self {
             dir,
             manifest,

@@ -292,6 +292,7 @@ fn labels_match_expected_order() {
         vec![
             "valid",
             "wrong_tool_semantic",
+            "wrong_arguments_semantic",
             "tool_not_needed",
             "needs_clarification",
             "deterministic_invalid",
@@ -373,6 +374,25 @@ fn six_label_v2_artifact_metadata_loads_from_dir() {
         .for_label(&ToolCallClass::WrongArgumentsSemantic);
     assert_eq!(threshold.advisory_min_confidence, 0.90);
     assert_eq!(threshold.enforce_min_confidence, 0.995);
+}
+
+#[test]
+fn six_label_artifact_rejects_missing_wrong_arguments_threshold() {
+    let labels = labels_file(&[
+        "valid",
+        "wrong_tool_semantic",
+        "wrong_arguments_semantic",
+        "tool_not_needed",
+        "needs_clarification",
+        "deterministic_invalid",
+    ]);
+    let dir = write_artifact_dir(labels, legacy_thresholds()).expect("artifact dir");
+
+    let err = ClassifierArtifact::from_dir(&dir).expect_err("threshold missing");
+
+    assert!(err
+        .to_string()
+        .contains("missing classifier threshold for 'wrong_arguments_semantic'"));
 }
 
 #[test]
