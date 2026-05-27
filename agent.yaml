@@ -9,6 +9,11 @@ description: >
 author: whit3rabbit
 license: MIT
 
+model:
+  preferred: openai:gpt-4o-mini
+  constraints:
+    max_tokens: 8192
+
 tags:
   - rust
   - llm

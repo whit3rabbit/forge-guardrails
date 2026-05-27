@@ -48,3 +48,4 @@ venv/
 
 # LLM Models
 *.gguf
+.gitagent/

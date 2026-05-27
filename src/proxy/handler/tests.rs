@@ -1318,9 +1318,8 @@ impl LLMClient for MockWorkflowContractClient {
         let response = self
             .responses
             .get(*calls)
-            .or_else(|| self.responses.last())
             .cloned()
-            .unwrap_or_else(|| LLMResponse::Text(TextResponse::new("")));
+            .unwrap_or_else(|| panic!("MockWorkflowContractClient exhausted at call {}", *calls));
         *calls += 1;
         Ok(response)
     }
@@ -2209,9 +2208,8 @@ impl LLMClient for MockTextSequenceClient {
         let content = self
             .responses
             .get(*calls)
-            .or_else(|| self.responses.last())
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| panic!("MockTextSequenceClient exhausted at call {}", *calls));
         *calls += 1;
         Ok(LLMResponse::Text(TextResponse::new(content)))
     }
@@ -2225,9 +2223,8 @@ impl LLMClient for MockTextSequenceClient {
         let content = self
             .responses
             .get(*calls)
-            .or_else(|| self.responses.last())
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| panic!("MockTextSequenceClient exhausted at call {}", *calls));
         *calls += 1;
         Ok(stream_from_response(LLMResponse::Text(TextResponse::new(
             content,

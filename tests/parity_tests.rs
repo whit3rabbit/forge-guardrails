@@ -497,7 +497,7 @@ async fn python_golden_inference_retry_budget_matches() {
     let case = golden_case(&fixtures, "inference_retry_budget");
     let expected = &case["expected"];
 
-    let client = TextSequenceClient::new(vec!["bad 1", "bad 2", "bad 3", "bad 4"]);
+    let client = ScriptedLlmClient::from_texts(vec!["bad 1", "bad 2", "bad 3", "bad 4"]);
     let mut messages = vec![Message::new(
         MessageRole::User,
         "start",
