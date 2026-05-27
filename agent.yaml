@@ -1,0 +1,30 @@
+spec_version: "0.1.0"
+name: forge-guardrails
+version: "0.1.0"
+description: >
+  Rust reliability middleware for guarded LLM tool-calling workflows, with
+  OpenAI-compatible and Anthropic-compatible proxy surfaces, workflow runner
+  APIs, rescue parsing, retry nudges, response validation, and context
+  management.
+author: whit3rabbit
+license: MIT
+
+tags:
+  - rust
+  - llm
+  - tool-calling
+  - guardrails
+  - openai-compatible
+  - anthropic-compatible
+  - proxy
+
+metadata:
+  role: reliability-layer
+  runtime_adapter: false
+  proxy_binary: forge-guardrails-proxy
+  openai_compatible_proxy: true
+  anthropic_compatible_proxy: true
+  workflow_runner: true
+  rescue_parsing: true
+  context_management: true
+  anyllm_routing: true

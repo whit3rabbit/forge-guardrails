@@ -13,7 +13,8 @@ use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 use crate::clients::base::ToolCall;
 use crate::guardrails::classifier_artifact::{
     ClassifierArtifact, ClassifierModelKind, FinalResponseClassifierArtifact, Thresholds,
-    DEFAULT_CLASSIFIER_REPO, FINAL_RESPONSE_SERIALIZER, NEXT_SERIALIZER,
+    DEFAULT_CLASSIFIER_REPO, DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO, FINAL_RESPONSE_SERIALIZER,
+    NEXT_SERIALIZER,
 };
 use crate::guardrails::scoring::{
     serialize_final_response_state_v1, ClassifierAction, FinalResponseClass, FinalResponseContext,
@@ -286,7 +287,7 @@ impl OnnxFinalResponseScorer {
             labels: artifact.labels.labels,
             thresholds: artifact.thresholds,
             mode: mode_override.unwrap_or_default(),
-            model_version: DEFAULT_CLASSIFIER_REPO.to_string(),
+            model_version: DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO.to_string(),
             input_schema_version: artifact.manifest.input_schema_version,
             serializer: artifact.manifest.serializer,
             session: Mutex::new(session),

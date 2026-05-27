@@ -60,6 +60,10 @@ else
   CLASSIFIER_MODEL="quantized"
 fi
 DOWNLOAD_CLASSIFIER=0
+FINAL_RESPONSE_CLASSIFIER_DIR="${FORGE_FINAL_RESPONSE_CLASSIFIER_DIR:-}"
+FINAL_RESPONSE_CLASSIFIER_MODE="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODE:-shadow}"
+FINAL_RESPONSE_CLASSIFIER_MODEL="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL:-quantized}"
+DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=0
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
 elif command -v python >/dev/null 2>&1; then
@@ -97,6 +101,14 @@ Options:
   --classifier-mode MODE    disabled|shadow|advisory|enforce (default: $CLASSIFIER_MODE)
   --classifier-model MODEL  quantized|full (default: $CLASSIFIER_MODEL)
   --download-classifier     Download classifier artifacts before running
+  --final-response-classifier-dir DIR
+                            Enable local final-response classifier artifact directory
+  --final-response-classifier-mode MODE
+                            disabled|shadow|advisory|enforce (default: $FINAL_RESPONSE_CLASSIFIER_MODE)
+  --final-response-classifier-model MODEL
+                            quantized|full (default: $FINAL_RESPONSE_CLASSIFIER_MODEL)
+  --download-final-response-classifier
+                            Download final-response classifier artifacts before running
   -h, --help                Show this help
 
 Examples:
@@ -166,6 +178,14 @@ resolve_local_path() {
 
 classifier_enabled() {
   [[ -n "$CLASSIFIER_DIR" && "$CLASSIFIER_MODE" != "disabled" ]]
+}
+
+final_response_classifier_enabled() {
+  [[ -n "$FINAL_RESPONSE_CLASSIFIER_DIR" && "$FINAL_RESPONSE_CLASSIFIER_MODE" != "disabled" ]]
+}
+
+classifier_feature_enabled() {
+  classifier_enabled || final_response_classifier_enabled
 }
 
 next_arg() {
@@ -303,25 +323,67 @@ download_classifier_artifacts() {
   log "Downloading classifier artifacts -> $CLASSIFIER_DIR"
   log "Classifier model: $CLASSIFIER_MODEL"
   (cd "$REPO_ROOT" && cargo run --features classifier --bin download-classifier -- \
+    --artifact tool-call \
     --output-dir "$output_dir" \
     --classifier-model "$CLASSIFIER_MODEL")
 }
 
+download_final_response_classifier_artifacts() {
+  local output_dir
+  command -v cargo >/dev/null 2>&1 || die "cargo is required for --download-final-response-classifier"
+
+  if [[ -z "$FINAL_RESPONSE_CLASSIFIER_DIR" ]]; then
+    FINAL_RESPONSE_CLASSIFIER_DIR="$REPO_ROOT/target/final-response-classifier-artifacts/onnx"
+  fi
+
+  FINAL_RESPONSE_CLASSIFIER_DIR="$(resolve_local_path "$FINAL_RESPONSE_CLASSIFIER_DIR")"
+  if [[ "$(basename "$FINAL_RESPONSE_CLASSIFIER_DIR")" == "onnx" ]]; then
+    output_dir="$(dirname "$FINAL_RESPONSE_CLASSIFIER_DIR")"
+  else
+    output_dir="$FINAL_RESPONSE_CLASSIFIER_DIR"
+    FINAL_RESPONSE_CLASSIFIER_DIR="$FINAL_RESPONSE_CLASSIFIER_DIR/onnx"
+  fi
+
+  phase "Download final-response classifier artifacts"
+  log "Downloading final-response classifier artifacts -> $FINAL_RESPONSE_CLASSIFIER_DIR"
+  log "Final-response classifier model: $FINAL_RESPONSE_CLASSIFIER_MODEL"
+  (cd "$REPO_ROOT" && cargo run --features classifier --bin download-classifier -- \
+    --artifact final-response \
+    --output-dir "$output_dir" \
+    --classifier-model "$FINAL_RESPONSE_CLASSIFIER_MODEL")
+}
+
 prepare_classifier_binaries() {
-  classifier_enabled || return 0
+  classifier_feature_enabled || return 0
   command -v cargo >/dev/null 2>&1 || die "cargo is required when --classifier-dir is set"
 
-  CLASSIFIER_DIR="$(canonical_dir "$CLASSIFIER_DIR")"
-  [[ -f "$CLASSIFIER_DIR/artifact_manifest.json" ]] || die "classifier artifact_manifest.json missing in $CLASSIFIER_DIR"
-  [[ -f "$CLASSIFIER_DIR/tokenizer.json" ]] || die "classifier tokenizer.json missing in $CLASSIFIER_DIR"
-  case "$CLASSIFIER_MODEL" in
-    quantized)
-      [[ -f "$CLASSIFIER_DIR/model_quantized.onnx" ]] || die "classifier model_quantized.onnx missing in $CLASSIFIER_DIR"
-      ;;
-    full)
-      [[ -f "$CLASSIFIER_DIR/model.onnx" ]] || die "classifier model.onnx missing in $CLASSIFIER_DIR"
-      ;;
-  esac
+  if classifier_enabled; then
+    CLASSIFIER_DIR="$(canonical_dir "$CLASSIFIER_DIR")"
+    [[ -f "$CLASSIFIER_DIR/artifact_manifest.json" ]] || die "classifier artifact_manifest.json missing in $CLASSIFIER_DIR"
+    [[ -f "$CLASSIFIER_DIR/tokenizer.json" ]] || die "classifier tokenizer.json missing in $CLASSIFIER_DIR"
+    case "$CLASSIFIER_MODEL" in
+      quantized)
+        [[ -f "$CLASSIFIER_DIR/model_quantized.onnx" ]] || die "classifier model_quantized.onnx missing in $CLASSIFIER_DIR"
+        ;;
+      full)
+        [[ -f "$CLASSIFIER_DIR/model.onnx" ]] || die "classifier model.onnx missing in $CLASSIFIER_DIR"
+        ;;
+    esac
+  fi
+
+  if final_response_classifier_enabled; then
+    FINAL_RESPONSE_CLASSIFIER_DIR="$(canonical_dir "$FINAL_RESPONSE_CLASSIFIER_DIR")"
+    [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/artifact_manifest.json" ]] || die "final-response classifier artifact_manifest.json missing in $FINAL_RESPONSE_CLASSIFIER_DIR"
+    [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/tokenizer.json" ]] || die "final-response classifier tokenizer.json missing in $FINAL_RESPONSE_CLASSIFIER_DIR; the current published artifact is not runnable by the Rust ONNX scorer until tokenizer.json is published"
+    case "$FINAL_RESPONSE_CLASSIFIER_MODEL" in
+      quantized)
+        [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/model_quantized.onnx" ]] || die "final-response classifier model_quantized.onnx missing in $FINAL_RESPONSE_CLASSIFIER_DIR"
+        ;;
+      full)
+        [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/model.onnx" ]] || die "final-response classifier model.onnx missing in $FINAL_RESPONSE_CLASSIFIER_DIR"
+        ;;
+    esac
+  fi
 
   phase "Build classifier-enabled binaries"
   log "Building forge-guardrails-proxy and forge-eval with classifier feature"
@@ -348,18 +410,32 @@ start_proxy() {
     --budget-mode manual
     --budget-tokens "$budget"
   )
-  if classifier_enabled; then
+  if classifier_feature_enabled; then
     env_args+=("FORGE_PROXY_BIN=$REPO_ROOT/target/debug/forge-guardrails-proxy")
     env_args+=("FORGE_CLASSIFIER_LOG=$classifier_log")
+  fi
+  if classifier_enabled; then
     proxy_args+=(
       --classifier-dir "$CLASSIFIER_DIR"
       --classifier-mode "$CLASSIFIER_MODE"
       --classifier-model "$CLASSIFIER_MODEL"
     )
     log "Classifier: enabled, mode=$CLASSIFIER_MODE, model=$CLASSIFIER_MODEL"
-    log "Classifier JSONL: $classifier_log"
   else
     log "Classifier: disabled"
+  fi
+  if final_response_classifier_enabled; then
+    proxy_args+=(
+      --final-response-classifier-dir "$FINAL_RESPONSE_CLASSIFIER_DIR"
+      --final-response-classifier-mode "$FINAL_RESPONSE_CLASSIFIER_MODE"
+      --final-response-classifier-model "$FINAL_RESPONSE_CLASSIFIER_MODEL"
+    )
+    log "Final-response classifier: enabled, mode=$FINAL_RESPONSE_CLASSIFIER_MODE, model=$FINAL_RESPONSE_CLASSIFIER_MODEL"
+  else
+    log "Final-response classifier: disabled"
+  fi
+  if classifier_feature_enabled; then
+    log "Classifier JSONL: $classifier_log"
   fi
   env "${env_args[@]}" "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" "${proxy_args[@]}" \
     >"$CURRENT_PROXY_LOG" 2>&1 &
@@ -387,11 +463,16 @@ run_rust_smoke() {
   else
     log "Classifier capture: disabled"
   fi
+  if final_response_classifier_enabled; then
+    log "Final-response classifier capture: enabled"
+  else
+    log "Final-response classifier capture: disabled"
+  fi
   if [[ "$initial_rows" -gt 0 ]]; then
     log "Rust smoke output already has ${initial_rows} rows; progress reports new rows"
   fi
   local cmd=(cargo run)
-  if classifier_enabled; then
+  if classifier_feature_enabled; then
     cmd+=(--features classifier)
   fi
   cmd+=(--bin forge-eval --)
@@ -412,6 +493,13 @@ run_rust_smoke() {
       --classifier-dir "$CLASSIFIER_DIR"
       --classifier-mode "$CLASSIFIER_MODE"
       --classifier-model "$CLASSIFIER_MODEL"
+    )
+  fi
+  if final_response_classifier_enabled; then
+    cmd+=(
+      --final-response-classifier-dir "$FINAL_RESPONSE_CLASSIFIER_DIR"
+      --final-response-classifier-mode "$FINAL_RESPONSE_CLASSIFIER_MODE"
+      --final-response-classifier-model "$FINAL_RESPONSE_CLASSIFIER_MODEL"
     )
   fi
 
@@ -532,12 +620,17 @@ run_published_compare() {
 }
 
 write_metadata() {
-  local classifier_enabled_value metadata
+  local classifier_enabled_value final_response_classifier_enabled_value metadata
   metadata="$OUTPUT_DIR/local_eval_metadata.txt"
   if classifier_enabled; then
     classifier_enabled_value=1
   else
     classifier_enabled_value=0
+  fi
+  if final_response_classifier_enabled; then
+    final_response_classifier_enabled_value=1
+  else
+    final_response_classifier_enabled_value=0
   fi
   cat >"$metadata" <<EOF
 suite=$SUITE
@@ -564,6 +657,10 @@ classifier_enabled=$classifier_enabled_value
 classifier_dir=$CLASSIFIER_DIR
 classifier_mode=$CLASSIFIER_MODE
 classifier_model=$CLASSIFIER_MODEL
+final_response_classifier_enabled=$final_response_classifier_enabled_value
+final_response_classifier_dir=$FINAL_RESPONSE_CLASSIFIER_DIR
+final_response_classifier_mode=$FINAL_RESPONSE_CLASSIFIER_MODE
+final_response_classifier_model=$FINAL_RESPONSE_CLASSIFIER_MODEL
 classifier_jsonl_pattern=$OUTPUT_DIR/proxy_classifier_*.jsonl
 EOF
   log "Metadata: $metadata"
@@ -648,6 +745,22 @@ while [[ $# -gt 0 ]]; do
       DOWNLOAD_CLASSIFIER=1
       shift
       ;;
+    --final-response-classifier-dir)
+      FINAL_RESPONSE_CLASSIFIER_DIR="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --final-response-classifier-mode)
+      FINAL_RESPONSE_CLASSIFIER_MODE="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --final-response-classifier-model)
+      FINAL_RESPONSE_CLASSIFIER_MODEL="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --download-final-response-classifier)
+      DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -700,6 +813,20 @@ case "$CLASSIFIER_MODEL" in
     die "--classifier-model must be quantized or full"
     ;;
 esac
+case "$FINAL_RESPONSE_CLASSIFIER_MODE" in
+  disabled|shadow|advisory|enforce)
+    ;;
+  *)
+    die "--final-response-classifier-mode must be disabled, shadow, advisory, or enforce"
+    ;;
+esac
+case "$FINAL_RESPONSE_CLASSIFIER_MODEL" in
+  quantized|full)
+    ;;
+  *)
+    die "--final-response-classifier-model must be quantized or full"
+    ;;
+esac
 valid_positive_int "$RUNS" || die "--runs must be a positive integer"
 valid_positive_int "$PROXY_PORT" || die "--proxy-port must be a positive integer"
 valid_positive_int "$BACKEND_PORT" || die "--backend-port must be a positive integer"
@@ -717,6 +844,9 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
 if [[ "$DOWNLOAD_CLASSIFIER" == "1" ]]; then
   download_classifier_artifacts
 fi
+if [[ "$DOWNLOAD_FINAL_RESPONSE_CLASSIFIER" == "1" ]]; then
+  download_final_response_classifier_artifacts
+fi
 prepare_classifier_binaries
 
 trap cleanup EXIT
@@ -731,6 +861,11 @@ if classifier_enabled; then
   log "Classifier: dir=$CLASSIFIER_DIR, mode=$CLASSIFIER_MODE, model=$CLASSIFIER_MODEL"
 else
   log "Classifier: disabled"
+fi
+if final_response_classifier_enabled; then
+  log "Final-response classifier: dir=$FINAL_RESPONSE_CLASSIFIER_DIR, mode=$FINAL_RESPONSE_CLASSIFIER_MODE, model=$FINAL_RESPONSE_CLASSIFIER_MODEL"
+else
+  log "Final-response classifier: disabled"
 fi
 write_metadata
 

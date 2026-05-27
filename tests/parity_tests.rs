@@ -19,6 +19,11 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod support;
+use support::ScriptedLlmClient;
+
+type ScriptedClient = ScriptedLlmClient;
+
 fn golden() -> Value {
     serde_json::from_str(include_str!("parity/fixtures/python_golden.json"))
         .expect("valid Python golden fixture")
@@ -253,133 +258,6 @@ fn first_stream_tool_names(events: &[Value]) -> Vec<Value> {
                 })
         })
         .unwrap_or_default()
-}
-
-struct TextSequenceClient {
-    responses: Vec<String>,
-    calls: AtomicI32,
-}
-
-impl TextSequenceClient {
-    fn new(responses: Vec<&str>) -> Self {
-        Self {
-            responses: responses.into_iter().map(str::to_string).collect(),
-            calls: AtomicI32::new(0),
-        }
-    }
-
-    fn calls(&self) -> i32 {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl LLMClient for TextSequenceClient {
-    fn api_format(&self) -> ApiFormat {
-        ApiFormat::OpenAI
-    }
-
-    async fn send(
-        &self,
-        _messages: Vec<Value>,
-        _tools: Option<Vec<ToolSpec>>,
-        _sampling: Option<SamplingParams>,
-    ) -> Result<LLMResponse, forge_guardrails::BackendError> {
-        let idx = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
-        let content = self
-            .responses
-            .get(idx)
-            .or_else(|| self.responses.last())
-            .cloned()
-            .unwrap_or_default();
-        Ok(LLMResponse::Text(forge_guardrails::TextResponse::new(
-            content,
-        )))
-    }
-
-    async fn send_stream(
-        &self,
-        _messages: Vec<Value>,
-        _tools: Option<Vec<ToolSpec>>,
-        _sampling: Option<SamplingParams>,
-    ) -> Result<ChunkStream, forge_guardrails::StreamError> {
-        let idx = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
-        let content = self
-            .responses
-            .get(idx)
-            .or_else(|| self.responses.last())
-            .cloned()
-            .unwrap_or_default();
-        Ok(stream_from_response(LLMResponse::Text(
-            forge_guardrails::TextResponse::new(content),
-        )))
-    }
-
-    async fn get_context_length(
-        &self,
-    ) -> Result<Option<i64>, forge_guardrails::ContextDiscoveryError> {
-        Ok(Some(4096))
-    }
-}
-
-struct ScriptedClient {
-    responses: Vec<LLMResponse>,
-    calls: AtomicI32,
-}
-
-impl ScriptedClient {
-    fn new(responses: Vec<LLMResponse>) -> Self {
-        Self {
-            responses,
-            calls: AtomicI32::new(0),
-        }
-    }
-
-    fn calls(&self) -> i32 {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl LLMClient for ScriptedClient {
-    fn api_format(&self) -> ApiFormat {
-        ApiFormat::OpenAI
-    }
-
-    async fn send(
-        &self,
-        _messages: Vec<Value>,
-        _tools: Option<Vec<ToolSpec>>,
-        _sampling: Option<SamplingParams>,
-    ) -> Result<LLMResponse, forge_guardrails::BackendError> {
-        let idx = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
-        Ok(self
-            .responses
-            .get(idx)
-            .or_else(|| self.responses.last())
-            .cloned()
-            .unwrap_or_else(|| LLMResponse::Text(forge_guardrails::TextResponse::new(""))))
-    }
-
-    async fn send_stream(
-        &self,
-        _messages: Vec<Value>,
-        _tools: Option<Vec<ToolSpec>>,
-        _sampling: Option<SamplingParams>,
-    ) -> Result<ChunkStream, forge_guardrails::StreamError> {
-        let idx = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
-        let response = self
-            .responses
-            .get(idx)
-            .or_else(|| self.responses.last())
-            .cloned()
-            .unwrap_or_else(|| LLMResponse::Text(forge_guardrails::TextResponse::new("")));
-        Ok(stream_from_response(response))
-    }
-
-    async fn get_context_length(
-        &self,
-    ) -> Result<Option<i64>, forge_guardrails::ContextDiscoveryError> {
-        Ok(Some(4096))
-    }
 }
 
 fn stream_from_response(response: LLMResponse) -> ChunkStream {

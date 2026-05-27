@@ -18,15 +18,14 @@ use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
+mod support;
+use support::{ScriptedLlmClient, StreamMode};
+
 // ---------------------------------------------------------------------------
 // Mock LLM Client
 // ---------------------------------------------------------------------------
 
-/// A mock LLM client that returns pre-programmed responses in sequence.
-struct MockClient {
-    responses: Vec<LLMResponse>,
-    call_count: AtomicI32,
-}
+type MockClient = ScriptedLlmClient;
 
 struct BackendErrorClient {
     call_count: AtomicI32,
@@ -155,58 +154,13 @@ impl LLMClient for NoFinalStreamClient {
     }
 }
 
-impl MockClient {
-    fn new(responses: Vec<LLMResponse>) -> Self {
-        Self {
-            responses,
-            call_count: AtomicI32::new(0),
-        }
-    }
-}
-
-impl LLMClient for MockClient {
-    fn api_format(&self) -> ApiFormat {
-        ApiFormat::OpenAI
-    }
-
-    async fn send(
-        &self,
-        _messages: Vec<Value>,
-        _tools: Option<Vec<ToolSpec>>,
-        _sampling: Option<SamplingParams>,
-    ) -> Result<LLMResponse, forge_guardrails::BackendError> {
-        let idx = self.call_count.fetch_add(1, AtomicOrdering::SeqCst) as usize;
-        if idx < self.responses.len() {
-            Ok(self.responses[idx].clone())
-        } else {
-            Ok(self.responses.last().cloned().unwrap_or_else(|| {
-                LLMResponse::Text(forge_guardrails::TextResponse::new("no more responses"))
-            }))
-        }
-    }
-
-    async fn send_stream(
-        &self,
-        _messages: Vec<Value>,
-        _tools: Option<Vec<ToolSpec>>,
-        _sampling: Option<SamplingParams>,
-    ) -> Result<ChunkStream, forge_guardrails::StreamError> {
-        // Not used in these tests, but required by trait.
-        Err(forge_guardrails::StreamError::new(
-            "not implemented in mock",
-        ))
-    }
-
-    async fn get_context_length(
-        &self,
-    ) -> Result<Option<i64>, forge_guardrails::ContextDiscoveryError> {
-        Ok(Some(4096))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Helper builders
 // ---------------------------------------------------------------------------
+
+fn mock_client(responses: Vec<LLMResponse>) -> MockClient {
+    ScriptedLlmClient::new(responses).with_stream_mode(StreamMode::Unsupported)
+}
 
 fn make_tool_call(tool: &str, args: IndexMap<String, Value>) -> LLMResponse {
     LLMResponse::ToolCalls(vec![forge_guardrails::ToolCall::new(tool, args)])
@@ -307,7 +261,7 @@ async fn ts001_simple_two_step_workflow() {
         Value::String("final answer".to_string()),
     );
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("search", args1),
         make_tool_call("respond", args2),
     ]);
@@ -340,7 +294,7 @@ async fn final_response_scorer_retries_terminal_answer_before_execution() {
     let mut good_args = IndexMap::new();
     good_args.insert("message".to_string(), Value::String("good".to_string()));
 
-    let client = Arc::new(MockClient::new(vec![
+    let client = Arc::new(mock_client(vec![
         make_tool_call("search", search_args),
         make_tool_call("respond", bad_args),
         make_tool_call("respond", good_args),
@@ -366,7 +320,7 @@ async fn final_response_scorer_retries_terminal_answer_before_execution() {
         .await;
 
     assert_eq!(result.expect("ok"), Value::String("good".to_string()));
-    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+    assert_eq!(client.calls(), 3);
     assert!(collected
         .lock()
         .expect("messages lock")
@@ -385,7 +339,7 @@ async fn ts002_text_response_retry() {
     let mut args2 = IndexMap::new();
     args2.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_text_response("I think you should search for test"), // text, triggers retry
         make_tool_call("search", args1),                          // valid
         make_tool_call("respond", args2),                         // terminal
@@ -413,7 +367,7 @@ async fn empty_tool_batch_retried_without_noop_execution() {
     let mut respond_args = IndexMap::new();
     respond_args.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         LLMResponse::ToolCalls(Vec::new()),
         make_tool_call("search", search_args),
         make_tool_call("respond", respond_args),
@@ -463,7 +417,7 @@ async fn invalid_tool_arguments_retry_before_execution() {
     let mut respond_args = IndexMap::new();
     respond_args.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = Arc::new(MockClient::new(vec![
+    let client = Arc::new(mock_client(vec![
         make_tool_call("search", IndexMap::new()),
         make_tool_call("search", search_args),
         make_tool_call("respond", respond_args),
@@ -488,7 +442,7 @@ async fn invalid_tool_arguments_retry_before_execution() {
         result.expect("workflow ok"),
         Value::String("done".to_string())
     );
-    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+    assert_eq!(client.calls(), 3);
     let messages = collected.lock().expect("lock");
     let invalid_result = messages
         .iter()
@@ -518,7 +472,7 @@ async fn mixed_terminal_batch_retried_without_executing_partial_work() {
     let mut final_respond_args = IndexMap::new();
     final_respond_args.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = Arc::new(MockClient::new(vec![
+    let client = Arc::new(mock_client(vec![
         LLMResponse::ToolCalls(vec![
             forge_guardrails::ToolCall::new("search", search_args.clone()),
             forge_guardrails::ToolCall::new("respond", premature_respond_args),
@@ -546,7 +500,7 @@ async fn mixed_terminal_batch_retried_without_executing_partial_work() {
         result.expect("workflow ok"),
         Value::String("done".to_string())
     );
-    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+    assert_eq!(client.calls(), 3);
 
     let messages = collected.lock().expect("lock");
     let retry_results: Vec<&Message> = messages
@@ -597,7 +551,7 @@ async fn ts003_premature_terminal_blocked() {
     let mut args3 = IndexMap::new();
     args3.insert("message".to_string(), Value::String("final".to_string()));
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("respond", args1), // premature
         make_tool_call("search", args2),  // required step
         make_tool_call("respond", args3), // terminal after steps
@@ -631,7 +585,7 @@ async fn ts004_tool_error_feedback() {
     // we can't have state. Use a workflow that always succeeds for search.
     // Instead, test that resolution error path produces the right error prefix.
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("search", args1),
         make_tool_call("search", args2),
         make_tool_call("respond", args3),
@@ -680,7 +634,7 @@ async fn ts004_tool_error_feedback() {
 async fn ts005_streaming_mode_flag() {
     // Verify runner accepts stream=true. Full streaming requires a streaming
     // mock, so this test verifies the flag is passed through.
-    let client = MockClient::new(vec![]);
+    let client = mock_client(vec![]);
     let _runner = WorkflowRunner::new(
         Arc::new(client),
         make_context_manager(),
@@ -705,7 +659,7 @@ async fn ts006_cancellation() {
     let mut args1 = IndexMap::new();
     args1.insert("query".to_string(), Value::String("test".to_string()));
 
-    let client = MockClient::new(vec![make_tool_call("search", args1)]);
+    let client = mock_client(vec![make_tool_call("search", args1)]);
     let runner = make_runner(client);
     let workflow = make_simple_workflow();
 
@@ -742,7 +696,7 @@ async fn ts007_initial_messages_seed() {
         Value::String("seeded result".to_string()),
     );
 
-    let client = MockClient::new(vec![make_tool_call("respond", args1)]);
+    let client = mock_client(vec![make_tool_call("respond", args1)]);
 
     // Workflow with no required steps
     let mut tools: IndexMap<String, ToolDef> = IndexMap::new();
@@ -810,7 +764,7 @@ async fn ts008_resolution_error_soft() {
     let mut args2 = IndexMap::new();
     args2.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("search", args1),  // fails with resolution error
         make_tool_call("respond", args2), // terminal skips search requirement
     ]);
@@ -918,7 +872,7 @@ async fn ts011_unknown_tool_nudge() {
     let mut args_resp = IndexMap::new();
     args_resp.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("nonexistent_tool", args_bad), // unknown
         make_tool_call("search", args_good),          // valid
         make_tool_call("respond", args_resp),         // terminal
@@ -946,7 +900,7 @@ async fn ts012_retries_consume_iterations() {
     args2.insert("message".to_string(), Value::String("done".to_string()));
 
     // Many text responses before valid calls, exhausting iterations.
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_text_response("thinking..."),
         make_text_response("still thinking..."),
         make_text_response("more thinking..."),
@@ -975,7 +929,7 @@ async fn ts012_retries_consume_iterations() {
 
 #[tokio::test]
 async fn inference_retry_budget_raises_tool_call_error() {
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_text_response("bad 1"),
         make_text_response("bad 2"),
         make_text_response("bad 3"),
@@ -1014,7 +968,7 @@ async fn inference_retry_budget_raises_tool_call_error() {
     .await;
 
     assert!(matches!(result, Err(ForgeError::ToolCall(_))));
-    assert_eq!(client.call_count.load(AtomicOrdering::SeqCst), 3);
+    assert_eq!(client.calls(), 3);
 }
 
 #[tokio::test]
@@ -1188,7 +1142,7 @@ async fn ts014_multiple_terminal_tools() {
         Value::String("summary result".to_string()),
     );
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("search", args1),
         make_tool_call("summarize", args2), // Second terminal tool
     ]);
@@ -1258,7 +1212,7 @@ async fn terminal_mixed_batch_rejected_when_no_steps_pending() {
         forge_guardrails::ToolCall::new("respond", terminal_args.clone()),
         forge_guardrails::ToolCall::new("side_effect", IndexMap::new()),
     ]);
-    let client = MockClient::new(vec![mixed_batch, make_tool_call("respond", terminal_args)]);
+    let client = mock_client(vec![mixed_batch, make_tool_call("respond", terminal_args)]);
     let runner = make_runner(client);
 
     let result = runner.run(&workflow, "finish", None, None, None).await;
@@ -1291,7 +1245,7 @@ async fn ts016_custom_retry_nudge_string() {
     let mut args2 = IndexMap::new();
     args2.insert("message".to_string(), Value::String("done".to_string()));
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_text_response("I will help you"), // triggers retry
         make_tool_call("search", args1),
         make_tool_call("respond", args2),
@@ -1398,7 +1352,7 @@ async fn test_protocol_pairing_invariant() {
         guard.push(msg.clone());
     });
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("search", args1),
         make_tool_call("respond", args2),
     ]);
@@ -1470,7 +1424,7 @@ async fn test_step_blocked_transcript() {
         guard.push(msg.clone());
     });
 
-    let client = MockClient::new(vec![
+    let client = mock_client(vec![
         make_tool_call("respond", args1),
         make_tool_call("search", args2),
         make_tool_call("respond", args3),
