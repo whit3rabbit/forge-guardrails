@@ -308,9 +308,11 @@ async fn run_inference_with_options_inner<C: LLMClient>(
     } else {
         Some(tool_specs.to_vec())
     };
+    let mut next_options = options;
 
     while attempts < max {
         attempts += 1;
+        let mut request_options = next_options.clone();
 
         // Compact context.
         let compacted = context_manager
@@ -319,10 +321,16 @@ async fn run_inference_with_options_inner<C: LLMClient>(
         if let Some(new_msgs) = compacted {
             messages.clear();
             messages.extend(new_msgs);
+            request_options.inbound_anthropic_body = None;
+            request_options.initial_openai_messages = None;
         }
 
         // Check context thresholds and inject transient warning.
         let transient_warning = context_manager.check_thresholds(messages).await;
+        if transient_warning.is_some() {
+            request_options.inbound_anthropic_body = None;
+            request_options.initial_openai_messages = None;
+        }
 
         // Fold and serialize.
         let mut wire = fold_and_serialize(messages, api_format);
@@ -339,7 +347,8 @@ async fn run_inference_with_options_inner<C: LLMClient>(
             new_messages.push(warning_msg);
         }
 
-        let request_options = options.clone();
+        next_options.inbound_anthropic_body = None;
+        next_options.initial_openai_messages = None;
 
         // Send to LLM.
         let response = if stream {

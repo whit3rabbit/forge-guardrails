@@ -21,11 +21,6 @@ impl AnthropicClient {
                 }
                 obj.entry("model".to_string())
                     .or_insert_with(|| Value::String(self.model.clone()));
-                patch_raw_anthropic_transcript(
-                    obj,
-                    &messages,
-                    options.initial_openai_messages.as_deref(),
-                );
                 if let Some(tool_specs) = tools.as_deref().filter(|tools| !tools.is_empty()) {
                     merge_guarded_tools_into_raw_body(obj, tool_specs);
                 }
@@ -48,53 +43,6 @@ impl AnthropicClient {
         }
         body
     }
-}
-
-fn patch_raw_anthropic_transcript(
-    obj: &mut serde_json::Map<String, Value>,
-    messages: &[Value],
-    initial_openai_messages: Option<&[Value]>,
-) {
-    let Some(initial) = initial_openai_messages else {
-        return;
-    };
-    if messages.len() >= initial.len() && &messages[..initial.len()] == initial {
-        let tail = &messages[initial.len()..];
-        if tail.is_empty() || append_anthropic_retry_tail(obj, tail) {
-            return;
-        }
-    }
-
-    let (system, converted_messages) = convert::convert_messages(messages);
-    match system {
-        Some(system) => {
-            obj.insert("system".to_string(), system);
-        }
-        None => {
-            obj.remove("system");
-        }
-    }
-    obj.insert("messages".to_string(), Value::Array(converted_messages));
-}
-
-fn append_anthropic_retry_tail(
-    obj: &mut serde_json::Map<String, Value>,
-    tail_messages: &[Value],
-) -> bool {
-    let (tail_system, converted_tail) = convert::convert_messages(tail_messages);
-    if tail_system.is_some() {
-        return false;
-    }
-    if converted_tail.is_empty() {
-        return true;
-    }
-    match obj.get_mut("messages").and_then(Value::as_array_mut) {
-        Some(existing) => existing.extend(converted_tail),
-        None => {
-            obj.insert("messages".to_string(), Value::Array(converted_tail));
-        }
-    }
-    true
 }
 
 fn merge_guarded_tools_into_raw_body(obj: &mut serde_json::Map<String, Value>, tools: &[ToolSpec]) {
