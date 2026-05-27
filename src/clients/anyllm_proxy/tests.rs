@@ -75,8 +75,7 @@ fn stream_tool_call_index_rejects_sparse_or_oversized_index() {
     let sparse = checked_stream_tool_call_index(2, 0).unwrap_err();
     assert!(sparse.to_string().contains("non-contiguous"));
 
-    let oversized =
-        checked_stream_tool_call_index(MAX_STREAM_TOOL_CALLS as u32, 0).unwrap_err();
+    let oversized = checked_stream_tool_call_index(MAX_STREAM_TOOL_CALLS as u32, 0).unwrap_err();
     assert!(oversized.to_string().contains("exceeds"));
 }
 

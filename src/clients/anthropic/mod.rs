@@ -88,5 +88,4 @@ impl AnthropicClient {
             .ok()
             .and_then(|guard| guard.clone())
     }
-
 }

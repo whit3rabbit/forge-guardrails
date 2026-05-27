@@ -25,7 +25,6 @@ impl AnthropicClient {
             *guard = anthropic_usage_details(cache_creation, cache_read);
         }
     }
-
 }
 
 pub(super) fn usage_i64(usage: Option<&Value>, key: &str) -> Option<i64> {

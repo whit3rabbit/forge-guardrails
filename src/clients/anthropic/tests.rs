@@ -5,9 +5,9 @@ use crate::clients::base::{
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
-use serde_json::Value;
 use futures_util::StreamExt;
 use serde_json::json;
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn make_tool_spec(name: &str, desc: &str, props: &[(&str, &str)]) -> ToolSpec {

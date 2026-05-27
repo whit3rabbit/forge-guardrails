@@ -48,7 +48,9 @@ pub(super) fn usage_details_from_openai_usage(
     }
 }
 
-pub(super) fn usage_details_from_openai_usage_value(usage: Option<&Value>) -> Option<LLMUsageDetails> {
+pub(super) fn usage_details_from_openai_usage_value(
+    usage: Option<&Value>,
+) -> Option<LLMUsageDetails> {
     let cached = usage
         .and_then(|u| u.get("prompt_tokens_details"))
         .and_then(cached_tokens_from_details)
