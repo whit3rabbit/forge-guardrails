@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_anthropic_body_is_preserved_after_retry_mutates_transcript() {
+    async fn raw_anthropic_body_is_cleared_after_clean_attempt() {
         let client = RetryRecordingClient::new();
         let raw = json!({
             "model": "claude-3",
@@ -795,6 +795,6 @@ mod tests {
 
         assert_eq!(result.attempts, 2);
         let raw_bodies = client.raw_bodies.lock().unwrap().clone();
-        assert_eq!(raw_bodies, vec![Some(raw.clone()), Some(raw)]);
+        assert_eq!(raw_bodies, vec![Some(raw), None]);
     }
 }

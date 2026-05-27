@@ -171,6 +171,7 @@ Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as th
 
 - **Managed mode** spins up the backend for you. Supported backends: `llamaserver`, `llamafile`, `ollama` (use `--gguf` for GGUF-based backends, or `--model` for Ollama).
 - **External mode** is backend-agnostic — forge talks `POST /v1/chat/completions` to whatever you point `--backend-url` at, as long as it speaks the OpenAI schema. Tool calls must come back in OpenAI `tool_calls` format or in one of forge's rescue-parsed formats (Mistral `[TOOL_CALLS]`, Qwen `<tool_call>` XML, fenced JSON).
+- **Anthropic-compatible inbound** uses `anyllm_translate` for Anthropic/OpenAI conversion by default. With `--backend-protocol anthropic`, external mode sends Anthropic Messages requests to an Anthropic-shape downstream. Path 1 preserves block-level `cache_control` only on clean calls; retries, compaction, and context warnings rebuild the request and drop block metadata. Path 2 drops Anthropic-only block metadata at the OpenAI boundary.
 - **Env-routed mode** remains a Rust extension for Docker/provider routing. If neither `--backend-url` nor `--backend` is passed, the binary uses existing anyllm/provider env vars such as `PROXY_CONFIG`, `OPENAI_BASE_URL`, and `BACKEND`.
 
 This proxy does not enforce inbound authentication. Do not expose it publicly without a reverse proxy, network policy, or another auth layer.
@@ -553,7 +554,7 @@ let client = AnyLlmProxyClient::new("gpt-4o-mini")
     .with_context_length(128_000);
 ```
 
-Both clients expose provider observability through `LLMClient::last_call_info()`.
+Both clients expose provider observability through `LLMClient::last_call_info()`. Cost estimates, routing metadata, cache state, and rate-limit details come from anyllm runtime or sidecar metadata; Forge does not maintain separate pricing logic.
 
 ## Testing Scope
 

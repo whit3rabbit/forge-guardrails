@@ -102,6 +102,18 @@ Anthropic is a cloud API baseline. It has no local server smoke test; auth and
 network failures surface on first inference. Keep it out of the default local
 parity gate.
 
+The proxy accepts Anthropic Messages requests at `POST /v1/messages`. The
+default external and managed paths translate Anthropic inbound requests to an
+OpenAI-compatible backend with `anyllm_translate`, then translate responses
+back to Anthropic shape. Use `--backend-protocol anthropic` only in external
+mode when the downstream already speaks Anthropic Messages.
+
+`cache_control` is block-level Anthropic metadata. It is preserved on clean
+Path 1 calls to an Anthropic-shape downstream. If Forge retries, compacts, or
+injects a context warning, the retry request is rebuilt from Forge's internal
+messages and block-level metadata is dropped. Path 2 always drops
+Anthropic-only block metadata at the OpenAI protocol boundary.
+
 ## OpenAI-Compatible Proxy
 
 Use the proxy path to verify client-visible behavior:

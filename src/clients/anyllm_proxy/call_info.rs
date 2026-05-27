@@ -98,11 +98,13 @@ pub(super) fn estimate_cost_usd(
 ) -> Option<f64> {
     let model = model?;
     let usage = usage?;
-    let (input_cost, output_cost) = ::anyllm_proxy::cost::pricing().price_for_model(model)?;
-    Some(
-        input_cost * f64::from(usage.prompt_tokens)
-            + output_cost * f64::from(usage.completion_tokens),
-    )
+    let pricing = ::anyllm_proxy::cost::pricing();
+    pricing.price_for_model(model)?;
+    Some(pricing.cost_for_usage(
+        model,
+        usage.prompt_tokens as u64,
+        usage.completion_tokens as u64,
+    ))
 }
 
 pub(super) fn observe_stream_call_info(

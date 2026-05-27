@@ -80,7 +80,16 @@ let client = LlamafileClient::new("path/to/model.gguf")
     .with_base_url("http://localhost:8081/v1");
 ```
 
-**Best for:** Adding guardrails to existing tools without modifying them. Works with any tool that speaks the OpenAI-compatible API — no per-client wrappers needed.
+Anthropic-compatible clients use the proxy root, not `/v1`; Forge serves their
+Messages API calls at `POST /v1/messages`. By default, Anthropic inbound is
+translated through `anyllm_translate` to an OpenAI-compatible backend. External
+mode with `--backend-protocol anthropic` sends Anthropic shape to the
+downstream directly. That Path 1 preserves `cache_control` only on clean calls;
+Forge retries, compaction, and context warnings rebuild the request and drop
+block-level Anthropic metadata. Path 2 drops Anthropic-only block metadata at
+the OpenAI boundary.
+
+**Best for:** Adding guardrails to existing tools without modifying them. Works with any tool that speaks the OpenAI-compatible API or Anthropic Messages API — no per-client wrappers needed.
 
 **Reliability note:** The proxy automatically injects a synthetic `respond` tool when tools are present in the request. The model calls `respond(message="...")` instead of producing bare text, keeping it in tool-calling mode where forge's full guardrail stack applies. The `respond` call is stripped from the outbound response — the client sees a normal text response and never knows the tool exists. Client tools named `respond` are rejected because the name is reserved by forge. Guiding the model to a tool is a must. See [ADR-013](decisions/013-text-response-intent.md) for the full analysis.
 

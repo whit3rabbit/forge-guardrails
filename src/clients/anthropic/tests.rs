@@ -696,7 +696,7 @@ impl LLMClient for RetryBodyRecordingAnthropicClient {
 }
 
 #[tokio::test]
-async fn raw_anthropic_body_preserves_annotated_prefix_after_retry() {
+async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
     let raw = json!({
         "model": "claude-request",
         "max_tokens": 128,
@@ -770,12 +770,15 @@ async fn raw_anthropic_body_preserves_annotated_prefix_after_retry() {
     assert!(bodies[0]["tools"]
         .as_array()
         .is_some_and(|tools| !tools.is_empty()));
-    assert_eq!(bodies[1]["metadata"]["user_id"], "user-123");
-    assert_eq!(bodies[1]["system"][0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(
-        bodies[1]["messages"][0]["content"][0]["cache_control"]["type"],
-        "ephemeral"
-    );
+    assert_eq!(bodies[1]["model"], "fallback-model");
+    assert!(bodies[1].get("metadata").is_none());
+    assert!(bodies[1].get("system").is_none());
+    assert!(!serde_json::to_string(&bodies[1])
+        .expect("body json")
+        .contains("cache_control"));
+    assert!(bodies[1]["tools"]
+        .as_array()
+        .is_some_and(|tools| !tools.is_empty()));
     assert!(
         bodies[1]["messages"].as_array().expect("messages").len()
             > raw["messages"].as_array().expect("raw messages").len()

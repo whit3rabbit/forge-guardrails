@@ -80,18 +80,22 @@ fn stream_tool_call_index_rejects_sparse_or_oversized_index() {
 }
 
 #[test]
-fn estimate_cost_usd_uses_per_token_pricing_units() {
+fn estimate_cost_usd_delegates_to_anyllm_pricing() {
     let usage = anyllm_translate::openai::ChatUsage {
-        prompt_tokens: 1_000_000,
-        completion_tokens: 1_000_000,
-        total_tokens: 2_000_000,
+        prompt_tokens: 12_345,
+        completion_tokens: 678,
+        total_tokens: 13_023,
         ..Default::default()
     };
+    let model = "claude-3-haiku-20240307";
+    let pricing = ::anyllm_proxy::cost::pricing();
 
-    let cost = estimate_cost_usd(Some("claude-3-haiku-20240307"), Some(&usage))
-        .expect("known model has pricing");
+    let cost = estimate_cost_usd(Some(model), Some(&usage)).expect("known model has pricing");
+    let expected = pricing.cost_for_usage(
+        model,
+        usage.prompt_tokens as u64,
+        usage.completion_tokens as u64,
+    );
 
-    // anyllm_proxy::cost::price_for_model returns USD per token. For
-    // Claude 3 Haiku this is $0.25/M input and $1.25/M output.
-    assert!((cost - 1.50).abs() < 1e-10);
+    assert_eq!(cost, expected);
 }
