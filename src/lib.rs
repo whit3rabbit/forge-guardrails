@@ -2,6 +2,9 @@
 
 #![warn(missing_docs)]
 
+/// Feature-gated Hugging Face classifier artifact download helpers.
+#[cfg(feature = "classifier")]
+pub mod classifier_download;
 /// LLM backend client adapters and traits.
 pub mod clients;
 /// Context budget tracking and token compaction strategies.
@@ -32,6 +35,14 @@ pub use core::workflow;
 pub use prompts::nudges;
 pub use tools::respond;
 
+#[cfg(feature = "classifier")]
+pub use classifier_download::{
+    classifier_artifact_needs_download, default_cached_classifier_artifact_dir,
+    default_classifier_cache_root, default_tool_call_classifier_artifact_dir,
+    download_classifier_artifact_tree, ensure_classifier_artifact_dir, required_files_for_model,
+    runtime_required_files, validate_classifier_artifact_dir, ClassifierArtifactKind,
+    ClassifierDownloadPlan, ClassifierDownloadReport,
+};
 pub use clients::{
     apply_sampling_defaults, format_tool, get_sampling_defaults, AnthropicClient,
     AnyLlmProxyClient, AnyLlmRuntimeClient, ApiFormat, ChunkStream, ChunkType, LLMCallInfo,

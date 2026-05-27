@@ -1,15 +1,31 @@
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
 use tokio::sync::Mutex;
 
-use super::{HTTPServer, MAX_BODY_SIZE};
+use super::HTTPServer;
 use crate::clients::base::LLMClient;
 use crate::context::manager::ContextManager;
-use crate::proxy::handler::{
-    self, AnthropicHandlerError, AnthropicHandlerResult, HandlerError, HandlerResult,
-};
+use crate::proxy::handler;
 use crate::proxy::response;
+
+mod request_http {
+    use anyllm_translate::anthropic::MessageCreateRequest;
+
+    use crate::proxy::handler::{
+        AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HandlerError,
+        HandlerResult, OpenAiEventStream,
+    };
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/proxy/request_http.rs"
+    ));
+}
+
+#[cfg(test)]
+pub(super) use request_http::MAX_BODY_SIZE;
 
 impl HTTPServer {
     /// Handle an incoming HTTP request.
@@ -78,36 +94,10 @@ impl HTTPServer {
         client: &Arc<C>,
         context_manager: &Arc<Mutex<ContextManager>>,
     ) -> (u16, &'static str, String) {
-        if body.len() > MAX_BODY_SIZE {
-            return (
-                413,
-                "application/json",
-                json!({"error": "request too large"}).to_string(),
-            );
-        }
-
-        let raw: Value = match serde_json::from_slice(body) {
-            Ok(v) => v,
-            Err(e) => {
-                return (
-                    400,
-                    "application/json",
-                    json!({"error": e.to_string()}).to_string(),
-                );
-            }
+        let request = match request_http::parse_anthropic_body(body) {
+            Ok(request) => request,
+            Err(response) => return response.into_parts(),
         };
-
-        let parsed: anyllm_translate::anthropic::MessageCreateRequest =
-            match serde_json::from_value(raw.clone()) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (
-                        400,
-                        "application/json",
-                        json!({"error": e.to_string()}).to_string(),
-                    );
-                }
-            };
 
         let _guard = if self.serialize_requests {
             Some(self.request_mutex.lock().await)
@@ -115,35 +105,23 @@ impl HTTPServer {
             None
         };
 
-        match handler::handle_anthropic_messages(
-            &parsed,
-            &raw,
-            client,
-            context_manager,
-            self.max_retries,
-            self.rescue_enabled,
-        )
-        .await
-        {
-            Ok(AnthropicHandlerResult::Response(v)) => (200, "application/json", v.to_string()),
-            Ok(AnthropicHandlerResult::StreamBody(events)) => {
+        match request_http::anthropic_handler_http_result(
+            handler::handle_anthropic_messages(
+                &request.parsed,
+                &request.raw,
+                client,
+                context_manager,
+                self.max_retries,
+                self.rescue_enabled,
+            )
+            .await,
+        ) {
+            request_http::AnthropicHttpResult::Json(response) => response.into_parts(),
+            request_http::AnthropicHttpResult::Stream(events) => {
                 match response::collect_anthropic_sse_body(events).await {
                     Ok(body) => (200, "text/event-stream", body),
-                    Err(e) => (
-                        502,
-                        "application/json",
-                        json!({"error": e.to_string()}).to_string(),
-                    ),
+                    Err(e) => request_http::upstream_error_response(e.to_string()).into_parts(),
                 }
-            }
-            Err(AnthropicHandlerError::BadRequest(e)) => {
-                (400, "application/json", json!({"error": e}).to_string())
-            }
-            Err(AnthropicHandlerError::Upstream(e)) => {
-                (502, "application/json", json!({"error": e}).to_string())
-            }
-            Err(AnthropicHandlerError::Internal(e)) => {
-                (500, "application/json", json!({"error": e}).to_string())
             }
         }
     }
@@ -154,36 +132,10 @@ impl HTTPServer {
         client: &Arc<C>,
         context_manager: &Arc<Mutex<ContextManager>>,
     ) -> axum::response::Response {
-        if body.len() > MAX_BODY_SIZE {
-            return response::build_response(
-                413,
-                "application/json",
-                json!({"error": "request too large"}).to_string(),
-            );
-        }
-
-        let raw: Value = match serde_json::from_slice(body) {
-            Ok(v) => v,
-            Err(e) => {
-                return response::build_response(
-                    400,
-                    "application/json",
-                    json!({"error": e.to_string()}).to_string(),
-                );
-            }
+        let request = match request_http::parse_anthropic_body(body) {
+            Ok(request) => request,
+            Err(response) => return build_http_response(response),
         };
-
-        let parsed: anyllm_translate::anthropic::MessageCreateRequest =
-            match serde_json::from_value(raw.clone()) {
-                Ok(v) => v,
-                Err(e) => {
-                    return response::build_response(
-                        400,
-                        "application/json",
-                        json!({"error": e.to_string()}).to_string(),
-                    );
-                }
-            };
 
         let guard = if self.serialize_requests {
             Some(self.request_mutex.clone().lock_owned().await)
@@ -191,30 +143,20 @@ impl HTTPServer {
             None
         };
 
-        match handler::handle_anthropic_messages(
-            &parsed,
-            &raw,
-            client,
-            context_manager,
-            self.max_retries,
-            self.rescue_enabled,
-        )
-        .await
-        {
-            Ok(AnthropicHandlerResult::Response(v)) => {
-                response::build_response(200, "application/json", v.to_string())
-            }
-            Ok(AnthropicHandlerResult::StreamBody(events)) => {
+        match request_http::anthropic_handler_http_result(
+            handler::handle_anthropic_messages(
+                &request.parsed,
+                &request.raw,
+                client,
+                context_manager,
+                self.max_retries,
+                self.rescue_enabled,
+            )
+            .await,
+        ) {
+            request_http::AnthropicHttpResult::Json(response) => build_http_response(response),
+            request_http::AnthropicHttpResult::Stream(events) => {
                 response::build_anthropic_sse_response(events, guard)
-            }
-            Err(AnthropicHandlerError::BadRequest(e)) => {
-                response::build_response(400, "application/json", json!({"error": e}).to_string())
-            }
-            Err(AnthropicHandlerError::Upstream(e)) => {
-                response::build_response(502, "application/json", json!({"error": e}).to_string())
-            }
-            Err(AnthropicHandlerError::Internal(e)) => {
-                response::build_response(500, "application/json", json!({"error": e}).to_string())
             }
         }
     }
@@ -227,23 +169,9 @@ impl HTTPServer {
         client: &Arc<C>,
         context_manager: &Arc<Mutex<ContextManager>>,
     ) -> (u16, &'static str, String) {
-        if body.len() > MAX_BODY_SIZE {
-            return (
-                413,
-                "application/json",
-                json!({"error": "request too large"}).to_string(),
-            );
-        }
-
-        let parsed: Value = match serde_json::from_slice(body) {
-            Ok(v) => v,
-            Err(e) => {
-                return (
-                    400,
-                    "application/json",
-                    json!({"error": e.to_string()}).to_string(),
-                );
-            }
+        let parsed = match request_http::parse_openai_body(body) {
+            Ok(parsed) => parsed,
+            Err(response) => return response.into_parts(),
         };
 
         let _guard = if self.serialize_requests {
@@ -252,33 +180,22 @@ impl HTTPServer {
             None
         };
 
-        match handler::handle_chat_completions(
-            &parsed,
-            client,
-            context_manager,
-            self.max_retries,
-            self.rescue_enabled,
-        )
-        .await
-        {
-            Ok(result) => match result {
-                HandlerResult::Response(v) => (200, "application/json", v.to_string()),
-                HandlerResult::StreamBody(events) => {
-                    match response::collect_openai_sse_body(events).await {
-                        Ok(body) => (200, "text/event-stream", body),
-                        Err(e) => (
-                            502,
-                            "application/json",
-                            json!({"error": e.to_string()}).to_string(),
-                        ),
-                    }
+        match request_http::openai_handler_http_result(
+            handler::handle_chat_completions(
+                &parsed,
+                client,
+                context_manager,
+                self.max_retries,
+                self.rescue_enabled,
+            )
+            .await,
+        ) {
+            request_http::OpenAiHttpResult::Json(response) => response.into_parts(),
+            request_http::OpenAiHttpResult::Stream(events) => {
+                match response::collect_openai_sse_body(events).await {
+                    Ok(body) => (200, "text/event-stream", body),
+                    Err(e) => request_http::upstream_error_response(e.to_string()).into_parts(),
                 }
-            },
-            Err(HandlerError::BadRequest(e)) => {
-                (400, "application/json", json!({"error": e}).to_string())
-            }
-            Err(HandlerError::Upstream(e)) => {
-                (502, "application/json", json!({"error": e}).to_string())
             }
         }
     }
@@ -289,23 +206,9 @@ impl HTTPServer {
         client: &Arc<C>,
         context_manager: &Arc<Mutex<ContextManager>>,
     ) -> axum::response::Response {
-        if body.len() > MAX_BODY_SIZE {
-            return response::build_response(
-                413,
-                "application/json",
-                json!({"error": "request too large"}).to_string(),
-            );
-        }
-
-        let parsed: Value = match serde_json::from_slice(body) {
-            Ok(v) => v,
-            Err(e) => {
-                return response::build_response(
-                    400,
-                    "application/json",
-                    json!({"error": e.to_string()}).to_string(),
-                );
-            }
+        let parsed = match request_http::parse_openai_body(body) {
+            Ok(parsed) => parsed,
+            Err(response) => return build_http_response(response),
         };
 
         let guard = if self.serialize_requests {
@@ -314,27 +217,25 @@ impl HTTPServer {
             None
         };
 
-        match handler::handle_chat_completions(
-            &parsed,
-            client,
-            context_manager,
-            self.max_retries,
-            self.rescue_enabled,
-        )
-        .await
-        {
-            Ok(HandlerResult::Response(v)) => {
-                response::build_response(200, "application/json", v.to_string())
-            }
-            Ok(HandlerResult::StreamBody(events)) => {
+        match request_http::openai_handler_http_result(
+            handler::handle_chat_completions(
+                &parsed,
+                client,
+                context_manager,
+                self.max_retries,
+                self.rescue_enabled,
+            )
+            .await,
+        ) {
+            request_http::OpenAiHttpResult::Json(response) => build_http_response(response),
+            request_http::OpenAiHttpResult::Stream(events) => {
                 response::build_openai_sse_response(events, guard)
-            }
-            Err(HandlerError::BadRequest(e)) => {
-                response::build_response(400, "application/json", json!({"error": e}).to_string())
-            }
-            Err(HandlerError::Upstream(e)) => {
-                response::build_response(502, "application/json", json!({"error": e}).to_string())
             }
         }
     }
+}
+
+fn build_http_response(response: request_http::JsonHttpResponse) -> axum::response::Response {
+    let (status, content_type, body) = response.into_parts();
+    response::build_response(status, content_type, body)
 }

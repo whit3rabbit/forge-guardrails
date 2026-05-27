@@ -69,6 +69,9 @@ cargo run --bin forge-guardrails-proxy -- --backend-url http://localhost:8080 --
 
 # Managed mode — forge starts llama-server and the proxy together
 cargo run --bin forge-guardrails-proxy -- --backend llamaserver --gguf path/to/model.gguf --port 8081
+
+# Optional semantic tool-call classifier shortcut
+cargo run --features classifier --bin forge-guardrails-proxy -- --backend-url http://localhost:8080 --classify --port 8081
 ```
 
 Then point any client at the forge proxy instead of the model server. For example, pointing `LlamafileClient` (or any OpenAI client) at the proxy:
@@ -90,6 +93,14 @@ block-level Anthropic metadata. Path 2 drops Anthropic-only block metadata at
 the OpenAI boundary.
 
 **Best for:** Adding guardrails to existing tools without modifying them. Works with any tool that speaks the OpenAI-compatible API or Anthropic Messages API — no per-client wrappers needed.
+
+**Optional ONNX classifier:** Build with `--features classifier` and pass
+`--classify` to enable the pinned quantized tool-call verifier in advisory
+mode. If the artifact is missing, Forge downloads it to the user cache and
+prints `classifier_dir=...`. Use `--classify-download` to prefetch and exit.
+Advanced flags still work: `--classifier-dir` sets the artifact directory,
+`--classifier-mode` overrides advisory mode, and `--classifier-model full`
+selects the FP32 ONNX file.
 
 **Reliability note:** The proxy automatically injects a synthetic `respond` tool when tools are present in the request. The model calls `respond(message="...")` instead of producing bare text, keeping it in tool-calling mode where forge's full guardrail stack applies. The `respond` call is stripped from the outbound response — the client sees a normal text response and never knows the tool exists. Client tools named `respond` are rejected because the name is reserved by forge. Guiding the model to a tool is a must. See [ADR-013](decisions/013-text-response-intent.md) for the full analysis.
 

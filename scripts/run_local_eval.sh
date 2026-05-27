@@ -52,6 +52,11 @@ STREAM=1
 OUTPUT_DIR=""
 CLASSIFIER_DIR="${FORGE_CLASSIFIER_DIR:-}"
 CLASSIFIER_MODE="${FORGE_CLASSIFIER_MODE:-shadow}"
+if [[ -n "${FORGE_CLASSIFIER_MODE:-}" ]]; then
+  CLASSIFIER_MODE_EXPLICIT=1
+else
+  CLASSIFIER_MODE_EXPLICIT=0
+fi
 if [[ -n "${FORGE_CLASSIFIER_MODEL:-}" ]]; then
   CLASSIFIER_MODEL="$FORGE_CLASSIFIER_MODEL"
 elif [[ "${FORGE_CLASSIFIER_USE_QUANTIZED:-}" =~ ^(0|false|no|off)$ ]]; then
@@ -59,6 +64,7 @@ elif [[ "${FORGE_CLASSIFIER_USE_QUANTIZED:-}" =~ ^(0|false|no|off)$ ]]; then
 else
   CLASSIFIER_MODEL="quantized"
 fi
+CLASSIFY=0
 DOWNLOAD_CLASSIFIER=0
 FINAL_RESPONSE_CLASSIFIER_DIR="${FORGE_FINAL_RESPONSE_CLASSIFIER_DIR:-}"
 FINAL_RESPONSE_CLASSIFIER_MODE="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODE:-shadow}"
@@ -100,6 +106,7 @@ Options:
   --classifier-dir DIR      Enable local ONNX classifier artifact directory
   --classifier-mode MODE    disabled|shadow|advisory|enforce (default: $CLASSIFIER_MODE)
   --classifier-model MODEL  quantized|full (default: $CLASSIFIER_MODEL)
+  --classify                Enable tool-call classifier shortcut; download if missing
   --download-classifier     Download classifier artifacts before running
   --final-response-classifier-dir DIR
                             Enable local final-response classifier artifact directory
@@ -114,6 +121,8 @@ Options:
 Examples:
   $PROGRAM_NAME --suite smoke --runs 1
   $PROGRAM_NAME --suite release --runs 10
+  $PROGRAM_NAME --suite release --runs 10 --classify
+  $PROGRAM_NAME --suite release --runs 10 --classify --classifier-mode shadow
   $PROGRAM_NAME --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
   $PROGRAM_NAME --suite release --runs 10 --download-classifier
 EOF
@@ -326,6 +335,39 @@ download_classifier_artifacts() {
     --artifact tool-call \
     --output-dir "$output_dir" \
     --classifier-model "$CLASSIFIER_MODEL")
+}
+
+download_classifier_shortcut_artifact() {
+  local output status
+  command -v cargo >/dev/null 2>&1 || die "cargo is required for --classify"
+
+  phase "Download classifier shortcut artifact"
+  log "Classifier model: $CLASSIFIER_MODEL"
+  if [[ -n "$CLASSIFIER_DIR" ]]; then
+    CLASSIFIER_DIR="$(resolve_local_path "$CLASSIFIER_DIR")"
+    log "Classifier dir: $CLASSIFIER_DIR"
+  else
+    log "Classifier dir: user cache"
+  fi
+
+  local cmd=(
+    cargo run --quiet --features classifier --bin forge-guardrails-proxy --
+    --classify-download
+    --classifier-model "$CLASSIFIER_MODEL"
+  )
+  if [[ -n "$CLASSIFIER_DIR" ]]; then
+    cmd+=(--classifier-dir "$CLASSIFIER_DIR")
+  fi
+
+  set +e
+  output="$(cd "$REPO_ROOT" && "${cmd[@]}")"
+  status="$?"
+  set -e
+  printf '%s\n' "$output" >&2
+  [[ "$status" == "0" ]] || die "failed to download classifier shortcut artifact"
+
+  CLASSIFIER_DIR="$(printf '%s\n' "$output" | awk -F= '$1 == "classifier_dir" { sub(/^classifier_dir=/, ""); print; exit }')"
+  [[ -n "$CLASSIFIER_DIR" ]] || die "classifier_dir missing from --classify-download output"
 }
 
 download_final_response_classifier_artifacts() {
@@ -654,6 +696,7 @@ compaction_chain_p2_budget_tokens=2200
 compaction_chain_p3_budget_tokens=1536
 include_compaction_chain=$INCLUDE_COMPACTION_CHAIN
 classifier_enabled=$classifier_enabled_value
+classify_shortcut=$CLASSIFY
 classifier_dir=$CLASSIFIER_DIR
 classifier_mode=$CLASSIFIER_MODE
 classifier_model=$CLASSIFIER_MODEL
@@ -735,11 +778,19 @@ while [[ $# -gt 0 ]]; do
       ;;
     --classifier-mode)
       CLASSIFIER_MODE="$(next_arg "$1" "${2:-}")"
+      CLASSIFIER_MODE_EXPLICIT=1
       shift 2
       ;;
     --classifier-model)
       CLASSIFIER_MODEL="$(next_arg "$1" "${2:-}")"
       shift 2
+      ;;
+    --classify)
+      CLASSIFY=1
+      if [[ "$CLASSIFIER_MODE_EXPLICIT" != "1" ]]; then
+        CLASSIFIER_MODE="advisory"
+      fi
+      shift
       ;;
     --download-classifier)
       DOWNLOAD_CLASSIFIER=1
@@ -813,6 +864,12 @@ case "$CLASSIFIER_MODEL" in
     die "--classifier-model must be quantized or full"
     ;;
 esac
+if [[ "$CLASSIFY" == "1" && "$CLASSIFIER_MODE" == "disabled" ]]; then
+  die "--classify cannot be used with --classifier-mode disabled"
+fi
+if [[ "$CLASSIFY" == "1" && "$DOWNLOAD_CLASSIFIER" == "1" ]]; then
+  die "--classify uses the user cache; use --download-classifier for target/ artifacts"
+fi
 case "$FINAL_RESPONSE_CLASSIFIER_MODE" in
   disabled|shadow|advisory|enforce)
     ;;
@@ -841,7 +898,9 @@ fi
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
 
-if [[ "$DOWNLOAD_CLASSIFIER" == "1" ]]; then
+if [[ "$CLASSIFY" == "1" ]]; then
+  download_classifier_shortcut_artifact
+elif [[ "$DOWNLOAD_CLASSIFIER" == "1" ]]; then
   download_classifier_artifacts
 fi
 if [[ "$DOWNLOAD_FINAL_RESPONSE_CLASSIFIER" == "1" ]]; then

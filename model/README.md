@@ -1,9 +1,10 @@
 # Forge Verifier Model Artifacts
 
-This directory documents the verifier model artifacts used by Forge local evals.
+This directory documents the verifier model artifacts used by Forge local evals
+and the user-facing proxy classifier shortcut.
 Do not commit downloaded ONNX weights, model snapshots, Hugging Face caches, or
 `target/classifier-artifacts` / `target/final-response-classifier-artifacts`
-outputs. Keep model binaries under `target/`.
+outputs. Keep eval model binaries under `target/`.
 
 Latest checked Hub state: 2026-05-27.
 
@@ -19,6 +20,21 @@ quantized ONNX. Both should start in `shadow` mode. Deterministic Forge
 validation remains authoritative.
 
 ## Download
+
+For normal proxy use, prefer the `forge-guardrails-proxy` shortcut:
+
+```bash
+cargo run --features classifier --bin forge-guardrails-proxy -- --classify-download
+```
+
+That command downloads the pinned quantized tool-call verifier, prints
+`classifier_dir=...`, and exits. The default user cache root is
+`FORGE_CLASSIFIER_CACHE_DIR`, then `XDG_CACHE_HOME`, then
+`$HOME/.cache/forge-guardrails/classifiers`. A repo-local cache such as
+`.forge/classifiers` is ignored by git.
+
+The commands below are eval/training-oriented and intentionally keep artifacts
+under `target/`.
 
 Tool-call classifier:
 
@@ -151,7 +167,18 @@ artifact directly.
 
 ## Eval Usage
 
-Tool-call shadow run:
+User-cache tool-call shadow run. This downloads or validates the quantized
+tool-call artifact if it is missing, then passes the resolved artifact path to
+the proxy and Rust smoke runner:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
+  --classifier-mode shadow \
+  --output-dir target/local-eval/release-toolcall-shadow
+```
+
+Target-artifact tool-call shadow run:
 
 ```bash
 scripts/run_local_eval.sh --suite release --runs 10 \

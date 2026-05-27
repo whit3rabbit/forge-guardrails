@@ -102,6 +102,14 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "N")]
     pub(crate) max_retries: Option<i32>,
 
+    /// Enable the tool-call ONNX classifier shortcut in advisory mode.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "classify_download")]
+    pub(crate) classify: bool,
+
+    /// Download the default tool-call ONNX classifier artifact and exit.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "classify")]
+    pub(crate) classify_download: bool,
+
     /// Local classifier artifact directory.
     #[arg(long, value_name = "PATH")]
     pub(crate) classifier_dir: Option<String>,
@@ -237,6 +245,8 @@ mod tests {
         assert!(!cli.serialize);
         assert!(!cli.no_serialize);
         assert!(!cli.no_rescue);
+        assert!(!cli.classify);
+        assert!(!cli.classify_download);
         assert_eq!(cli.classifier_dir, None);
         assert_eq!(cli.classifier_mode, None);
         assert_eq!(cli.classifier_model, None);
@@ -257,6 +267,14 @@ mod tests {
         assert_eq!(
             parse_err(&["--backend", "not-a-backend"]),
             ErrorKind::InvalidValue
+        );
+    }
+
+    #[test]
+    fn clap_rejects_classify_and_classify_download() {
+        assert_eq!(
+            parse_err(&["--classify", "--classify-download"]),
+            ErrorKind::ArgumentConflict
         );
     }
 
@@ -350,6 +368,7 @@ mod tests {
     #[test]
     fn classifier_flags_are_parsed() {
         let cli = parse(&[
+            "--classify",
             "--classifier-dir",
             "target/classifier-artifacts/onnx",
             "--classifier-mode",
@@ -367,6 +386,7 @@ mod tests {
             "--final-response-classifier-max-latency-ms",
             "40",
         ]);
+        assert!(cli.classify);
         assert_eq!(
             cli.classifier_dir.as_deref(),
             Some("target/classifier-artifacts/onnx")
@@ -384,6 +404,13 @@ mod tests {
         );
         assert_eq!(cli.final_response_classifier_model.as_deref(), Some("full"));
         assert_eq!(cli.final_response_classifier_max_latency_ms, Some(40));
+    }
+
+    #[test]
+    fn classify_download_flag_is_parsed() {
+        let cli = parse(&["--classify-download"]);
+        assert!(cli.classify_download);
+        assert!(!cli.classify);
     }
 
     #[test]

@@ -21,6 +21,10 @@ fn main() {
 }
 
 fn run_main(cli: Cli) -> Result<(), String> {
+    if cli.classify_download {
+        return startup::download_classifier_shortcut(&cli);
+    }
+
     upstream::apply_litellm_env_aliases();
     let startup = startup::build_startup(cli)?;
 

@@ -149,6 +149,15 @@ cargo run --bin forge-guardrails-proxy -- \
   --gguf path/to/model.gguf \
   --port 8081
 
+# Optional ONNX tool-call classifier shortcut.
+cargo run --features classifier --bin forge-guardrails-proxy -- \
+  --backend-url http://localhost:8080 \
+  --classify \
+  --port 8081
+
+# Prefetch the quantized classifier artifact and print its location.
+cargo run --features classifier --bin forge-guardrails-proxy -- --classify-download
+
 # Convenience launcher for the recommended Ministral GGUF.
 scripts/start_llamaserver_proxy.sh \
   /path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf
@@ -164,6 +173,14 @@ Without an explicit path it searches for
 and managed backend port `8080`; override them with `FORGE_PROXY_PORT` and
 `FORGE_BACKEND_PORT`. Press Ctrl+C to stop the proxy and its managed
 `llama-server` backend.
+
+The `--classify` shortcut is opt-in and requires building with
+`--features classifier`. It downloads the pinned quantized tool-call ONNX
+classifier if needed, stores it outside `target/`, enables advisory mode, and
+prints the artifact directory during startup. By default it uses
+`FORGE_CLASSIFIER_CACHE_DIR`, then `XDG_CACHE_HOME`, then
+`$HOME/.cache/forge-guardrails/classifiers`. Use `--classifier-dir` to provide
+an explicit artifact directory.
 
 Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`.
 
@@ -205,6 +222,8 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `--host HOST` | `127.0.0.1` | Proxy bind host in CLI mode |
 | `--port N` | `8081` | Proxy bind port |
 | `--max-retries N` | `3` | Retry budget per validation failure |
+| `--classify` | off | Enable the quantized tool-call ONNX classifier in advisory mode |
+| `--classify-download` | off | Download the quantized tool-call ONNX classifier and exit |
 | `--no-rescue` | rescue on | Disable rescue parsing |
 | `--budget-mode {backend,manual,forge-full,forge-fast}` | `backend` | Context budget source |
 | `--budget-tokens N` | — | Manual token budget |
@@ -222,6 +241,7 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `FORGE_MAX_RETRIES` | `3` | Retry budget per validation failure |
 | `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |
 | `FORGE_SERIALIZE_REQUESTS` | `false` | Force request serialization |
+| `FORGE_CLASSIFIER_CACHE_DIR` | platform cache | User-facing classifier download cache root |
 | `FORGE_START_SIDECAR` | Docker: auto | Start the internal anyllm sidecar in Docker |
 | `ANYLLM_LISTEN_PORT` | Docker: `3000` | Internal anyllm sidecar port; do not publish it |
 | `FORGE_SIDECAR_API_KEY` / `PROXY_API_KEYS` | generated | Shared Forge-to-sidecar key in Docker |
@@ -389,6 +409,15 @@ uv run --project forge python tests/parity/generate_fixtures.py
 The eval harness measures how reliably a model + backend combo navigates multi-step tool-calling workflows. See [Eval Guide](docs/EVAL_GUIDE.md) for full CLI reference.
 
 ```bash
+# Managed local smoke without the classifier
+scripts/run_local_eval.sh --suite smoke --runs 1
+
+# Managed local smoke with the user-cache classifier shortcut.
+# Downloads or validates the quantized tool-call artifact before the proxy starts.
+scripts/run_local_eval.sh --suite smoke --runs 1 \
+  --classify \
+  --classifier-mode shadow
+
 # Python oracle against a running Rust proxy
 python scripts/eval_openai_proxy.py \
   --base-url http://127.0.0.1:8081/v1 \

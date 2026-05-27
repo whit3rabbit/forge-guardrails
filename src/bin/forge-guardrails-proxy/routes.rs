@@ -7,9 +7,8 @@ use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    handle_anthropic_messages_with_scorers, handle_chat_completions_with_scorers,
-    AnthropicHandlerError, AnthropicHandlerResult, ContextManager, FinalResponseScorer,
-    HandlerError, HandlerResult, LLMClient, NoCompact, ServerManager, ToolCallScorer,
+    handle_anthropic_messages_with_scorers, handle_chat_completions_with_scorers, ContextManager,
+    FinalResponseScorer, LLMClient, NoCompact, ServerManager, ToolCallScorer,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
@@ -18,7 +17,18 @@ use crate::client::ClientFactory;
 use crate::config::ProxyConfig;
 use crate::response::{build_anthropic_sse_response, build_openai_sse_response, build_response};
 
-const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+mod request_http {
+    use anyllm_translate::anthropic::MessageCreateRequest;
+    use forge_guardrails::{
+        AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HandlerError,
+        HandlerResult, OpenAiEventStream,
+    };
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/proxy/request_http.rs"
+    ));
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -153,22 +163,9 @@ async fn models(State(state): State<AppState>) -> Response {
 }
 
 async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
-    if body.len() > MAX_BODY_SIZE {
-        return build_response(
-            413,
-            "application/json",
-            json!({"error": "request too large"}).to_string(),
-        );
-    }
-    let parsed: Value = match serde_json::from_slice(body.as_ref()) {
+    let parsed = match request_http::parse_openai_body(body.as_ref()) {
         Ok(value) => value,
-        Err(err) => {
-            return build_response(
-                400,
-                "application/json",
-                json!({"error": err.to_string()}).to_string(),
-            );
-        }
+        Err(response) => return build_http_response(response),
     };
     let model = extract_model_from_value(&parsed, &state.config.default_model);
     let client = Arc::new(state.client_factory.client_for_model(model));
@@ -186,58 +183,37 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
         None
     };
 
-    match handle_chat_completions_with_scorers(
-        &parsed,
-        &client,
-        &context_manager,
-        state.config.max_retries,
-        state.config.rescue_enabled,
-        state.scorer.clone(),
-        state.final_response_scorer.clone(),
-    )
-    .await
-    {
-        Ok(HandlerResult::Response(value)) => {
-            build_response(200, "application/json", value.to_string())
-        }
-        Ok(HandlerResult::StreamBody(events)) => build_openai_sse_response(events, guard),
-        Err(HandlerError::BadRequest(err)) => {
-            build_response(400, "application/json", json!({"error": err}).to_string())
-        }
-        Err(HandlerError::Upstream(err)) => {
-            build_response(502, "application/json", json!({"error": err}).to_string())
-        }
+    match request_http::openai_handler_http_result(
+        handle_chat_completions_with_scorers(
+            &parsed,
+            &client,
+            &context_manager,
+            state.config.max_retries,
+            state.config.rescue_enabled,
+            state.scorer.clone(),
+            state.final_response_scorer.clone(),
+        )
+        .await,
+    ) {
+        request_http::OpenAiHttpResult::Json(response) => build_http_response(response),
+        request_http::OpenAiHttpResult::Stream(events) => build_openai_sse_response(events, guard),
     }
 }
 
 async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Response {
-    if body.len() > MAX_BODY_SIZE {
-        return build_response(
-            413,
-            "application/json",
-            json!({"error": "request too large"}).to_string(),
-        );
-    }
-
-    let raw: Value = match serde_json::from_slice(body.as_ref()) {
-        Ok(value) => value,
-        Err(err) => {
-            return build_response(
-                400,
-                "application/json",
-                json!({"error": err.to_string()}).to_string(),
-            );
-        }
+    let request = match request_http::parse_anthropic_body(body.as_ref()) {
+        Ok(request) => request,
+        Err(response) => return build_http_response(response),
     };
-    let model = extract_model_from_value(&raw, &state.config.default_model);
+    let model = extract_model_from_value(&request.raw, &state.config.default_model);
     let client = Arc::new(state.client_factory.client_for_model(model));
-    anthropic_messages_with_raw_client(
+    anthropic_messages_with_request_client(
         state.config,
         state.request_mutex,
         state.scorer,
         state.final_response_scorer,
         client,
-        raw,
+        request,
     )
     .await
 }
@@ -249,46 +225,21 @@ async fn anthropic_messages_with_client<C: LLMClient + 'static>(
     client: Arc<C>,
     body: Bytes,
 ) -> Response {
-    if body.len() > MAX_BODY_SIZE {
-        return build_response(
-            413,
-            "application/json",
-            json!({"error": "request too large"}).to_string(),
-        );
-    }
-
-    let raw: Value = match serde_json::from_slice(body.as_ref()) {
-        Ok(value) => value,
-        Err(err) => {
-            return build_response(
-                400,
-                "application/json",
-                json!({"error": err.to_string()}).to_string(),
-            );
-        }
+    let request = match request_http::parse_anthropic_body(body.as_ref()) {
+        Ok(request) => request,
+        Err(response) => return build_http_response(response),
     };
-    anthropic_messages_with_raw_client(config, request_mutex, None, None, client, raw).await
+    anthropic_messages_with_request_client(config, request_mutex, None, None, client, request).await
 }
 
-async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
+async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     config: Arc<ProxyConfig>,
     request_mutex: Arc<TokioMutex<()>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
     client: Arc<C>,
-    raw: Value,
+    request: request_http::ParsedAnthropicRequest,
 ) -> Response {
-    let parsed: anyllm_translate::anthropic::MessageCreateRequest =
-        match serde_json::from_value(raw.clone()) {
-            Ok(value) => value,
-            Err(err) => {
-                return build_response(
-                    400,
-                    "application/json",
-                    json!({"error": err.to_string()}).to_string(),
-                );
-            }
-        };
     let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
         Box::new(NoCompact),
         config.context_tokens,
@@ -303,38 +254,33 @@ async fn anthropic_messages_with_raw_client<C: LLMClient + 'static>(
         None
     };
 
-    match handle_anthropic_messages_with_scorers(
-        &parsed,
-        &raw,
-        &client,
-        &context_manager,
-        config.max_retries,
-        config.rescue_enabled,
-        scorer,
-        final_response_scorer,
-    )
-    .await
-    {
-        Ok(AnthropicHandlerResult::Response(value)) => {
-            build_response(200, "application/json", value.to_string())
-        }
-        Ok(AnthropicHandlerResult::StreamBody(events)) => {
+    match request_http::anthropic_handler_http_result(
+        handle_anthropic_messages_with_scorers(
+            &request.parsed,
+            &request.raw,
+            &client,
+            &context_manager,
+            config.max_retries,
+            config.rescue_enabled,
+            scorer,
+            final_response_scorer,
+        )
+        .await,
+    ) {
+        request_http::AnthropicHttpResult::Json(response) => build_http_response(response),
+        request_http::AnthropicHttpResult::Stream(events) => {
             build_anthropic_sse_response(events, guard)
-        }
-        Err(AnthropicHandlerError::BadRequest(err)) => {
-            build_response(400, "application/json", json!({"error": err}).to_string())
-        }
-        Err(AnthropicHandlerError::Upstream(err)) => {
-            build_response(502, "application/json", json!({"error": err}).to_string())
-        }
-        Err(AnthropicHandlerError::Internal(err)) => {
-            build_response(500, "application/json", json!({"error": err}).to_string())
         }
     }
 }
 
 async fn cors_preflight() -> Response {
     build_response(204, "", String::new())
+}
+
+fn build_http_response(response: request_http::JsonHttpResponse) -> Response {
+    let (status, content_type, body) = response.into_parts();
+    build_response(status, content_type, body)
 }
 
 #[cfg(test)]
@@ -374,6 +320,43 @@ mod tests {
         StreamChunk, StreamError, TextResponse, ToolSpec,
     };
     use futures_util::StreamExt;
+
+    fn test_config() -> Arc<ProxyConfig> {
+        Arc::new(ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8081,
+            default_model: "default".to_string(),
+            context_tokens: 8192,
+            max_retries: 0,
+            rescue_enabled: true,
+            serialize_requests: false,
+            verbose: false,
+            classifier_dir: None,
+            classifier_mode: ScorerMode::Shadow,
+            classifier_model: ClassifierModelKind::Quantized,
+            classifier_auto_download: false,
+            classifier_max_latency_ms: None,
+            final_response_classifier_dir: None,
+            final_response_classifier_mode: ScorerMode::Shadow,
+            final_response_classifier_model: ClassifierModelKind::Quantized,
+            final_response_classifier_max_latency_ms: None,
+        })
+    }
+
+    fn test_state() -> AppState {
+        AppState {
+            config: test_config(),
+            client_factory: Arc::new(ClientFactory::DirectOpenAi {
+                base_url: "http://127.0.0.1:9".to_string(),
+                api_key: None,
+                http_client: reqwest::Client::new(),
+                context_tokens: 8192,
+            }),
+            request_mutex: Arc::new(TokioMutex::new(())),
+            scorer: None,
+            final_response_scorer: None,
+        }
+    }
 
     struct BinaryChannelStreamClient {
         receiver:
@@ -459,6 +442,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binary_openai_invalid_json_returns_400() {
+        let response = chat_completions(State(test_state()), Bytes::from_static(b"not json")).await;
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn binary_openai_oversized_body_returns_413() {
+        let response = chat_completions(
+            State(test_state()),
+            Bytes::from(vec![b'x'; 17 * 1024 * 1024]),
+        )
+        .await;
+
+        assert_eq!(response.status().as_u16(), 413);
+    }
+
+    #[tokio::test]
+    async fn binary_anthropic_invalid_json_returns_400() {
+        let response =
+            anthropic_messages(State(test_state()), Bytes::from_static(b"not json")).await;
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn binary_anthropic_typed_parse_failure_returns_400() {
+        let response = anthropic_messages(
+            State(test_state()),
+            Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+        )
+        .await;
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
+    async fn binary_openai_malformed_tool_request_returns_400() {
+        let body = Bytes::from(
+            json!({
+                "messages": [{"role": "user", "content": "hi"}],
+                "model": "test",
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "parameters": {"type": "array"}
+                    }
+                }]
+            })
+            .to_string(),
+        );
+
+        let response = chat_completions(State(test_state()), body).await;
+
+        assert_eq!(response.status().as_u16(), 400);
+    }
+
+    #[tokio::test]
     async fn external_backend_uses_request_model() {
         let mut upstream = mockito::Server::new_async().await;
         let _mock = upstream
@@ -489,24 +531,7 @@ mod tests {
             .await;
 
         let state = AppState {
-            config: Arc::new(ProxyConfig {
-                host: "127.0.0.1".to_string(),
-                port: 8081,
-                default_model: "default".to_string(),
-                context_tokens: 8192,
-                max_retries: 0,
-                rescue_enabled: true,
-                serialize_requests: false,
-                verbose: false,
-                classifier_dir: None,
-                classifier_mode: ScorerMode::Shadow,
-                classifier_model: ClassifierModelKind::Quantized,
-                classifier_max_latency_ms: None,
-                final_response_classifier_dir: None,
-                final_response_classifier_mode: ScorerMode::Shadow,
-                final_response_classifier_model: ClassifierModelKind::Quantized,
-                final_response_classifier_max_latency_ms: None,
-            }),
+            config: test_config(),
             client_factory: Arc::new(ClientFactory::DirectOpenAi {
                 base_url: upstream.url(),
                 api_key: None,
@@ -535,24 +560,7 @@ mod tests {
     async fn binary_anthropic_response_yields_body_chunk_before_backend_final() {
         use tokio::time::{timeout, Duration};
 
-        let config = Arc::new(ProxyConfig {
-            host: "127.0.0.1".to_string(),
-            port: 8081,
-            default_model: "default".to_string(),
-            context_tokens: 8192,
-            max_retries: 0,
-            rescue_enabled: true,
-            serialize_requests: false,
-            verbose: false,
-            classifier_dir: None,
-            classifier_mode: ScorerMode::Shadow,
-            classifier_model: ClassifierModelKind::Quantized,
-            classifier_max_latency_ms: None,
-            final_response_classifier_dir: None,
-            final_response_classifier_mode: ScorerMode::Shadow,
-            final_response_classifier_model: ClassifierModelKind::Quantized,
-            final_response_classifier_max_latency_ms: None,
-        });
+        let config = test_config();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let client = Arc::new(BinaryChannelStreamClient::new(rx));
         let body = Bytes::from(

@@ -70,7 +70,7 @@ pub(super) fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Sta
         None if cli.backend_protocol == CliBackendProtocol::Anthropic => DEFAULT_ENV_CONTEXT_TOKENS,
         None => discover_external_context_tokens(&base_url),
     };
-    let (classifier_dir, classifier_mode, classifier_model) =
+    let (classifier_dir, classifier_mode, classifier_model, classifier_auto_download) =
         classifier_settings_from_env_cli(cli)?;
     let (
         final_response_classifier_dir,
@@ -89,6 +89,7 @@ pub(super) fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Sta
         classifier_dir,
         classifier_mode,
         classifier_model,
+        classifier_auto_download,
         classifier_max_latency_ms: cli.classifier_max_latency_ms,
         final_response_classifier_dir,
         final_response_classifier_mode,

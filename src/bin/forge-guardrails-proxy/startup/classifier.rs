@@ -1,13 +1,83 @@
 use std::sync::Arc;
 
 #[cfg(feature = "classifier")]
+use std::str::FromStr;
+
+#[cfg(feature = "classifier")]
 use forge_guardrails::{
-    FinalResponseContext, FinalResponseScore, OnnxScorerOptions, ScoringContext, ToolCall,
-    ToolCallScore,
+    default_tool_call_classifier_artifact_dir, ensure_classifier_artifact_dir,
+    ClassifierArtifactKind, ClassifierModelKind, FinalResponseContext, FinalResponseScore,
+    OnnxScorerOptions, ScoringContext, ToolCall, ToolCallScore, DEFAULT_CLASSIFIER_REPO,
+    DEFAULT_CLASSIFIER_REVISION,
 };
 use forge_guardrails::{FinalResponseScorer, ScorerMode, ToolCallScorer};
 
+use crate::cli::Cli;
+#[cfg(feature = "classifier")]
+use crate::config::validate_nonempty;
 use crate::config::ProxyConfig;
+
+pub(super) fn prepare_classifier_artifact(config: &ProxyConfig) -> Result<(), String> {
+    if !config.classifier_auto_download {
+        return Ok(());
+    }
+    let Some(dir) = config.classifier_dir.as_deref() else {
+        return Err("--classify did not resolve a classifier artifact directory".to_string());
+    };
+
+    #[cfg(feature = "classifier")]
+    {
+        ensure_classifier_artifact_dir(
+            ClassifierArtifactKind::ToolCall,
+            dir,
+            DEFAULT_CLASSIFIER_REPO,
+            DEFAULT_CLASSIFIER_REVISION,
+            config.classifier_model,
+            |line| eprintln!("{line}"),
+        )
+        .map_err(|err| format!("failed to prepare classifier artifact: {err}"))?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = dir;
+        Err("--classify requires building with --features classifier".to_string())
+    }
+}
+
+pub(super) fn download_classifier_shortcut(cli: &Cli) -> Result<(), String> {
+    #[cfg(feature = "classifier")]
+    {
+        let artifact_dir = match cli.classifier_dir.as_deref() {
+            Some(raw) => validate_nonempty(raw, "--classifier-dir")?.to_string(),
+            None => default_tool_call_classifier_artifact_dir()
+                .map_err(|err| err.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let model = match cli.classifier_model.as_deref() {
+            Some(raw) => ClassifierModelKind::from_str(raw)?,
+            None => ClassifierModelKind::Quantized,
+        };
+        ensure_classifier_artifact_dir(
+            ClassifierArtifactKind::ToolCall,
+            artifact_dir,
+            DEFAULT_CLASSIFIER_REPO,
+            DEFAULT_CLASSIFIER_REVISION,
+            model,
+            |line| println!("{line}"),
+        )
+        .map_err(|err| format!("failed to download classifier artifact: {err}"))?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "classifier"))]
+    {
+        let _ = cli;
+        Err("--classify-download requires building with --features classifier".to_string())
+    }
+}
 
 #[cfg(feature = "classifier")]
 const FORGE_CLASSIFIER_SESSION_POOL_SIZE: &str = "FORGE_CLASSIFIER_SESSION_POOL_SIZE";

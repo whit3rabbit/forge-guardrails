@@ -2,6 +2,8 @@ use std::env;
 use std::str::FromStr;
 
 use crate::cli::Cli;
+#[cfg(feature = "classifier")]
+use forge_guardrails::default_tool_call_classifier_artifact_dir;
 use forge_guardrails::{ClassifierModelKind, ScorerMode};
 
 pub(crate) const DEFAULT_PROXY_PORT: u16 = 8081;
@@ -27,6 +29,7 @@ pub(crate) struct ProxyConfig {
     pub(crate) classifier_dir: Option<String>,
     pub(crate) classifier_mode: ScorerMode,
     pub(crate) classifier_model: ClassifierModelKind,
+    pub(crate) classifier_auto_download: bool,
     pub(crate) classifier_max_latency_ms: Option<u64>,
     pub(crate) final_response_classifier_dir: Option<String>,
     pub(crate) final_response_classifier_mode: ScorerMode,
@@ -60,6 +63,7 @@ impl ProxyConfig {
             classifier_dir: env_optional_string("FORGE_CLASSIFIER_DIR"),
             classifier_mode: env_scoring_mode("FORGE_CLASSIFIER_MODE", ScorerMode::Shadow)?,
             classifier_model: env_classifier_model()?,
+            classifier_auto_download: false,
             classifier_max_latency_ms: env_optional_u64("FORGE_CLASSIFIER_MAX_LATENCY_MS")?,
             final_response_classifier_dir: env_optional_string(
                 "FORGE_FINAL_RESPONSE_CLASSIFIER_DIR",
@@ -103,15 +107,12 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     if cli.verbose {
         config.verbose = true;
     }
-    if let Some(dir) = cli.classifier_dir.as_deref() {
-        config.classifier_dir = Some(validate_nonempty(dir, "--classifier-dir")?.to_string());
-    }
-    if let Some(mode) = cli.classifier_mode.as_deref() {
-        config.classifier_mode = ScorerMode::from_str(mode)?;
-    }
-    if let Some(model) = cli.classifier_model.as_deref() {
-        config.classifier_model = ClassifierModelKind::from_str(model)?;
-    }
+    let (classifier_dir, classifier_mode, classifier_model, classifier_auto_download) =
+        classifier_settings_from_env_cli(cli)?;
+    config.classifier_dir = classifier_dir;
+    config.classifier_mode = classifier_mode;
+    config.classifier_model = classifier_model;
+    config.classifier_auto_download = classifier_auto_download;
     if let Some(value) = cli.classifier_max_latency_ms {
         config.classifier_max_latency_ms = Some(value);
     }
@@ -133,7 +134,39 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
 
 pub(crate) fn classifier_settings_from_env_cli(
     cli: &Cli,
-) -> Result<(Option<String>, ScorerMode, ClassifierModelKind), String> {
+) -> Result<(Option<String>, ScorerMode, ClassifierModelKind, bool), String> {
+    if cli.classify {
+        #[cfg(not(feature = "classifier"))]
+        {
+            return Err("--classify requires building with --features classifier".to_string());
+        }
+
+        #[cfg(feature = "classifier")]
+        {
+            let dir = match cli.classifier_dir.as_deref() {
+                Some(raw) => validate_nonempty(raw, "--classifier-dir")?.to_string(),
+                None => default_tool_call_classifier_artifact_dir()
+                    .map_err(|err| err.to_string())?
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            let mode = match cli.classifier_mode.as_deref() {
+                Some(raw) => ScorerMode::from_str(raw)?,
+                None => ScorerMode::Advisory,
+            };
+            if mode == ScorerMode::Disabled {
+                return Err(
+                    "--classify cannot be combined with --classifier-mode disabled".to_string(),
+                );
+            }
+            let model = match cli.classifier_model.as_deref() {
+                Some(raw) => ClassifierModelKind::from_str(raw)?,
+                None => ClassifierModelKind::Quantized,
+            };
+            return Ok((Some(dir), mode, model, true));
+        }
+    }
+
     let mut dir = env_optional_string("FORGE_CLASSIFIER_DIR");
     let mut mode = env_scoring_mode("FORGE_CLASSIFIER_MODE", ScorerMode::Shadow)?;
     let mut model = env_classifier_model()?;
@@ -148,7 +181,7 @@ pub(crate) fn classifier_settings_from_env_cli(
         model = ClassifierModelKind::from_str(raw)?;
     }
 
-    Ok((dir, mode, model))
+    Ok((dir, mode, model, false))
 }
 
 pub(crate) fn final_response_classifier_settings_from_env_cli(
@@ -418,6 +451,7 @@ mod tests {
             classifier_dir: None,
             classifier_mode: ScorerMode::Shadow,
             classifier_model: ClassifierModelKind::Quantized,
+            classifier_auto_download: false,
             classifier_max_latency_ms: None,
             final_response_classifier_dir: None,
             final_response_classifier_mode: ScorerMode::Shadow,
@@ -456,6 +490,7 @@ mod tests {
         assert_eq!(config.classifier_dir, None);
         assert_eq!(config.classifier_mode, ScorerMode::Shadow);
         assert_eq!(config.classifier_model, ClassifierModelKind::Quantized);
+        assert!(!config.classifier_auto_download);
         assert_eq!(config.classifier_max_latency_ms, None);
         assert_eq!(config.final_response_classifier_dir, None);
         assert_eq!(config.final_response_classifier_mode, ScorerMode::Shadow);
@@ -496,6 +531,7 @@ mod tests {
         );
         assert_eq!(config.classifier_mode, ScorerMode::Advisory);
         assert_eq!(config.classifier_model, ClassifierModelKind::Full);
+        assert!(!config.classifier_auto_download);
         assert_eq!(config.classifier_max_latency_ms, Some(25));
         assert_eq!(
             config.final_response_classifier_dir.as_deref(),
@@ -525,6 +561,49 @@ mod tests {
             "--no-serialize",
         ]);
         assert!(!resolve_serialize(&cli, true));
+    }
+
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn classify_shortcut_uses_advisory_quantized_cache_defaults() {
+        let cli = parse(&["--classify"]);
+        let (dir, mode, model, auto_download) =
+            classifier_settings_from_env_cli(&cli).expect("settings");
+        assert!(dir
+            .as_deref()
+            .expect("dir")
+            .contains("forge-guardrails/classifiers/tool-call"));
+        assert_eq!(mode, ScorerMode::Advisory);
+        assert_eq!(model, ClassifierModelKind::Quantized);
+        assert!(auto_download);
+    }
+
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn classify_shortcut_allows_explicit_dir_mode_and_model() {
+        let cli = parse(&[
+            "--classify",
+            "--classifier-dir",
+            "custom/onnx",
+            "--classifier-mode",
+            "shadow",
+            "--classifier-model",
+            "full",
+        ]);
+        let (dir, mode, model, auto_download) =
+            classifier_settings_from_env_cli(&cli).expect("settings");
+        assert_eq!(dir.as_deref(), Some("custom/onnx"));
+        assert_eq!(mode, ScorerMode::Shadow);
+        assert_eq!(model, ClassifierModelKind::Full);
+        assert!(auto_download);
+    }
+
+    #[cfg(feature = "classifier")]
+    #[test]
+    fn classify_shortcut_rejects_disabled_mode() {
+        let cli = parse(&["--classify", "--classifier-mode", "disabled"]);
+        let err = classifier_settings_from_env_cli(&cli).expect_err("disabled");
+        assert!(err.contains("--classify cannot be combined"));
     }
 
     #[test]

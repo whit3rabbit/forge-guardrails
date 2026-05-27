@@ -247,6 +247,15 @@ Standard local release benchmark:
 scripts/run_local_eval.sh --suite release --runs 10
 ```
 
+User-cache classifier benchmark, downloading the quantized tool-call artifact
+if missing:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
+  --classifier-mode shadow
+```
+
 ONNX classifier mode comparison:
 
 ```bash
@@ -254,11 +263,12 @@ scripts/run_local_eval.sh --suite release --runs 10 \
   --output-dir target/local-eval/release-baseline
 
 scripts/run_local_eval.sh --suite release --runs 10 \
-  --classifier-dir target/classifier-artifacts/onnx \
+  --classify \
+  --classifier-mode shadow \
   --output-dir target/local-eval/release-onnx-shadow
 
 scripts/run_local_eval.sh --suite release --runs 10 \
-  --classifier-dir target/classifier-artifacts/onnx \
+  --classify \
   --classifier-mode enforce \
   --output-dir target/local-eval/release-onnx-enforce
 ```
@@ -267,16 +277,23 @@ When evaluating a final-response verifier, include the matching
 `--final-response-classifier-dir`, `--final-response-classifier-mode`, and
 `--final-response-classifier-model` flags.
 
-Use `--download-classifier` to populate
-`target/classifier-artifacts/onnx` before a classifier run. The default
-classifier mode is `shadow`, but ONNX evals should include `enforce` when
-testing whether thresholds can safely improve behavior. Enforcement only acts
-when the runtime mode is `enforce` and the artifact threshold for the predicted
-label is met. Labels with thresholds above `1.0` remain telemetry-only even in
-enforce mode, and `deterministic_invalid` must stay non-authoritative. ONNX
-classifier artifacts are local test data and must not be committed. Compare
-Python oracle reports for behavior, and inspect `rust_smoke.jsonl` plus proxy
-logs for classifier scores.
+For eval convenience, `scripts/run_local_eval.sh --classify` uses the same
+user-facing cache as `forge-guardrails-proxy --classify-download`,
+downloads/validates missing quantized tool-call files, records the resolved
+`classifier_dir` in eval metadata, and passes that artifact to the proxy and
+Rust smoke runner. `--classify` defaults to `advisory`; pass
+`--classifier-mode shadow` for first replay baselines.
+
+Use `--download-classifier` only when you intentionally want to populate
+`target/classifier-artifacts/onnx` for eval/training artifact parity. The
+default classifier mode is `shadow`, but ONNX evals should include `enforce`
+when testing whether thresholds can safely improve behavior. Enforcement only
+acts when the runtime mode is `enforce` and the artifact threshold for the
+predicted label is met. Labels with thresholds above `1.0` remain
+telemetry-only even in enforce mode, and `deterministic_invalid` must stay
+non-authoritative. ONNX classifier artifacts are local test data and must not
+be committed. Compare Python oracle reports for behavior, and inspect
+`rust_smoke.jsonl` plus proxy logs for classifier scores.
 
 Verifier promotion gates are intentionally conservative:
 

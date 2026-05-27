@@ -160,6 +160,36 @@ unless a job is explicitly marked as live-backend integration.
 
 ## ONNX Classifier Mode Runs
 
+This section separates the user-cache classifier shortcut from the
+`target/` artifact directories used for repeatable eval/training runs. For
+normal proxy use, `forge-guardrails-proxy --classify` is the user-facing
+shortcut and downloads the quantized tool-call artifact into the user cache.
+The eval launcher also supports `--classify` for benchmark runs that should
+use that user-cache shortcut and auto-download or validate the model before
+the proxy starts.
+
+Run without the classifier:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --output-dir target/local-eval/release-baseline
+```
+
+Run with the user-cache classifier shortcut:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
+  --classifier-mode shadow \
+  --output-dir target/local-eval/release-onnx-shadow
+```
+
+`--classify` uses `forge-guardrails-proxy --classify-download` under the hood,
+prints the resolved `classifier_dir=...`, records it in
+`local_eval_metadata.txt`, and then passes the artifact path to the proxy and
+Rust smoke runner. Its default mode is `advisory`, matching proxy shortcut
+behavior; pass `--classifier-mode shadow` for first replay baselines.
+
 Download the local classifier artifact once:
 
 ```bash
@@ -177,14 +207,16 @@ schema/report sidecars such as `input_schema_v1.json`,
 `input_schema_v2.json`, and `serializer_fixture_v2.json` when they are present
 in the model repo.
 
-Then run the same local release eval with the classifier loaded by the proxy:
+Then run the same local release eval with the target artifact loaded by the
+proxy:
 
 ```bash
 scripts/run_local_eval.sh --suite release --runs 10 \
   --classifier-dir target/classifier-artifacts/onnx
 ```
 
-The shortcut below downloads the quantized artifact first when needed:
+The target-artifact shortcut below downloads the quantized artifact first when
+needed:
 
 ```bash
 scripts/run_local_eval.sh --suite release --runs 10 --download-classifier
@@ -199,11 +231,12 @@ scripts/run_local_eval.sh --suite release --runs 10 \
   --output-dir target/local-eval/release-baseline
 
 scripts/run_local_eval.sh --suite release --runs 10 \
-  --classifier-dir target/classifier-artifacts/onnx \
+  --classify \
+  --classifier-mode shadow \
   --output-dir target/local-eval/release-onnx-shadow
 
 scripts/run_local_eval.sh --suite release --runs 10 \
-  --classifier-dir target/classifier-artifacts/onnx \
+  --classify \
   --classifier-mode enforce \
   --output-dir target/local-eval/release-onnx-enforce
 ```

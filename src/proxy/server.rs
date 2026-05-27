@@ -15,12 +15,11 @@ use crate::context::manager::ContextManager;
 
 mod request_handlers;
 #[cfg(test)]
+const MAX_BODY_SIZE: usize = request_handlers::MAX_BODY_SIZE;
+#[cfg(test)]
 mod test_helpers;
 #[cfg(test)]
 pub use test_helpers::{format_anthropic_sse_body, format_sse_body, parse_http_request};
-
-/// Maximum request body size (16 MB).
-const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
 
 /// HTTP server configuration for the OpenAI-compatible proxy.
 pub struct HTTPServer {

@@ -90,6 +90,48 @@ fn external_startup_rejects_extra_flags() {
     assert!(err.contains("--extra-flags requires managed"));
 }
 
+#[cfg(feature = "classifier")]
+#[test]
+fn external_startup_classify_resolves_auto_download_config() {
+    let cli = parse(&[
+        "--backend-url",
+        "http://localhost:8080",
+        "--classify",
+        "--classifier-dir",
+        "custom/onnx",
+    ]);
+    let startup = build_external_startup(&cli, cli.backend_url.as_deref().expect("backend url"))
+        .expect("startup");
+
+    assert_eq!(
+        startup.config.classifier_dir.as_deref(),
+        Some("custom/onnx")
+    );
+    assert_eq!(
+        startup.config.classifier_mode,
+        forge_guardrails::ScorerMode::Advisory
+    );
+    assert!(startup.config.classifier_auto_download);
+}
+
+#[test]
+fn external_startup_classifier_dir_without_classify_does_not_auto_download() {
+    let cli = parse(&[
+        "--backend-url",
+        "http://localhost:8080",
+        "--classifier-dir",
+        "custom/onnx",
+    ]);
+    let startup = build_external_startup(&cli, cli.backend_url.as_deref().expect("backend url"))
+        .expect("startup");
+
+    assert_eq!(
+        startup.config.classifier_dir.as_deref(),
+        Some("custom/onnx")
+    );
+    assert!(!startup.config.classifier_auto_download);
+}
+
 #[test]
 fn external_anthropic_startup_uses_direct_anthropic_factory() {
     let cli = parse(&[

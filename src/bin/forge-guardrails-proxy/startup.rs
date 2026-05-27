@@ -30,8 +30,13 @@ pub(crate) fn build_startup(cli: Cli) -> Result<Startup, String> {
         let backend = cli.backend.expect("backend checked above");
         managed::build_managed_startup(&cli, backend)?
     };
+    classifier::prepare_classifier_artifact(&startup.config)?;
     startup.scorer = classifier::build_classifier_scorer(&startup.config)?;
     startup.final_response_scorer =
         classifier::build_final_response_classifier_scorer(&startup.config)?;
     Ok(startup)
+}
+
+pub(crate) fn download_classifier_shortcut(cli: &Cli) -> Result<(), String> {
+    classifier::download_classifier_shortcut(cli)
 }
