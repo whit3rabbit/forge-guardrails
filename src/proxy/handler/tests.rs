@@ -1315,11 +1315,10 @@ impl LLMClient for MockWorkflowContractClient {
                 .collect(),
         );
         let mut calls = self.calls.lock().unwrap();
-        let response = self
-            .responses
-            .get(*calls)
-            .cloned()
-            .unwrap_or_else(|| panic!("MockWorkflowContractClient exhausted at call {}", *calls));
+        let response =
+            self.responses.get(*calls).cloned().unwrap_or_else(|| {
+                panic!("MockWorkflowContractClient exhausted at call {}", *calls)
+            });
         *calls += 1;
         Ok(response)
     }

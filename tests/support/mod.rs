@@ -30,6 +30,7 @@ impl ScriptedLlmClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_texts(responses: Vec<&str>) -> Self {
         Self::new(
             responses
@@ -44,11 +45,13 @@ impl ScriptedLlmClient {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_api_format(mut self, api_format: ApiFormat) -> Self {
         self.api_format = api_format;
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_context_length(mut self, context_length: Option<i64>) -> Self {
         self.context_length = context_length;
         self

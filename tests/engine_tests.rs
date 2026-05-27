@@ -578,18 +578,11 @@ async fn ts004_tool_error_feedback() {
     args1.insert("query".to_string(), Value::String("bad query".to_string()));
     let mut args2 = IndexMap::new();
     args2.insert("query".to_string(), Value::String("good query".to_string()));
-    let mut args3 = IndexMap::new();
-    args3.insert("message".to_string(), Value::String("final".to_string()));
 
-    // First call fails, second succeeds. But since ToolCallable is a fn pointer,
-    // we can't have state. Use a workflow that always succeeds for search.
-    // Instead, test that resolution error path produces the right error prefix.
-
-    let client = mock_client(vec![
-        make_tool_call("search", args1),
-        make_tool_call("search", args2),
-        make_tool_call("respond", args3),
-    ]);
+    let responses = std::iter::once(make_tool_call("search", args1))
+        .chain((0..9).map(|_| make_tool_call("search", args2.clone())))
+        .collect();
+    let client = mock_client(responses);
 
     let mut tools: IndexMap<String, ToolDef> = IndexMap::new();
     tools.insert(
