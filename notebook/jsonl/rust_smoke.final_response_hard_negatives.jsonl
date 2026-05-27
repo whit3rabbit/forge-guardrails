@@ -1,0 +1,1 @@
+{"kind":"final_response","candidate":{"final_text":""},"final_response_classifier_scores":[],"outcome":{"scenario":"error_recovery","scenario_family":"error_recovery","run":1,"failure_kind":"ToolCallError","accuracy":null,"corrected_positive":{"final_text":"Fetched 10 records and summarized the record count."}}}

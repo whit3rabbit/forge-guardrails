@@ -2,7 +2,7 @@
 
 This document defines the training-data, artifact, and eval telemetry schemas for Forge semantic verifier models. It covers the tool-call verifier and the final-response verifier. These schemas are Rust-facing contracts; notebooks or training jobs should emit data that loads into the Rust types without lossy conversion.
 
-The production training notebook is [`notebook/toolcall_verifier_training_production_colab_v4.ipynb`](../notebook/toolcall_verifier_training_production_colab_v4.ipynb). It is a Google Colab notebook. Do not treat local notebook execution as a verification gate. Validate local edits with JSON/static syntax checks, then run the notebook in Colab. `UPLOAD_TO_HUB` is intentionally enabled by default; artifacts are private by default and must carry shadow-first provenance until eval replay promotes them.
+The production training notebook is [`notebook/toolcall_verifier_training_production_colab_v4.ipynb`](../notebook/toolcall_verifier_training_production_colab_v4.ipynb). It is a Google Colab notebook. Do not treat local notebook execution as a verification gate. Validate local edits with JSON/static syntax checks, then run the notebook in Colab. `UPLOAD_TO_HUB`, `ENABLE_FORGE_AUGMENTATION`, and `ENABLE_FINAL_RESPONSE_VERIFIER` are intentionally enabled by default; artifacts are private by default and must carry shadow-first provenance until eval replay promotes them.
 
 ## Versioning Rules
 
@@ -26,6 +26,8 @@ The Colab notebook may load:
 - Synthetic Forge rows for deterministic validation, workflow ordering, semantic argument transformation, and grounded synthesis.
 
 Failed eval outputs are not automatically positives. Create positives only from reviewed `corrected_positive` fields or canonical scenario validators/tests. Failed candidates may become negatives when the candidate is known bad. Group splits must keep related rows together by scenario, run, family, or explicit `example_group_id`.
+
+The Colab hard-negative loader consumes the enriched eval envelope below, including `context.user_request`, `context.workflow_state`, `context.available_tools`, `context.required_facts`, candidate call lists, classifier scores, and corrected candidate calls/final responses. For `error_recovery`, label the failed `fetch` call as `wrong_arguments_semantic`, not `wrong_tool_semantic`; the tool choice is correct and the semantic argument value is wrong.
 
 Tool-call hard negatives should cover:
 
@@ -340,7 +342,23 @@ model_quantized.onnx
   "label_mode": "production",
   "input_schema_version": "final-response-verifier-input/v1",
   "serializer": "serialize_final_response_state_v1",
-  "max_length": 1280,
+  "max_length": 768,
+  "requested_gpu_profile": "auto",
+  "run_profile": "high_vram_quality",
+  "memory_profile": {
+    "max_length": 768,
+    "epochs": 5,
+    "train_batch_size": 16,
+    "eval_batch_size": 32,
+    "grad_accum": 4,
+    "max_per_label": 5000
+  },
+  "gpu_info": {
+    "available": true,
+    "name": "NVIDIA A100",
+    "capability": [8, 0],
+    "total_gb": 40.0
+  },
   "onnx_file": "model.onnx",
   "quantized_onnx_file": "model_quantized.onnx",
   "labels": [
@@ -353,6 +371,44 @@ model_quantized.onnx
   "deployment_default": "shadow",
   "shadow_first_reason": "experimental final-response verifier; promote only after eval replay",
   "created_unix": 1779735826
+}
+```
+
+### `training_provenance.json`
+
+The final-response training provenance records compact run details without
+requiring large in-memory notebook objects to survive until upload:
+
+```json
+{
+  "schema_version": "final-response-verifier-training-provenance/v1",
+  "base_model": "microsoft/deberta-v3-small",
+  "run_profile": "high_vram_quality",
+  "gpu_info": {
+    "available": true,
+    "name": "NVIDIA A100",
+    "capability": [8, 0],
+    "total_gb": 40.0
+  },
+  "memory_profile": {
+    "max_length": 768,
+    "epochs": 5,
+    "train_batch_size": 16,
+    "eval_batch_size": 32,
+    "grad_accum": 4,
+    "max_per_label": 5000
+  },
+  "rows": 90,
+  "train_rows": 70,
+  "validation_rows": 10,
+  "test_rows": 10,
+  "label_counts": {
+    "valid_final_response": 18,
+    "missing_tool_fact": 18,
+    "contradicts_tool_result": 18,
+    "unsupported_claim": 18,
+    "failed_to_acknowledge_data_gap": 18
+  }
 }
 ```
 
@@ -493,6 +549,11 @@ Rows use this envelope:
 Final-response hard negatives use the same context and outcome envelope with
 `kind: "final_response"`, `candidate.final_text`, and
 `final_response_classifier_scores`.
+
+The notebook also emits reviewed corrected positives from
+`outcome.corrected_candidate_calls` and `outcome.corrected_final_response`.
+Those positives share the hard-negative group so train/validation/test splitting
+does not leak a failed candidate and its correction across splits.
 
 ## Deployment Modes
 

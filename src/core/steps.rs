@@ -133,8 +133,8 @@ impl StepTracker {
 
     /// Returns a human-readable summary of completed steps.
     ///
-    /// If no steps are completed, returns "[No steps completed yet]".
-    /// Otherwise returns "[Steps completed: <names>]" in execution order.
+    /// If no steps are completed, returns `"[No steps completed yet]"`.
+    /// Otherwise returns `"[Steps completed: names]"` in execution order.
     pub fn summary_hint(&self) -> String {
         if self.completed_steps.is_empty() {
             "[No steps completed yet]".to_string()

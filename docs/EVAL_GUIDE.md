@@ -213,3 +213,21 @@ telemetry to `proxy_classifier_<budget>.jsonl` whenever the classifier is
 enabled, using the `FORGE_CLASSIFIER_LOG` environment variable. Use that JSONL
 and Rust smoke JSONL classifier fields to inspect classifier scores; use the
 Python oracle JSONL and reports to confirm behavior changes.
+
+The Colab production notebook now exports the tool-call verifier and the
+separate final-response verifier by default. Keep both in `shadow` for first
+replay:
+
+```bash
+FORGE_FINAL_RESPONSE_CLASSIFIER_DIR=target/final-response-classifier-artifacts/onnx \
+FORGE_FINAL_RESPONSE_CLASSIFIER_MODE=shadow \
+FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL=quantized \
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classifier-dir target/classifier-artifacts/onnx \
+  --classifier-mode shadow
+```
+
+Final-response variants are required before expecting improvement on terminal
+synthesis failures such as grounded-synthesis or data-gap recovery. They should
+not be used to explain tool-call ordering or argument failures; inspect the
+tool-call classifier rows for those.

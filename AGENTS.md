@@ -111,6 +111,13 @@ Verifier model training:
 - `UPLOAD_TO_HUB=True` is the default. Keep uploads private unless explicitly
   told otherwise, and keep new verifier artifacts shadow-first until eval replay
   proves safety.
+- `ENABLE_FORGE_AUGMENTATION=True` and
+  `ENABLE_FINAL_RESPONSE_VERIFIER=True` are the production notebook defaults.
+  Disable them only for smoke checks or controlled ablations.
+- Keep the notebook's CUDA/object cleanup around the final-response verifier
+  path. The final-response run loads a second classifier after the tool-call
+  ONNX parity checks, so stale `Trainer`, model, tokenizer, tokenized dataset,
+  logits, and scored dataframe objects must be released before it starts.
 - Follow `docs/MODEL_TRAINING_SCHEMA.md` for row schemas, label order,
   artifact manifests, thresholds, calibration files, ONNX parity reports, and
   hard-negative envelopes.
@@ -126,6 +133,10 @@ Verifier model training:
 - Final-response verifier artifacts are separate from tool-call classifier
   artifacts and use `final-response-verifier-artifact/v1` with
   `serialize_final_response_state_v1`.
+- The notebook hard-negative loader consumes the enriched eval context
+  envelope. `error_recovery` tool-call hard negatives are
+  `wrong_arguments_semantic`, not `wrong_tool_semantic`, because the failed
+  call uses the right tool with wrong semantic arguments.
 - Do not commit ONNX classifier artifacts, downloaded model snapshots, Colab
   workdirs, Hugging Face caches, or generated `target/local-eval` outputs.
 

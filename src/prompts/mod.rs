@@ -230,10 +230,10 @@ fn parse_tool_json(json_str: &str, available_tools: &[&str]) -> Option<ToolCall>
 /// Fallback parser for tool calls hidden in malformed model output.
 ///
 /// Strips thinking-block tags, then tries strategies in strict priority order:
-/// 1. JSON extraction via extract_tool_call
-/// 2. Rehearsal syntax: tool_name[ARGS]{json_args}
-/// 3. Qwen XML format: <function=name>...</function>
-/// 4. Mistral bracket-tag: [TOOL_CALLS]name{...}
+/// 1. JSON extraction via `extract_tool_call`
+/// 2. Rehearsal syntax: `tool_name[ARGS]{json_args}`
+/// 3. Qwen XML format: `<function=name>...</function>`
+/// 4. Mistral bracket-tag: `[TOOL_CALLS]name{...}`
 pub fn rescue_tool_call(text: &str, available_tools: &[&str]) -> Vec<ToolCall> {
     let text = parse_strategies::strip_think_tags(text);
     if text.trim().is_empty() {
