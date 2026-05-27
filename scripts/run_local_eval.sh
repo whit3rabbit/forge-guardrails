@@ -374,7 +374,7 @@ prepare_classifier_binaries() {
   if final_response_classifier_enabled; then
     FINAL_RESPONSE_CLASSIFIER_DIR="$(canonical_dir "$FINAL_RESPONSE_CLASSIFIER_DIR")"
     [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/artifact_manifest.json" ]] || die "final-response classifier artifact_manifest.json missing in $FINAL_RESPONSE_CLASSIFIER_DIR"
-    [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/tokenizer.json" ]] || die "final-response classifier tokenizer.json missing in $FINAL_RESPONSE_CLASSIFIER_DIR; the current published artifact is not runnable by the Rust ONNX scorer until tokenizer.json is published"
+    [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/tokenizer.json" ]] || die "final-response classifier tokenizer.json missing in $FINAL_RESPONSE_CLASSIFIER_DIR"
     case "$FINAL_RESPONSE_CLASSIFIER_MODEL" in
       quantized)
         [[ -f "$FINAL_RESPONSE_CLASSIFIER_DIR/model_quantized.onnx" ]] || die "final-response classifier model_quantized.onnx missing in $FINAL_RESPONSE_CLASSIFIER_DIR"

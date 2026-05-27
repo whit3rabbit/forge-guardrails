@@ -293,8 +293,10 @@ fn required_files_for_model(
             "onnx/labels.json",
             "onnx/thresholds.json",
             "onnx/input_schema.json",
+            "onnx/tokenizer.json",
             "onnx/tokenizer_config.json",
             "onnx/special_tokens_map.json",
+            "onnx/added_tokens.json",
             "onnx/spm.model",
             "onnx/config.json",
             "onnx/onnx_parity_report.json",
@@ -346,8 +348,6 @@ fn optional_sidecar_files(artifact: ArtifactKind) -> Vec<&'static str> {
             "hf_model/onnx_parity_report.json",
         ],
         ArtifactKind::FinalResponse => vec![
-            "onnx/tokenizer.json",
-            "onnx/added_tokens.json",
             "onnx/serializer_fixture.json",
             "onnx/test_metrics.json",
             "onnx/training_metrics.json",
@@ -417,10 +417,10 @@ mod tests {
     }
 
     #[test]
-    fn final_response_download_does_not_require_unpublished_tokenizer_json() {
+    fn final_response_download_requires_runtime_tokenizer_json() {
         let required =
             required_files_for_model(ArtifactKind::FinalResponse, ClassifierModelKind::Quantized);
-        assert!(!required.contains(&"onnx/tokenizer.json"));
+        assert!(required.contains(&"onnx/tokenizer.json"));
         assert!(
             runtime_required_files(ArtifactKind::FinalResponse).contains(&"onnx/tokenizer.json")
         );

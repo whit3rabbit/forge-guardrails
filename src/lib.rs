@@ -74,7 +74,9 @@ pub use guardrails::{
     NEXT_SERIALIZER,
 };
 #[cfg(feature = "classifier")]
-pub use guardrails::{OnnxFinalResponseScorer, OnnxToolCallScorer};
+pub use guardrails::{
+    OnnxFinalResponseScorer, OnnxScorerOptions, OnnxToolCallScorer, MAX_ONNX_SESSION_POOL_SIZE,
+};
 pub use prompts::{
     build_tool_prompt, classifier_nudge, extract_tool_call, prerequisite_nudge, rescue_tool_call,
     retry_nudge, step_nudge, unknown_tool_nudge, unsafe_batch_nudge,

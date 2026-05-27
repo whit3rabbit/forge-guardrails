@@ -37,6 +37,7 @@ pub enum LlamafileMode {
 pub struct LlamafileClient {
     base_url: String,
     model: String,
+    http_client: reqwest::Client,
     temperature: Option<f64>,
     top_p: Option<f64>,
     top_k: Option<i64>,
@@ -62,6 +63,7 @@ impl LlamafileClient {
         Self {
             base_url: "http://localhost:8080/v1".to_string(),
             model,
+            http_client: reqwest::Client::new(),
             temperature: None,
             top_p: None,
             top_k: None,
@@ -84,6 +86,11 @@ impl LlamafileClient {
     /// Sets the base URL for the Llamafile endpoint.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
+        self
+    }
+    /// Sets the shared HTTP client used for upstream requests.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
         self
     }
     /// Sets the temperature sampling parameter.
@@ -321,7 +328,8 @@ impl LLMClient for LlamafileClient {
 
     async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
         let server_url = self.base_url.trim_end_matches("/v1").trim_end_matches('/');
-        let resp = reqwest::Client::new()
+        let resp = self
+            .http_client
             .get(format!("{}/props", server_url))
             .timeout(std::time::Duration::from_secs(10))
             .send()

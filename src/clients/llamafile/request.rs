@@ -17,7 +17,8 @@ impl LlamafileClient {
         passthrough: Option<&Map<String, Value>>,
     ) -> Result<LLMResponse, BackendError> {
         let body = self.build_native_body(&messages, tools, sampling, passthrough);
-        let resp = reqwest::Client::new()
+        let resp = self
+            .http_client
             .post(format!("{}/chat/completions", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
             .json(&body)
@@ -52,7 +53,8 @@ impl LlamafileClient {
         passthrough: Option<&Map<String, Value>>,
     ) -> Result<LLMResponse, BackendError> {
         let body = self.build_prompt_body(&messages, tools, sampling, passthrough);
-        let resp = reqwest::Client::new()
+        let resp = self
+            .http_client
             .post(format!("{}/chat/completions", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
             .json(&body)
@@ -94,7 +96,8 @@ impl LlamafileClient {
             passthrough.as_ref(),
             mode,
         );
-        let resp = reqwest::Client::new()
+        let resp = self
+            .http_client
             .post(format!("{}/chat/completions", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
             .json(&body)

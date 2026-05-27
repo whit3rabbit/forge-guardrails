@@ -20,6 +20,7 @@ use crate::clients::sampling::get_sampling_defaults;
 pub struct OllamaClient {
     base_url: String,
     model: String,
+    http_client: reqwest::Client,
     temperature: Option<f64>,
     top_p: Option<f64>,
     top_k: Option<i64>,
@@ -45,6 +46,7 @@ impl OllamaClient {
         Self {
             base_url: "http://localhost:11434".to_string(),
             model: model_str,
+            http_client: reqwest::Client::new(),
             temperature: None,
             top_p: None,
             top_k: None,
@@ -63,6 +65,11 @@ impl OllamaClient {
     /// Sets the base URL for the Ollama endpoint.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
+        self
+    }
+    /// Sets the shared HTTP client used for upstream requests.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
         self
     }
     /// Sets the temperature sampling parameter.

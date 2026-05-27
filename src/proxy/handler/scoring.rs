@@ -1,18 +1,21 @@
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use crate::clients::base::ToolCall;
 use crate::core::message::{Message, MessageRole, MessageType};
 use crate::core::tool_spec::ToolSpec;
 use crate::guardrails::{
-    recent_errors_from_messages, ClassifierAction, FinalResponseContext, FinalResponseScorer,
-    FinalResponseToolResult, ScoringContext, StepEnforcer, ToolCallScorer, WorkflowStateForScoring,
+    recent_errors_from_messages, ClassifierAction, FinalResponseContext, FinalResponseScore,
+    FinalResponseScorer, FinalResponseToolResult, ScoringContext, StepEnforcer, ToolCallScore,
+    ToolCallScorer, WorkflowStateForScoring,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 
 use super::classifier_log::{emit_proxy_classifier_jsonl, proxy_tool_call_for_json, unix_ms};
 
-pub(super) fn score_proxy_tool_calls(
-    scorer: Option<&dyn ToolCallScorer>,
+pub(super) async fn score_proxy_tool_calls(
+    scorer: Option<Arc<dyn ToolCallScorer>>,
     messages: &[Message],
     tool_calls: &[ToolCall],
     step_enforcer: Option<&StepEnforcer>,
@@ -42,7 +45,7 @@ pub(super) fn score_proxy_tool_calls(
 
     let mut nudge: Option<String> = None;
     for call in tool_calls {
-        match scorer.score(&ctx, call) {
+        match score_tool_call_blocking(scorer.clone(), ctx.clone(), call.clone()).await {
             Ok(score) => {
                 tracing::info!(
                     target: "forge.classifier",
@@ -90,8 +93,8 @@ pub(super) fn score_proxy_tool_calls(
     nudge
 }
 
-pub(super) fn score_proxy_final_tool_calls(
-    scorer: Option<&dyn FinalResponseScorer>,
+pub(super) async fn score_proxy_final_tool_calls(
+    scorer: Option<Arc<dyn FinalResponseScorer>>,
     messages: &[Message],
     tool_calls: &[ToolCall],
     step_enforcer: Option<&StepEnforcer>,
@@ -107,14 +110,16 @@ pub(super) fn score_proxy_final_tool_calls(
         let mut trace = proxy_tool_trace_from_messages(messages);
         trace.push(call.tool.clone());
         if let Some(content) = score_proxy_final_candidate(
-            scorer,
+            scorer.clone(),
             messages,
             &candidate,
             trace,
             step_enforcer,
             tool_specs,
             Some(call.tool.as_str()),
-        ) {
+        )
+        .await
+        {
             nudge = Some(content);
             break;
         }
@@ -122,8 +127,8 @@ pub(super) fn score_proxy_final_tool_calls(
     nudge
 }
 
-pub(super) fn score_proxy_final_text(
-    scorer: Option<&dyn FinalResponseScorer>,
+pub(super) async fn score_proxy_final_text(
+    scorer: Option<Arc<dyn FinalResponseScorer>>,
     messages: &[Message],
     candidate: &str,
     step_enforcer: Option<&StepEnforcer>,
@@ -138,10 +143,11 @@ pub(super) fn score_proxy_final_text(
         tool_specs,
         None,
     )
+    .await
 }
 
-fn score_proxy_final_candidate(
-    scorer: Option<&dyn FinalResponseScorer>,
+async fn score_proxy_final_candidate(
+    scorer: Option<Arc<dyn FinalResponseScorer>>,
     messages: &[Message],
     candidate: &str,
     tool_trace: Vec<String>,
@@ -177,7 +183,7 @@ fn score_proxy_final_candidate(
         candidate_final_response: candidate.to_string(),
         metadata: None,
     };
-    match scorer.score(&ctx) {
+    match score_final_response_blocking(scorer, ctx.clone()).await {
         Ok(score) => {
             tracing::info!(
                 target: "forge.classifier",
@@ -228,6 +234,25 @@ fn score_proxy_final_candidate(
             None
         }
     }
+}
+
+async fn score_tool_call_blocking(
+    scorer: Arc<dyn ToolCallScorer>,
+    ctx: ScoringContext,
+    candidate: ToolCall,
+) -> anyhow::Result<ToolCallScore> {
+    tokio::task::spawn_blocking(move || scorer.score(&ctx, &candidate))
+        .await
+        .map_err(|err| anyhow::anyhow!("classifier scoring task failed: {err}"))?
+}
+
+async fn score_final_response_blocking(
+    scorer: Arc<dyn FinalResponseScorer>,
+    ctx: FinalResponseContext,
+) -> anyhow::Result<FinalResponseScore> {
+    tokio::task::spawn_blocking(move || scorer.score(&ctx))
+        .await
+        .map_err(|err| anyhow::anyhow!("final-response scoring task failed: {err}"))?
 }
 
 fn proxy_terminal_tool_set<'a>(

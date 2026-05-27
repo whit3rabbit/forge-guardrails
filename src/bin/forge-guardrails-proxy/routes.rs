@@ -510,6 +510,7 @@ mod tests {
             client_factory: Arc::new(ClientFactory::DirectOpenAi {
                 base_url: upstream.url(),
                 api_key: None,
+                http_client: reqwest::Client::new(),
                 context_tokens: 8192,
             }),
             request_mutex: Arc::new(TokioMutex::new(())),

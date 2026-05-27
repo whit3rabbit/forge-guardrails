@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -23,6 +24,44 @@ use crate::guardrails::scoring::{
 };
 use crate::guardrails::scoring_context::{serialize_state_v1, serialize_state_v2, ScoringContext};
 
+/// Maximum number of ONNX sessions a scorer may hold.
+pub const MAX_ONNX_SESSION_POOL_SIZE: usize = 4;
+
+/// Runtime options for ONNX-backed semantic scorers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OnnxScorerOptions {
+    /// Number of ONNX Runtime sessions to load for concurrent scoring.
+    pub session_pool_size: usize,
+    /// ONNX Runtime intra-op thread count per session.
+    pub intra_threads: usize,
+}
+
+impl Default for OnnxScorerOptions {
+    fn default() -> Self {
+        Self {
+            session_pool_size: 1,
+            intra_threads: 1,
+        }
+    }
+}
+
+impl OnnxScorerOptions {
+    /// Validate that option values stay inside bounded runtime limits.
+    pub fn validate(self) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            (1..=MAX_ONNX_SESSION_POOL_SIZE).contains(&self.session_pool_size),
+            "ONNX session pool size must be between 1 and {}, got {}",
+            MAX_ONNX_SESSION_POOL_SIZE,
+            self.session_pool_size
+        );
+        anyhow::ensure!(
+            self.intra_threads > 0,
+            "ONNX intra-op thread count must be positive"
+        );
+        Ok(self)
+    }
+}
+
 /// ONNX Runtime-backed scorer for the published tool-call verifier artifact.
 pub struct OnnxToolCallScorer {
     tokenizer: Tokenizer,
@@ -32,7 +71,8 @@ pub struct OnnxToolCallScorer {
     model_version: String,
     input_schema_version: String,
     serializer: String,
-    session: Mutex<Session>,
+    sessions: Vec<Mutex<Session>>,
+    next_session: AtomicUsize,
     input_names: HashSet<String>,
 }
 
@@ -51,6 +91,22 @@ impl OnnxToolCallScorer {
         mode_override: Option<ScorerMode>,
         model_kind: ClassifierModelKind,
     ) -> anyhow::Result<Self> {
+        Self::from_dir_with_model_and_options(
+            path,
+            mode_override,
+            model_kind,
+            OnnxScorerOptions::default(),
+        )
+    }
+
+    /// Load a classifier artifact with explicit model and runtime options.
+    pub fn from_dir_with_model_and_options(
+        path: impl AsRef<Path>,
+        mode_override: Option<ScorerMode>,
+        model_kind: ClassifierModelKind,
+        options: OnnxScorerOptions,
+    ) -> anyhow::Result<Self> {
+        let options = options.validate()?;
         let artifact = ClassifierArtifact::from_dir(path)?;
         let tokenizer_path = artifact.dir.join("tokenizer.json");
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
@@ -67,18 +123,8 @@ impl OnnxToolCallScorer {
         }));
 
         let model_path = artifact.model_path(model_kind);
-        let mut builder = Session::builder()?;
-        builder = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|err| anyhow::anyhow!("failed to set ONNX optimization level: {err}"))?;
-        builder = builder
-            .with_intra_threads(1)
-            .map_err(|err| anyhow::anyhow!("failed to set ONNX intra-op threads: {err}"))?;
-        let session = builder
-            .commit_from_file(&model_path)
-            .with_context(|| format!("failed to load ONNX model {}", model_path.display()))?;
-        let input_names = validate_session_inputs(&session)?;
-        validate_session_outputs(&session, artifact.labels.labels.len())?;
+        let (sessions, input_names) =
+            build_session_pool(&model_path, options, artifact.labels.labels.len())?;
 
         Ok(Self {
             tokenizer,
@@ -88,7 +134,8 @@ impl OnnxToolCallScorer {
             model_version: DEFAULT_CLASSIFIER_REPO.to_string(),
             input_schema_version: artifact.manifest.input_schema_version,
             serializer: artifact.manifest.serializer,
-            session: Mutex::new(session),
+            sessions,
+            next_session: AtomicUsize::new(0),
             input_names,
         })
     }
@@ -184,8 +231,8 @@ impl ToolCallScorer for OnnxToolCallScorer {
             ));
         }
 
-        let mut session = self
-            .session
+        let index = self.next_session.fetch_add(1, Ordering::Relaxed) % self.sessions.len();
+        let mut session = self.sessions[index]
             .lock()
             .map_err(|_| anyhow::anyhow!("ONNX session lock poisoned"))?;
         let outputs = session.run(inputs)?;
@@ -229,7 +276,8 @@ pub struct OnnxFinalResponseScorer {
     model_version: String,
     input_schema_version: String,
     serializer: String,
-    session: Mutex<Session>,
+    sessions: Vec<Mutex<Session>>,
+    next_session: AtomicUsize,
     input_names: HashSet<String>,
 }
 
@@ -248,6 +296,22 @@ impl OnnxFinalResponseScorer {
         mode_override: Option<ScorerMode>,
         model_kind: ClassifierModelKind,
     ) -> anyhow::Result<Self> {
+        Self::from_dir_with_model_and_options(
+            path,
+            mode_override,
+            model_kind,
+            OnnxScorerOptions::default(),
+        )
+    }
+
+    /// Prepare a final-response scorer with explicit model and runtime options.
+    pub fn from_dir_with_model_and_options(
+        path: impl AsRef<Path>,
+        mode_override: Option<ScorerMode>,
+        model_kind: ClassifierModelKind,
+        options: OnnxScorerOptions,
+    ) -> anyhow::Result<Self> {
+        let options = options.validate()?;
         let artifact = FinalResponseClassifierArtifact::from_dir(path)?;
         anyhow::ensure!(
             artifact.manifest.serializer == FINAL_RESPONSE_SERIALIZER,
@@ -269,18 +333,8 @@ impl OnnxFinalResponseScorer {
         }));
 
         let model_path = artifact.model_path(model_kind);
-        let mut builder = Session::builder()?;
-        builder = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|err| anyhow::anyhow!("failed to set ONNX optimization level: {err}"))?;
-        builder = builder
-            .with_intra_threads(1)
-            .map_err(|err| anyhow::anyhow!("failed to set ONNX intra-op threads: {err}"))?;
-        let session = builder
-            .commit_from_file(&model_path)
-            .with_context(|| format!("failed to load ONNX model {}", model_path.display()))?;
-        let input_names = validate_session_inputs(&session)?;
-        validate_session_outputs(&session, artifact.labels.labels.len())?;
+        let (sessions, input_names) =
+            build_session_pool(&model_path, options, artifact.labels.labels.len())?;
 
         Ok(Self {
             tokenizer,
@@ -290,7 +344,8 @@ impl OnnxFinalResponseScorer {
             model_version: DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO.to_string(),
             input_schema_version: artifact.manifest.input_schema_version,
             serializer: artifact.manifest.serializer,
-            session: Mutex::new(session),
+            sessions,
+            next_session: AtomicUsize::new(0),
             input_names,
         })
     }
@@ -389,8 +444,8 @@ impl FinalResponseScorer for OnnxFinalResponseScorer {
             ));
         }
 
-        let mut session = self
-            .session
+        let index = self.next_session.fetch_add(1, Ordering::Relaxed) % self.sessions.len();
+        let mut session = self.sessions[index]
             .lock()
             .map_err(|_| anyhow::anyhow!("ONNX session lock poisoned"))?;
         let outputs = session.run(inputs)?;
@@ -423,6 +478,44 @@ impl FinalResponseScorer for OnnxFinalResponseScorer {
             latency_ms: start.elapsed().as_secs_f64() * 1000.0,
         })
     }
+}
+
+fn build_session_pool(
+    model_path: &Path,
+    options: OnnxScorerOptions,
+    label_count: usize,
+) -> anyhow::Result<(Vec<Mutex<Session>>, HashSet<String>)> {
+    let mut sessions = Vec::with_capacity(options.session_pool_size);
+    let mut expected_input_names = None;
+    for _ in 0..options.session_pool_size {
+        let session = build_session(model_path, options.intra_threads)?;
+        let input_names = validate_session_inputs(&session)?;
+        validate_session_outputs(&session, label_count)?;
+        if let Some(expected) = &expected_input_names {
+            anyhow::ensure!(
+                expected == &input_names,
+                "ONNX session pool input names differ across sessions"
+            );
+        } else {
+            expected_input_names = Some(input_names.clone());
+        }
+        sessions.push(Mutex::new(session));
+    }
+    let input_names = expected_input_names.context("ONNX session pool is empty")?;
+    Ok((sessions, input_names))
+}
+
+fn build_session(model_path: &Path, intra_threads: usize) -> anyhow::Result<Session> {
+    let mut builder = Session::builder()?;
+    builder = builder
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|err| anyhow::anyhow!("failed to set ONNX optimization level: {err}"))?;
+    builder = builder
+        .with_intra_threads(intra_threads)
+        .map_err(|err| anyhow::anyhow!("failed to set ONNX intra-op threads: {err}"))?;
+    builder
+        .commit_from_file(model_path)
+        .with_context(|| format!("failed to load ONNX model {}", model_path.display()))
 }
 
 fn validate_session_inputs(session: &Session) -> anyhow::Result<HashSet<String>> {

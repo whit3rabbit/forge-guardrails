@@ -10,25 +10,30 @@ pub(crate) enum ClientFactory {
     DirectOpenAi {
         base_url: String,
         api_key: Option<String>,
+        http_client: reqwest::Client,
         context_tokens: i64,
     },
     DirectAnthropic {
         base_url: String,
         api_key: Option<String>,
+        http_client: reqwest::Client,
         context_tokens: i64,
     },
     DirectLlamafile {
         base_url: String,
         mode: String,
+        http_client: reqwest::Client,
         context_tokens: i64,
     },
     ManagedLlamafile {
         gguf_path: String,
         base_url: String,
         mode: String,
+        http_client: reqwest::Client,
     },
     ManagedOllama {
         model: String,
+        http_client: reqwest::Client,
         context_tokens: i64,
     },
 }
@@ -49,10 +54,12 @@ impl ClientFactory {
             Self::DirectOpenAi {
                 base_url,
                 api_key,
+                http_client,
                 context_tokens,
             } => {
                 let mut client = AnyLlmProxyClient::new(model)
                     .with_base_url(base_url)
+                    .with_http_client(http_client.clone())
                     .with_context_length(*context_tokens);
                 if let Some(api_key) = api_key {
                     client = client.with_api_key(api_key.clone());
@@ -62,35 +69,43 @@ impl ClientFactory {
             Self::DirectAnthropic {
                 base_url,
                 api_key,
+                http_client,
                 context_tokens,
             } => RoutedClient::DirectAnthropic(
-                AnthropicClient::new(model, api_key.clone()).with_base_url(base_url),
+                AnthropicClient::new(model, api_key.clone())
+                    .with_base_url(base_url)
+                    .with_http_client(http_client.clone()),
                 *context_tokens,
             ),
             Self::DirectLlamafile {
                 base_url,
                 mode,
+                http_client,
                 context_tokens,
             } => RoutedClient::DirectLlamafile(
                 LlamafileClient::new(model)
                     .with_base_url(base_url)
-                    .with_mode(mode),
+                    .with_mode(mode)
+                    .with_http_client(http_client.clone()),
                 *context_tokens,
             ),
             Self::ManagedLlamafile {
                 gguf_path,
                 base_url,
                 mode,
+                http_client,
             } => RoutedClient::ManagedLlamafile(
                 LlamafileClient::new(gguf_path)
                     .with_base_url(base_url)
-                    .with_mode(mode),
+                    .with_mode(mode)
+                    .with_http_client(http_client.clone()),
             ),
             Self::ManagedOllama {
                 model,
+                http_client,
                 context_tokens,
             } => {
-                let client = OllamaClient::new(model.clone());
+                let client = OllamaClient::new(model.clone()).with_http_client(http_client.clone());
                 client.set_num_ctx(Some(*context_tokens));
                 RoutedClient::ManagedOllama(client)
             }
@@ -235,5 +250,65 @@ impl LLMClient for RoutedClient {
             Self::ManagedLlamafile(client) => client.get_context_length().await,
             Self::ManagedOllama(client) => client.get_context_length().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn direct_openai_clients_share_transport_but_keep_usage_isolated() {
+        let mut upstream = mockito::Server::new_async().await;
+        let _mock = upstream
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "request-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let factory = ClientFactory::DirectOpenAi {
+            base_url: upstream.url(),
+            api_key: None,
+            http_client: reqwest::Client::new(),
+            context_tokens: 8192,
+        };
+
+        let first = factory.client_for_model("first-model".to_string());
+        let second = factory.client_for_model("second-model".to_string());
+        first
+            .send_with_options(
+                vec![json!({"role": "user", "content": "hello"})],
+                None,
+                LLMRequestOptions::default(),
+            )
+            .await
+            .expect("request");
+
+        assert_eq!(
+            first.last_usage(),
+            Some(TokenUsage::new(2, 3, 5)),
+            "requesting client records usage"
+        );
+        assert_eq!(
+            second.last_usage(),
+            None,
+            "routed clients keep usage isolated"
+        );
     }
 }

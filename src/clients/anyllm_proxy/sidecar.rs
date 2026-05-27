@@ -22,6 +22,7 @@ pub struct AnyLlmProxyClient {
     chat_completions_url: String,
     model: String,
     api_key: Option<String>,
+    http_client: reqwest::Client,
     timeout_secs: f64,
     context_length: Option<i64>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
@@ -36,6 +37,7 @@ impl AnyLlmProxyClient {
             chat_completions_url: DEFAULT_ANYLLM_PROXY_URL.to_string(),
             model: model.into(),
             api_key: None,
+            http_client: reqwest::Client::new(),
             timeout_secs: 300.0,
             context_length: None,
             last_usage: Arc::new(Mutex::new(None)),
@@ -53,6 +55,12 @@ impl AnyLlmProxyClient {
     /// Sets the API key used for authenticating with the proxy.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Sets the shared HTTP client used for upstream requests.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
         self
     }
 
@@ -79,8 +87,8 @@ impl AnyLlmProxyClient {
     }
 
     async fn send_request(&self, body: Value) -> Result<reqwest::Response, BackendError> {
-        let client = reqwest::Client::new();
-        let mut req = client
+        let mut req = self
+            .http_client
             .post(&self.chat_completions_url)
             .header("content-type", "application/json")
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))

@@ -38,6 +38,20 @@ forge-guardrails-proxy \
   --kv-unified
 ```
 
+Managed llama startup serializes proxy requests by default to preserve
+single-slot behavior. For throughput experiments, explicitly provision backend
+slots and disable proxy serialization:
+
+```bash
+forge-guardrails-proxy \
+  --backend llamaserver \
+  --gguf path/to/model.gguf \
+  --budget-mode manual \
+  --budget-tokens 8192 \
+  --slots 2 \
+  --no-serialize
+```
+
 Reasoning-tagged models on recent llama.cpp builds may need:
 
 ```bash

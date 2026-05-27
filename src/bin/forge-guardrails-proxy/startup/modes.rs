@@ -99,16 +99,19 @@ pub(super) fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Sta
         (CliBackendProtocol::Anthropic, _) => ClientFactory::DirectAnthropic {
             base_url,
             api_key: direct_anthropic_api_key(),
+            http_client: reqwest::Client::new(),
             context_tokens,
         },
         (CliBackendProtocol::Openai, CliMode::Prompt) => ClientFactory::DirectLlamafile {
             base_url,
             mode: cli.mode.as_str().to_string(),
+            http_client: reqwest::Client::new(),
             context_tokens,
         },
         (CliBackendProtocol::Openai, CliMode::Native) => ClientFactory::DirectOpenAi {
             base_url,
             api_key: direct_openai_api_key(&[]),
+            http_client: reqwest::Client::new(),
             context_tokens,
         },
     };
@@ -130,6 +133,7 @@ fn build_env_client_factory(config: &crate::config::ProxyConfig) -> ClientFactor
         return ClientFactory::DirectOpenAi {
             base_url: upstream.base_url,
             api_key: upstream.api_key,
+            http_client: reqwest::Client::new(),
             context_tokens: config.context_tokens,
         };
     }

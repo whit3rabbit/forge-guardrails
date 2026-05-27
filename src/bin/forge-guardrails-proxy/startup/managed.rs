@@ -76,6 +76,7 @@ pub(super) fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<St
                 model.clone(),
                 ClientFactory::ManagedOllama {
                     model,
+                    http_client: reqwest::Client::new(),
                     context_tokens,
                 },
                 Some(server),
@@ -115,6 +116,7 @@ pub(super) fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<St
                     gguf_path: gguf,
                     base_url: format!("http://127.0.0.1:{backend_port}/v1"),
                     mode: cli.mode.as_str().to_string(),
+                    http_client: reqwest::Client::new(),
                 },
                 Some(server),
                 context_tokens,
@@ -151,6 +153,7 @@ pub(super) fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<St
                     gguf_path: gguf,
                     base_url: format!("http://127.0.0.1:{backend_port}/v1"),
                     mode: cli.mode.as_str().to_string(),
+                    http_client: reqwest::Client::new(),
                 },
                 Some(server),
                 context_tokens,

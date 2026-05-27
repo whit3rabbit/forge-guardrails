@@ -508,12 +508,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             match response {
                 LLMResponse::ToolCalls(tool_calls) => {
                     if let Some(nudge) = score_proxy_tool_calls(
-                        scorer.as_deref(),
+                        scorer.clone(),
                         &internal_msgs,
                         &tool_calls,
                         None,
                         &tool_specs,
-                    ) {
+                    )
+                    .await
+                    {
                         emit_proxy_classifier_nudge_or_error(
                             &mut error_tracker,
                             tool_calls,
@@ -525,12 +527,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                         continue;
                     }
                     if let Some(nudge) = score_proxy_final_tool_calls(
-                        final_response_scorer.as_deref(),
+                        final_response_scorer.clone(),
                         &internal_msgs,
                         &tool_calls,
                         None,
                         &tool_specs,
-                    ) {
+                    )
+                    .await
+                    {
                         emit_proxy_final_response_tool_nudge_or_error(
                             &mut error_tracker,
                             tool_calls,
@@ -545,12 +549,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 }
                 LLMResponse::Text(text) => {
                     if let Some(nudge) = score_proxy_final_text(
-                        final_response_scorer.as_deref(),
+                        final_response_scorer.clone(),
                         &internal_msgs,
                         &text.content,
                         None,
                         &tool_specs,
-                    ) {
+                    )
+                    .await
+                    {
                         emit_proxy_user_classifier_nudge_or_error(
                             &mut error_tracker,
                             &mut internal_msgs,
@@ -582,12 +588,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 }
 
                 if let Some(nudge) = score_proxy_tool_calls(
-                    scorer.as_deref(),
+                    scorer.clone(),
                     &internal_msgs,
                     &tool_calls,
                     Some(enforcer),
                     &tool_specs,
-                ) {
+                )
+                .await
+                {
                     emit_proxy_classifier_nudge_or_error(
                         &mut error_tracker,
                         tool_calls,
@@ -599,12 +607,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     continue;
                 }
                 if let Some(nudge) = score_proxy_final_tool_calls(
-                    final_response_scorer.as_deref(),
+                    final_response_scorer.clone(),
                     &internal_msgs,
                     &tool_calls,
                     Some(enforcer),
                     &tool_specs,
-                ) {
+                )
+                .await
+                {
                     emit_proxy_final_response_tool_nudge_or_error(
                         &mut error_tracker,
                         tool_calls,
@@ -635,12 +645,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 }
 
                 if let Some(nudge) = score_proxy_final_text(
-                    final_response_scorer.as_deref(),
+                    final_response_scorer.clone(),
                     &internal_msgs,
                     &text.content,
                     Some(enforcer),
                     &tool_specs,
-                ) {
+                )
+                .await
+                {
                     emit_proxy_user_classifier_nudge_or_error(
                         &mut error_tracker,
                         &mut internal_msgs,

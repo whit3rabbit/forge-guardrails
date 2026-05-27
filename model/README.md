@@ -2,7 +2,8 @@
 
 This directory documents the verifier model artifacts used by Forge local evals.
 Do not commit downloaded ONNX weights, model snapshots, Hugging Face caches, or
-`target/classifier-artifacts` outputs. Keep model binaries under `target/`.
+`target/classifier-artifacts` / `target/final-response-classifier-artifacts`
+outputs. Keep model binaries under `target/`.
 
 Latest checked Hub state: 2026-05-27.
 
@@ -10,8 +11,8 @@ Latest checked Hub state: 2026-05-27.
 
 | Artifact | Hugging Face repo | Latest checked revision | Runtime status |
 |---|---|---|---|
-| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `80bbd07defa541378cb9d922a5da2e74717c2234` | Runnable by Rust ONNX scorer |
-| Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `45b2b1dbde262d77965e74bfc154d166c9870aa1` | Not runnable by current Rust ONNX scorer until `onnx/tokenizer.json` is published |
+| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `1c87eceea15ec42f755deafb0ac4166bd0bd51b0` | Runnable by Rust ONNX scorer |
+| Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `69d1a75d0fad25e3cf1333c7ea9c7cf0584614a4` | Runnable by Rust ONNX scorer |
 
 Both artifacts are DeBERTa-v3-small text classifiers exported as FP32 ONNX and
 quantized ONNX. Both should start in `shadow` mode. Deterministic Forge
@@ -57,7 +58,7 @@ cargo run --features classifier --bin download-classifier -- \
 
 Use `--classifier-model full` to also download `model.onnx`. The default
 quantized path downloads `model_quantized.onnx` plus metadata, schemas,
-thresholds, tokenizer files that are present, and published sidecars.
+thresholds, required tokenizer files, and published sidecars.
 
 ## Tool-Call Verifier
 
@@ -144,19 +145,9 @@ Latest checked test metrics:
 | Macro F1 | `0.06666666666666667` |
 | Test rows | `10` |
 
-Current blocker: the published final-response ONNX directory has
-`artifact_manifest.json`, labels, thresholds, ONNX weights, `spm.model`, and
-tokenizer config files, but it does not publish `onnx/tokenizer.json`. The Rust
-`OnnxFinalResponseScorer` currently requires that file. The downloader still
-fetches the published artifact files and prints:
-
-```text
-runtime_missing=onnx/tokenizer.json
-```
-
-Do not treat the current final-response artifact as runnable in Rust until the
-missing tokenizer file is published or the Rust scorer gains a verified
-tokenizer fallback.
+The current published final-response ONNX directory includes
+`onnx/tokenizer.json`, so the Rust `OnnxFinalResponseScorer` can load the local
+artifact directly.
 
 ## Eval Usage
 
@@ -191,7 +182,7 @@ classifier_fp32_onnx_advisory
 classifier_quantized_onnx_advisory
 ```
 
-Add final-response variants only after its artifact is runnable locally.
+Add final-response variants when evaluating terminal synthesis behavior.
 
 Track:
 

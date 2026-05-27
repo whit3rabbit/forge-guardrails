@@ -5,11 +5,16 @@ use crate::clients::base::{
 };
 use crate::clients::AnthropicClient;
 use crate::core::tool_spec::ToolSpec;
-use crate::{ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore};
+use crate::{
+    ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore, ToolCallClass,
+    ToolCallScore, ToolCallScorer,
+};
 use anyllm_translate::anthropic::MessageCreateRequest;
 use indexmap::IndexMap;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 fn filter_respond_removes_respond() {
@@ -414,6 +419,26 @@ impl LLMClient for MockOptionsClient {
 
 struct MockToolCallClient;
 
+struct SleepingToolScorer;
+
+impl ToolCallScorer for SleepingToolScorer {
+    fn score(
+        &self,
+        _ctx: &crate::ScoringContext,
+        _candidate: &ToolCall,
+    ) -> anyhow::Result<ToolCallScore> {
+        std::thread::sleep(Duration::from_millis(150));
+        Ok(ToolCallScore {
+            label: ToolCallClass::Valid,
+            confidence: 1.0,
+            logits: vec![9.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            action: ClassifierAction::Allow,
+            model_version: "sleeping-test".to_string(),
+            latency_ms: 150.0,
+        })
+    }
+}
+
 struct SequenceFinalScorer {
     calls: AtomicUsize,
 }
@@ -449,6 +474,33 @@ impl FinalResponseScorer for SequenceFinalScorer {
             })
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn proxy_tool_scoring_does_not_block_current_thread_runtime() {
+    let messages = vec![Message::new(
+        MessageRole::User,
+        "search for the current status",
+        MessageMeta::new(MessageType::UserInput),
+    )];
+    let tool_specs = vec![ToolSpec::from_json_schema(
+        "search",
+        "Search for information.",
+        &json!({"type": "object", "properties": {}}),
+    )
+    .expect("tool spec")];
+    let tool_calls = vec![ToolCall::new("search", IndexMap::new())];
+    let scorer = Arc::new(SleepingToolScorer);
+
+    let scoring = score_proxy_tool_calls(Some(scorer), &messages, &tool_calls, None, &tool_specs);
+    tokio::pin!(scoring);
+    let early = tokio::time::timeout(Duration::from_millis(25), &mut scoring).await;
+
+    assert!(
+        early.is_err(),
+        "scoring should be running on a blocking worker"
+    );
+    assert!(scoring.await.is_none());
 }
 
 impl LLMClient for MockToolCallClient {

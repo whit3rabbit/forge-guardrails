@@ -22,6 +22,7 @@ pub struct AnthropicClient {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    http_client: reqwest::Client,
     max_tokens: i64,
     timeout_secs: f64,
     max_retries: i64,
@@ -37,6 +38,7 @@ impl AnthropicClient {
             base_url: "https://api.anthropic.com/v1".to_string(),
             model: model.into(),
             api_key,
+            http_client: reqwest::Client::new(),
             max_tokens: 4096,
             timeout_secs: 300.0,
             max_retries: 3,
@@ -49,6 +51,12 @@ impl AnthropicClient {
     /// Sets the base URL for the Anthropic API.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    /// Sets the shared HTTP client used for upstream requests.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
         self
     }
 

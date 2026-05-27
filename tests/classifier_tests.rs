@@ -9,6 +9,8 @@ use forge_guardrails::guardrails::{
 };
 use forge_guardrails::streaming::{LLMResponse, ToolCall};
 use forge_guardrails::{serialize_state_v1, serialize_state_v2, ToolSpecForScoring};
+#[cfg(feature = "classifier")]
+use forge_guardrails::{OnnxScorerOptions, MAX_ONNX_SESSION_POOL_SIZE};
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -733,4 +735,50 @@ fn noop_final_response_scorer_allows_valid_final_response() {
 fn scorer_mode_parses_stable_names() {
     assert_eq!("shadow".parse::<ScorerMode>().unwrap(), ScorerMode::Shadow);
     assert!("block".parse::<ScorerMode>().is_err());
+}
+
+#[cfg(feature = "classifier")]
+#[test]
+fn onnx_scorer_options_validate_bounded_session_pool() {
+    assert!(OnnxScorerOptions {
+        session_pool_size: 1,
+        intra_threads: 1,
+    }
+    .validate()
+    .is_ok());
+    assert!(OnnxScorerOptions {
+        session_pool_size: MAX_ONNX_SESSION_POOL_SIZE,
+        intra_threads: 1,
+    }
+    .validate()
+    .is_ok());
+
+    let err = OnnxScorerOptions {
+        session_pool_size: 0,
+        intra_threads: 1,
+    }
+    .validate()
+    .expect_err("zero pool rejected");
+    assert!(err.to_string().contains("session pool size"));
+
+    let err = OnnxScorerOptions {
+        session_pool_size: MAX_ONNX_SESSION_POOL_SIZE + 1,
+        intra_threads: 1,
+    }
+    .validate()
+    .expect_err("oversized pool rejected");
+    assert!(err.to_string().contains("session pool size"));
+}
+
+#[cfg(feature = "classifier")]
+#[test]
+fn onnx_scorer_options_require_positive_intra_threads() {
+    let err = OnnxScorerOptions {
+        session_pool_size: 1,
+        intra_threads: 0,
+    }
+    .validate()
+    .expect_err("zero threads rejected");
+
+    assert!(err.to_string().contains("intra-op thread count"));
 }

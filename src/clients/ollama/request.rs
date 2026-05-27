@@ -71,7 +71,8 @@ impl LLMClient for OllamaClient {
         let think_resolved = self.think_resolved.lock().map(|g| *g).unwrap_or(false);
         let body =
             self.build_request_body(messages.clone(), tools.as_deref(), sampling.as_ref(), think);
-        let resp = match reqwest::Client::new()
+        let resp = match self
+            .http_client
             .post(format!("{}/api/chat", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
             .json(&body)
@@ -113,7 +114,8 @@ impl LLMClient for OllamaClient {
                                 sampling.as_ref(),
                                 false,
                             );
-                            let retry_resp = reqwest::Client::new()
+                            let retry_resp = self
+                                .http_client
                                 .post(format!("{}/api/chat", self.base_url))
                                 .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
                                 .json(&retry_body)
@@ -177,7 +179,8 @@ impl LLMClient for OllamaClient {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".to_string(), Value::Bool(true));
         }
-        let resp = match reqwest::Client::new()
+        let resp = match self
+            .http_client
             .post(format!("{}/api/chat", self.base_url))
             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
             .json(&body)
@@ -224,7 +227,8 @@ impl LLMClient for OllamaClient {
                         if let Some(obj) = rb_obj.as_object_mut() {
                             obj.insert("stream".to_string(), Value::Bool(true));
                         }
-                        let rr = reqwest::Client::new()
+                        let rr = self
+                            .http_client
                             .post(format!("{}/api/chat", self.base_url))
                             .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
                             .json(&rb_obj)

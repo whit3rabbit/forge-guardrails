@@ -48,8 +48,8 @@ impl LLMClient for AnthropicClient {
 
         let body = self.build_body_with_options(messages, tools, options, false);
 
-        let client = reqwest::Client::new();
-        let mut req = client
+        let mut req = self
+            .http_client
             .post(format!("{}/messages", self.base_url))
             .header("content-type", "application/json")
             .header("anthropic-version", "2023-06-01")
@@ -106,8 +106,8 @@ impl LLMClient for AnthropicClient {
 
         let body = self.build_body_with_options(messages, tools, options, true);
 
-        let client = reqwest::Client::new();
-        let mut req = client
+        let mut req = self
+            .http_client
             .post(format!("{}/messages", self.base_url))
             .header("content-type", "application/json")
             .header("anthropic-version", "2023-06-01")

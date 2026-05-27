@@ -170,7 +170,7 @@ cargo run --features classifier --bin download-classifier -- \
 
 The downloader defaults to the pinned Hugging Face revision used by Rust's
 `DEFAULT_CLASSIFIER_REVISION`, currently
-`80bbd07defa541378cb9d922a5da2e74717c2234` for
+`1c87eceea15ec42f755deafb0ac4166bd0bd51b0` for
 `cowWhySo/toolcall-verifier-classifier-production`. It writes the runnable ONNX
 artifact under `target/classifier-artifacts/onnx` and also downloads published
 schema/report sidecars such as `input_schema_v1.json`,
@@ -219,6 +219,14 @@ enabled, using the `FORGE_CLASSIFIER_LOG` environment variable. Use that JSONL
 and Rust smoke JSONL classifier fields to inspect classifier scores; use the
 Python oracle JSONL and reports to confirm behavior changes.
 
+ONNX scorer throughput knobs are opt-in. Keep defaults for parity baselines.
+For proxy throughput comparisons, set `FORGE_CLASSIFIER_SESSION_POOL_SIZE` and
+`FORGE_CLASSIFIER_INTRA_THREADS`; final-response verifier variants use
+`FORGE_FINAL_RESPONSE_CLASSIFIER_SESSION_POOL_SIZE` and
+`FORGE_FINAL_RESPONSE_CLASSIFIER_INTRA_THREADS`. Session pools are bounded to
+`1..=4`; each extra session loads another model copy, so measure RSS alongside
+latency.
+
 The Colab production notebook now exports the tool-call verifier and the
 separate final-response verifier by default. Keep both in `shadow` for first
 replay. Download the final-response artifact with:
@@ -232,24 +240,17 @@ cargo run --features classifier --bin download-classifier -- \
 That command writes the published files under
 `target/final-response-classifier-artifacts/onnx` by default. The pinned
 final-response revision is
-`45b2b1dbde262d77965e74bfc154d166c9870aa1` for
+`69d1a75d0fad25e3cf1333c7ea9c7cf0584614a4` for
 `cowWhySo/final-response-verifier-classifier-production`.
 
-Current limitation: the published final-response ONNX artifact does not include
-`onnx/tokenizer.json`. The downloader records that as `runtime_missing`, and
-`scripts/run_local_eval.sh` refuses to enable the final-response classifier
-until that file is present because the Rust ONNX scorer currently loads
-tokenizers from `tokenizer.json`.
-
-Once the runnable tokenizer file is published, use:
+Run final-response variants with the matching final-response classifier flags:
 
 ```bash
-FORGE_FINAL_RESPONSE_CLASSIFIER_DIR=target/final-response-classifier-artifacts/onnx \
-FORGE_FINAL_RESPONSE_CLASSIFIER_MODE=shadow \
-FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL=quantized \
 scripts/run_local_eval.sh --suite release --runs 10 \
   --classifier-dir target/classifier-artifacts/onnx \
-  --classifier-mode shadow
+  --classifier-mode shadow \
+  --final-response-classifier-dir target/final-response-classifier-artifacts/onnx \
+  --final-response-classifier-mode shadow
 ```
 
 Final-response variants are required before expecting improvement on terminal

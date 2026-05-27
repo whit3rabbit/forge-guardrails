@@ -2,11 +2,23 @@ use std::sync::Arc;
 
 #[cfg(feature = "classifier")]
 use forge_guardrails::{
-    FinalResponseContext, FinalResponseScore, ScoringContext, ToolCall, ToolCallScore,
+    FinalResponseContext, FinalResponseScore, OnnxScorerOptions, ScoringContext, ToolCall,
+    ToolCallScore,
 };
 use forge_guardrails::{FinalResponseScorer, ScorerMode, ToolCallScorer};
 
 use crate::config::ProxyConfig;
+
+#[cfg(feature = "classifier")]
+const FORGE_CLASSIFIER_SESSION_POOL_SIZE: &str = "FORGE_CLASSIFIER_SESSION_POOL_SIZE";
+#[cfg(feature = "classifier")]
+const FORGE_FINAL_RESPONSE_CLASSIFIER_SESSION_POOL_SIZE: &str =
+    "FORGE_FINAL_RESPONSE_CLASSIFIER_SESSION_POOL_SIZE";
+#[cfg(feature = "classifier")]
+const FORGE_CLASSIFIER_INTRA_THREADS: &str = "FORGE_CLASSIFIER_INTRA_THREADS";
+#[cfg(feature = "classifier")]
+const FORGE_FINAL_RESPONSE_CLASSIFIER_INTRA_THREADS: &str =
+    "FORGE_FINAL_RESPONSE_CLASSIFIER_INTRA_THREADS";
 
 pub(super) fn build_classifier_scorer(
     config: &ProxyConfig,
@@ -20,10 +32,16 @@ pub(super) fn build_classifier_scorer(
 
     #[cfg(feature = "classifier")]
     {
-        let scorer = forge_guardrails::OnnxToolCallScorer::from_dir_with_model(
+        let options = onnx_options_from_env(
+            FORGE_CLASSIFIER_SESSION_POOL_SIZE,
+            FORGE_CLASSIFIER_INTRA_THREADS,
+            "classifier",
+        )?;
+        let scorer = forge_guardrails::OnnxToolCallScorer::from_dir_with_model_and_options(
             dir,
             Some(config.classifier_mode),
             config.classifier_model,
+            options,
         )
         .map_err(|err| format!("failed to load classifier artifact: {err}"))?;
         let scorer: Arc<dyn ToolCallScorer> = Arc::new(scorer);
@@ -52,10 +70,16 @@ pub(super) fn build_final_response_classifier_scorer(
 
     #[cfg(feature = "classifier")]
     {
-        let scorer = forge_guardrails::OnnxFinalResponseScorer::from_dir_with_model(
+        let options = onnx_options_from_env(
+            FORGE_FINAL_RESPONSE_CLASSIFIER_SESSION_POOL_SIZE,
+            FORGE_FINAL_RESPONSE_CLASSIFIER_INTRA_THREADS,
+            "final-response classifier",
+        )?;
+        let scorer = forge_guardrails::OnnxFinalResponseScorer::from_dir_with_model_and_options(
             dir,
             Some(config.final_response_classifier_mode),
             config.final_response_classifier_model,
+            options,
         )
         .map_err(|err| format!("failed to load final-response classifier artifact: {err}"))?;
         let scorer: Arc<dyn FinalResponseScorer> = Arc::new(scorer);
@@ -72,6 +96,37 @@ pub(super) fn build_final_response_classifier_scorer(
             "final-response classifier support requires building with --features classifier"
                 .to_string(),
         )
+    }
+}
+
+#[cfg(feature = "classifier")]
+fn onnx_options_from_env(
+    pool_var: &str,
+    intra_var: &str,
+    label: &str,
+) -> Result<OnnxScorerOptions, String> {
+    let mut options = OnnxScorerOptions::default();
+    if let Some(value) = optional_usize_env(pool_var)? {
+        options.session_pool_size = value;
+    }
+    if let Some(value) = optional_usize_env(intra_var)? {
+        options.intra_threads = value;
+    }
+    options
+        .validate()
+        .map_err(|err| format!("invalid {label} ONNX runtime options: {err}"))
+}
+
+#[cfg(feature = "classifier")]
+fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
+    match std::env::var(name) {
+        Ok(raw) if raw.trim().is_empty() => Ok(None),
+        Ok(raw) => raw
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|err| format!("{name} must be a positive integer: {err}")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(format!("failed to read {name}: {err}")),
     }
 }
 

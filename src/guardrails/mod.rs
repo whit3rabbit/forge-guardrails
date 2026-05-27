@@ -56,4 +56,6 @@ pub use scoring_context::{
 pub use step_enforcer::{StepCheck, StepEnforcer, StepPrerequisite};
 
 #[cfg(feature = "classifier")]
-pub use onnx_scorer::{OnnxFinalResponseScorer, OnnxToolCallScorer};
+pub use onnx_scorer::{
+    OnnxFinalResponseScorer, OnnxScorerOptions, OnnxToolCallScorer, MAX_ONNX_SESSION_POOL_SIZE,
+};

@@ -138,6 +138,7 @@ fn external_prompt_mode_uses_llamafile_client_factory() {
             base_url,
             mode,
             context_tokens,
+            ..
         } => {
             assert_eq!(base_url, "http://localhost:8080/v1");
             assert_eq!(mode, "prompt");
