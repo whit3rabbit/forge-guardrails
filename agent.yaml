@@ -14,6 +14,10 @@ model:
   constraints:
     max_tokens: 8192
 
+runtime:
+  max_turns: 50
+  timeout: 600
+
 tags:
   - rust
   - llm
