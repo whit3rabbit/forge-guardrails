@@ -725,7 +725,13 @@ run_python_report() {
   fi
 
   log "Generating proxy summary -> $summary"
-  run_python_script scripts/summarize_proxy_eval.py "$output" 2>&1 | tee "$summary"
+  local summary_cmd classifier_logs
+  summary_cmd=(scripts/summarize_proxy_eval.py "$output")
+  classifier_logs=("$OUTPUT_DIR"/proxy_classifier_*.jsonl)
+  if [[ -e "${classifier_logs[0]:-}" ]]; then
+    summary_cmd+=(--classifier-jsonl "${classifier_logs[@]}")
+  fi
+  run_python_script "${summary_cmd[@]}" 2>&1 | tee "$summary"
 }
 
 run_published_compare() {

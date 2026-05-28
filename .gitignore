@@ -54,3 +54,11 @@ venv/
 *.gguf
 .forge/classifiers/
 .gitagent/
+
+# Local verifier training-data generation artifacts
+notebook/generatetd/.cache/
+notebook/generatetd/.pytest_cache/
+notebook/generatetd/.env
+notebook/generatetd/*.egg-info/
+notebook/generatetd/out/
+notebook/generatetd/local_review*.jsonl

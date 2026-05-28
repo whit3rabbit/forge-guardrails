@@ -28,6 +28,14 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _load_many(paths: list[Path]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        if path.exists():
+            rows.extend(_load_rows(path))
+    return rows
+
+
 def _rate(count: int, total: int) -> str:
     if total == 0:
         return "n/a"
@@ -103,7 +111,79 @@ def _scenario_stats(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
     return stats
 
 
-def print_summary(rows: list[dict[str, Any]]) -> None:
+def _oracle_by_user_message(rows: list[dict[str, Any]]) -> dict[str, Counter[str]]:
+    stats: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in rows:
+        request = row.get("user_message")
+        if not isinstance(request, str) or not request:
+            continue
+        stats[request]["rows"] += 1
+        if bool(row.get("success")):
+            stats[request]["success"] += 1
+        classification = _classification(row)
+        if classification:
+            stats[request][classification] += 1
+    return stats
+
+
+def _classifier_request(row: dict[str, Any]) -> str | None:
+    for key in ("initial_user_request", "user_request"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def print_classifier_summary(
+    rows: list[dict[str, Any]],
+    classifier_rows: list[dict[str, Any]],
+) -> None:
+    if not classifier_rows:
+        return
+
+    oracle_by_request = _oracle_by_user_message(rows)
+    labels = Counter(str(row.get("label", "<missing>")) for row in classifier_rows)
+    actions = Counter(str(row.get("action", "<missing>")) for row in classifier_rows)
+    by_oracle: dict[str, Counter[str]] = defaultdict(Counter)
+    unmatched = 0
+
+    for row in classifier_rows:
+        request = _classifier_request(row)
+        oracle = oracle_by_request.get(request or "")
+        if not oracle:
+            unmatched += 1
+            bucket = "unmatched"
+        elif oracle["accuracy_false"]:
+            bucket = "accuracy_false_request"
+        else:
+            bucket = "passing_request"
+        by_oracle[bucket][str(row.get("label", "<missing>"))] += 1
+
+    print("  Classifier telemetry:")
+    print(f"    Events: {len(classifier_rows)}")
+    print(
+        "    Labels: "
+        + ", ".join(f"{label}={count}" for label, count in sorted(labels.items()))
+    )
+    print(
+        "    Actions: "
+        + ", ".join(f"{action}={count}" for action, count in sorted(actions.items()))
+    )
+    if unmatched:
+        print(f"    Unmatched to oracle user_message: {unmatched}")
+    for bucket in ("passing_request", "accuracy_false_request", "unmatched"):
+        if by_oracle[bucket]:
+            parts = [
+                f"{label}={count}"
+                for label, count in sorted(by_oracle[bucket].items())
+            ]
+            print(f"    {bucket}: {', '.join(parts)}")
+
+
+def print_summary(
+    rows: list[dict[str, Any]],
+    classifier_rows: list[dict[str, Any]] | None = None,
+) -> None:
     total = len(rows)
     complete = sum(1 for row in rows if row.get("completeness"))
     success = sum(1 for row in rows if bool(row.get("success")))
@@ -183,6 +263,7 @@ def print_summary(rows: list[dict[str, Any]]) -> None:
             else "none"
         )
     )
+    print_classifier_summary(rows, classifier_rows or [])
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -190,12 +271,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Summarize proxy eval JSONL by completeness and accuracy"
     )
     parser.add_argument("jsonl", type=Path)
+    parser.add_argument(
+        "--classifier-jsonl",
+        nargs="*",
+        type=Path,
+        default=[],
+        help="Optional proxy classifier telemetry JSONL files to summarize",
+    )
     return parser.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args()
-    print_summary(_load_rows(args.jsonl))
+    print_summary(_load_rows(args.jsonl), _load_many(args.classifier_jsonl))
 
 
 if __name__ == "__main__":

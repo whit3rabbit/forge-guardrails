@@ -721,6 +721,7 @@ def _result_row(
         "ablation": ablation,
         "tool_choice": "auto",
         "scenario": result.scenario_name,
+        "user_message": scenario.user_message,
         "run": run_idx,
         "stream": stream,
         "completeness": result.completeness,

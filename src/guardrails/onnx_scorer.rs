@@ -1,6 +1,6 @@
 //! ONNX Runtime-backed tool-call scorer.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -26,6 +26,9 @@ use crate::guardrails::scoring_context::{serialize_state_v1, serialize_state_v2,
 
 /// Maximum number of ONNX sessions a scorer may hold.
 pub const MAX_ONNX_SESSION_POOL_SIZE: usize = 4;
+
+/// Default number of serialized scorer inputs cached per ONNX scorer.
+const DEFAULT_ONNX_SCORE_CACHE_CAPACITY: usize = 1024;
 
 /// Runtime options for ONNX-backed semantic scorers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +77,7 @@ pub struct OnnxToolCallScorer {
     sessions: Vec<Mutex<Session>>,
     next_session: AtomicUsize,
     input_names: HashSet<String>,
+    cache: Mutex<ScoreCache<ToolCallScore>>,
 }
 
 impl OnnxToolCallScorer {
@@ -137,6 +141,7 @@ impl OnnxToolCallScorer {
             sessions,
             next_session: AtomicUsize::new(0),
             input_names,
+            cache: Mutex::new(ScoreCache::new(DEFAULT_ONNX_SCORE_CACHE_CAPACITY)),
         })
     }
 
@@ -197,9 +202,19 @@ impl ToolCallScorer for OnnxToolCallScorer {
             NEXT_SERIALIZER => serialize_state_v2(&ctx_for_artifact, candidate),
             _ => serialize_state_v1(&ctx_for_artifact, candidate),
         };
+        if let Some(mut cached) = self
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ONNX score cache lock poisoned"))?
+            .get(&text)
+        {
+            cached.latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            return Ok(cached);
+        }
+
         let encoding = self
             .tokenizer
-            .encode(text, true)
+            .encode(text.as_str(), true)
             .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?;
 
         let input_ids = encoding
@@ -256,14 +271,19 @@ impl ToolCallScorer for OnnxToolCallScorer {
         let label = self.classify_label(best_id);
         let action = self.action_for(&label, confidence);
 
-        Ok(ToolCallScore {
+        let score = ToolCallScore {
             label,
             confidence,
             logits,
             action,
             model_version: self.model_version.clone(),
             latency_ms: start.elapsed().as_secs_f64() * 1000.0,
-        })
+        };
+        self.cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ONNX score cache lock poisoned"))?
+            .insert(text, score.clone());
+        Ok(score)
     }
 }
 
@@ -279,6 +299,7 @@ pub struct OnnxFinalResponseScorer {
     sessions: Vec<Mutex<Session>>,
     next_session: AtomicUsize,
     input_names: HashSet<String>,
+    cache: Mutex<ScoreCache<FinalResponseScore>>,
 }
 
 impl OnnxFinalResponseScorer {
@@ -347,6 +368,7 @@ impl OnnxFinalResponseScorer {
             sessions,
             next_session: AtomicUsize::new(0),
             input_names,
+            cache: Mutex::new(ScoreCache::new(DEFAULT_ONNX_SCORE_CACHE_CAPACITY)),
         })
     }
 
@@ -410,9 +432,19 @@ impl FinalResponseScorer for OnnxFinalResponseScorer {
             FINAL_RESPONSE_SERIALIZER => serialize_final_response_state_v1(&ctx_for_artifact),
             other => anyhow::bail!("unsupported final-response serializer '{other}'"),
         };
+        if let Some(mut cached) = self
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ONNX score cache lock poisoned"))?
+            .get(&text)
+        {
+            cached.latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+            return Ok(cached);
+        }
+
         let encoding = self
             .tokenizer
-            .encode(text, true)
+            .encode(text.as_str(), true)
             .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?;
 
         let input_ids = encoding
@@ -469,14 +501,66 @@ impl FinalResponseScorer for OnnxFinalResponseScorer {
         let label = self.classify_label(best_id);
         let action = self.action_for(&label, confidence);
 
-        Ok(FinalResponseScore {
+        let score = FinalResponseScore {
             label,
             confidence,
             logits,
             action,
             model_version: self.model_version.clone(),
             latency_ms: start.elapsed().as_secs_f64() * 1000.0,
-        })
+        };
+        self.cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ONNX score cache lock poisoned"))?
+            .insert(text, score.clone());
+        Ok(score)
+    }
+}
+
+struct ScoreCache<T> {
+    capacity: usize,
+    entries: VecDeque<(String, T)>,
+}
+
+impl<T: Clone> ScoreCache<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: VecDeque::with_capacity(capacity.min(128)),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<T> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(entry_key, _)| entry_key == key)?;
+        let (key, value) = self.entries.remove(index)?;
+        let cloned = value.clone();
+        self.entries.push_front((key, value));
+        Some(cloned)
+    }
+
+    fn insert(&mut self, key: String, value: T) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(entry_key, _)| entry_key == &key)
+        {
+            let _ = self.entries.remove(index);
+        }
+        self.entries.push_front((key, value));
+        while self.entries.len() > self.capacity {
+            let _ = self.entries.pop_back();
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -602,7 +686,7 @@ mod tests {
     use indexmap::IndexMap;
     use serde_json::Value;
 
-    use super::{softmax, OnnxToolCallScorer};
+    use super::{softmax, OnnxToolCallScorer, ScoreCache};
     use crate::clients::base::ToolCall;
     use crate::guardrails::scoring::{ScorerMode, ToolCallScorer};
     use crate::guardrails::scoring_context::ScoringContext;
@@ -612,6 +696,31 @@ mod tests {
         let probs = softmax(&[1.0, 2.0, 3.0, 4.0, 5.0]);
         let sum: f32 = probs.iter().sum();
         assert!((sum - 1.0).abs() < 0.00001);
+    }
+
+    #[test]
+    fn score_cache_returns_cached_values_and_refreshes_recency() {
+        let mut cache = ScoreCache::new(2);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+
+        assert_eq!(cache.get("a"), Some(1));
+        cache.insert("c".to_string(), 3);
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("a"), Some(1));
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("c"), Some(3));
+    }
+
+    #[test]
+    fn score_cache_does_not_store_when_capacity_is_zero() {
+        let mut cache = ScoreCache::new(0);
+
+        cache.insert("a".to_string(), 1);
+
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.get("a"), None);
     }
 
     #[test]

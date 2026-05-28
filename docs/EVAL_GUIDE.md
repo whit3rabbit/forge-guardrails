@@ -281,7 +281,10 @@ schema/protocol invalidity. `scripts/run_local_eval.sh` writes proxy classifier
 telemetry to `proxy_classifier_<budget>.jsonl` whenever the classifier is
 enabled, using the `FORGE_CLASSIFIER_LOG` environment variable. Use that JSONL
 and Rust smoke JSONL classifier fields to inspect classifier scores; use the
-Python oracle JSONL and reports to confirm behavior changes.
+Python oracle JSONL and reports to confirm behavior changes. The proxy summary
+also compares classifier labels against oracle requests when classifier JSONL is
+available, so threshold promotion decisions should use oracle outcomes rather
+than confidence alone.
 
 Classifier JSONL writes use a bounded async sink. Optional controls are
 `FORGE_CLASSIFIER_LOG_QUEUE_CAPACITY`, `FORGE_CLASSIFIER_LOG_MAX_EVENT_BYTES`,
@@ -293,7 +296,9 @@ For proxy throughput comparisons, set `FORGE_CLASSIFIER_SESSION_POOL_SIZE` and
 `FORGE_FINAL_RESPONSE_CLASSIFIER_SESSION_POOL_SIZE` and
 `FORGE_FINAL_RESPONSE_CLASSIFIER_INTRA_THREADS`. Session pools are bounded to
 `1..=4`; each extra session loads another model copy, so measure RSS alongside
-latency.
+latency. Each ONNX scorer also keeps a bounded in-process cache of serialized
+scorer inputs to avoid repeated tokenization and model execution for identical
+candidate/context pairs during replay.
 
 The Colab production notebook now exports the tool-call verifier and the
 separate final-response verifier by default. Keep both in `shadow` for first

@@ -43,7 +43,7 @@ When using the Forge proxy, client requests to `/v1/chat/completions` (OpenAI fo
 ```
 
 ### Struct Representation
-The Rust implementation maps this contract via `ProxyStepContract` in [handler.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/handler.rs#L60-L64):
+The Rust implementation maps this contract via `ProxyStepContract` in [request_contract.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/handler/request_contract.rs#L16-L19):
 
 ```rust
 struct ProxyStepContract {
@@ -104,7 +104,7 @@ struct ProxyStepContract {
 Forge uses a clean, Pydantic-compatible JSON Schema representation for defining tools and their arguments.
 
 ### The `respond` Terminal Tool
-The proxy automatically injects a reserved terminal tool named `respond` when tools are present. This tool is defined in [respond.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/tools/respond.rs) and allows the LLM to output final textual content inside a structured tool call.
+The proxy automatically injects a reserved terminal tool named `respond` when tools are present. This tool is defined in [respond.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/tools/respond.rs#L19-L46) and allows the LLM to output final textual content inside a structured tool call.
 
 Client-defined tools named `respond` are rejected. Silent replacement would change the caller's schema and semantics.
 
@@ -164,7 +164,7 @@ The proxy splits other top-level fields in the request body into sampling parame
 ### Sampling Schema
 Sampling options are extracted by the proxy to configure parameters that vary from call to call. They do not persist across requests.
 
-The following fields are extracted in `extract_sampling` in [proxy.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy.rs#L654-L678):
+The following fields are extracted in `extract_sampling` in [request_options.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy/request_options.rs#L24-L48):
 - `temperature`: Floating point number (e.g., `0.7`)
 - `top_p`: Floating point number (e.g., `0.9`)
 - `top_k`: Integer value
@@ -175,7 +175,7 @@ The following fields are extracted in `extract_sampling` in [proxy.rs](file:///U
 - `chat_template_kwargs`: Object containing arbitrary provider template settings (e.g., `{"enable_thinking": true}`)
 
 ### Passthrough Schema
-Any properties in the request body that are **not** forge-owned (i.e. not `messages`, `tools`, `stream`, `system`, or `_forge`) and **not** sampling parameters are gathered by `extract_passthrough` in [proxy.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy.rs#L681-L708) and forwarded transparently to the LLM client.
+Any properties in the request body that are **not** forge-owned (i.e. not `messages`, `tools`, `stream`, `system`, or `_forge`) and **not** sampling parameters are gathered by `extract_passthrough` in [request_options.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy/request_options.rs#L51-L78) and forwarded transparently to the LLM client.
 
 Common passthrough fields include:
 - `model`: String (e.g. `"gpt-4o-mini"`)
@@ -201,7 +201,7 @@ This applies to no-tools passthrough streams and synthesized guarded streams. Gu
 The proxy receives external messages from client requests, converts them to Forge's internal message representation, and converts them back during response generation.
 
 ### Message Translation Map
-The `openai_to_messages` function converts standard message structures into Forge's internal `Message` schema:
+The [openai_to_messages](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/proxy/proxy/message_parse.rs#L39) function converts standard message structures into Forge's internal `Message` schema:
 
 ```rust
 pub struct Message {
@@ -274,7 +274,7 @@ Thresholds remain label-specific. A label with advisory and enforce thresholds a
 
 ### Tool-Call Classifier Context
 
-The current tool-call classifier context is represented by `ScoringContext`:
+The current tool-call classifier context is represented by [ScoringContext](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/guardrails/scoring_context.rs#L48-L60):
 
 ```json
 {
@@ -356,7 +356,7 @@ Six-label order:
 
 ### Final-Response Verifier Context
 
-The final-response verifier runs only on terminal answers: `respond`, real terminal tools, or proxy text responses.
+The final-response verifier context is represented by [FinalResponseContext](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/guardrails/scoring.rs#L331-L348). It runs only on terminal answers: `respond`, real terminal tools, or proxy text responses.
 
 ```json
 {
