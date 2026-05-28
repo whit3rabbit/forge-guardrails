@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use forge_guardrails::guardrails::{
-    serialize_final_response_state_v1, ArtifactManifest, ClassifierAction, ClassifierArtifact,
-    FinalResponseClass, FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScorer,
+    score_final_response_async, score_tool_call_async, serialize_final_response_state_v1,
+    ArtifactManifest, ClassifierAction, ClassifierArtifact, FinalResponseClass,
+    FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScore, FinalResponseScorer,
     FinalResponseToolResult, LabelsFile, NoopFinalResponseScorer, ScorerMode, ScoringContext,
-    ScoringMetadata, TerminalTool, Thresholds, ToolCallClass, ToolCallScore, ToolCallScorer,
-    WorkflowStateForScoring,
+    ScoringMetadata, ScoringPipeline, TerminalTool, Thresholds, ToolCallClass, ToolCallScore,
+    ToolCallScorer, WorkflowStateForScoring,
 };
 use forge_guardrails::streaming::{LLMResponse, ToolCall};
 use forge_guardrails::{serialize_state_v1, serialize_state_v2, ToolSpecForScoring};
@@ -14,7 +15,7 @@ use forge_guardrails::{OnnxScorerOptions, MAX_ONNX_SESSION_POOL_SIZE};
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn candidate_from_fixture(value: &Value) -> ToolCall {
     let candidate = &value["input"]["candidate_call"];
@@ -554,6 +555,19 @@ struct FakeScorer {
     label: ToolCallClass,
 }
 
+struct BlockingToolCallScorer {
+    sleep: Duration,
+}
+
+struct BlockingFinalResponseScorer {
+    sleep: Duration,
+}
+
+struct FakeFinalResponseScorer {
+    action: ClassifierAction,
+    label: FinalResponseClass,
+}
+
 impl ToolCallScorer for FakeScorer {
     fn score(&self, _ctx: &ScoringContext, _candidate: &ToolCall) -> anyhow::Result<ToolCallScore> {
         *self.calls.lock().expect("calls lock") += 1;
@@ -566,6 +580,47 @@ impl ToolCallScorer for FakeScorer {
             logits: vec![0.0, 0.0, 9.0, 0.0, 0.0],
             action: self.action,
             model_version: "fake".to_string(),
+            latency_ms: 1.0,
+        })
+    }
+}
+
+impl ToolCallScorer for BlockingToolCallScorer {
+    fn score(&self, _ctx: &ScoringContext, _candidate: &ToolCall) -> anyhow::Result<ToolCallScore> {
+        std::thread::sleep(self.sleep);
+        Ok(ToolCallScore {
+            label: ToolCallClass::Valid,
+            confidence: 1.0,
+            logits: vec![9.0, 0.0],
+            action: ClassifierAction::Allow,
+            model_version: "blocking-fake".to_string(),
+            latency_ms: self.sleep.as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+impl FinalResponseScorer for BlockingFinalResponseScorer {
+    fn score(&self, _ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore> {
+        std::thread::sleep(self.sleep);
+        Ok(FinalResponseScore {
+            label: FinalResponseClass::ValidFinalResponse,
+            confidence: 1.0,
+            logits: vec![9.0, 0.0],
+            action: ClassifierAction::Allow,
+            model_version: "blocking-final-fake".to_string(),
+            latency_ms: self.sleep.as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+impl FinalResponseScorer for FakeFinalResponseScorer {
+    fn score(&self, _ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore> {
+        Ok(FinalResponseScore {
+            label: self.label.clone(),
+            confidence: 0.99,
+            logits: vec![0.0, 9.0],
+            action: self.action,
+            model_version: "fake-final".to_string(),
             latency_ms: 1.0,
         })
     }
@@ -604,6 +659,132 @@ fn minimal_scoring_context() -> ScoringContext {
         }],
         metadata: None,
     }
+}
+
+fn minimal_final_response_context() -> FinalResponseContext {
+    FinalResponseContext {
+        schema_version: "final-response-verifier-input/v1".to_string(),
+        user_request: "Summarize the facts.".to_string(),
+        workflow_state: WorkflowStateForScoring {
+            required_steps: Vec::new(),
+            completed_steps: Vec::new(),
+            pending_steps: Vec::new(),
+            terminal_tools: vec!["respond".to_string()],
+            recent_errors: Vec::new(),
+        },
+        required_facts: vec!["Paris".to_string()],
+        tool_trace: vec!["get_country_info".to_string()],
+        tool_results: Vec::new(),
+        candidate_final_response: "The capital is Paris.".to_string(),
+        metadata: None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn score_tool_call_async_does_not_block_current_thread_runtime() {
+    let scorer = Arc::new(BlockingToolCallScorer {
+        sleep: Duration::from_millis(80),
+    });
+    let ctx = Arc::new(minimal_scoring_context());
+    let candidate = ToolCall::new("search", IndexMap::new());
+    let started = Instant::now();
+    let scoring = score_tool_call_async(scorer, ctx, candidate);
+    tokio::pin!(scoring);
+
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(10)) => {
+            assert!(
+                started.elapsed() < Duration::from_millis(60),
+                "tool-call scoring blocked the current-thread runtime"
+            );
+        }
+        score = &mut scoring => {
+            panic!("blocking scorer completed before its delay: {score:?}");
+        }
+    }
+
+    let score = scoring.await.expect("score");
+    assert_eq!(score.action, ClassifierAction::Allow);
+}
+
+#[tokio::test]
+async fn scoring_pipeline_scores_tool_calls_and_returns_nudge() {
+    let calls = Arc::new(Mutex::new(0));
+    let scorer = Arc::new(FakeScorer {
+        calls: calls.clone(),
+        fail: false,
+        action: ClassifierAction::AdvisoryNudge,
+        label: ToolCallClass::WrongArgumentsSemantic,
+    });
+    let pipeline = ScoringPipeline::new(Some(scorer), None);
+    let candidates = vec![ToolCall::new("search", IndexMap::new())];
+    let mut observed_scores = 0;
+
+    let nudge = pipeline
+        .score_tool_calls(
+            Arc::new(minimal_scoring_context()),
+            &candidates,
+            |_call, score| {
+                observed_scores += 1;
+                assert_eq!(score.label, ToolCallClass::WrongArgumentsSemantic);
+            },
+            |_call, err| panic!("unexpected scoring error: {err}"),
+        )
+        .await;
+
+    assert!(nudge.is_some());
+    assert_eq!(*calls.lock().expect("calls lock"), 1);
+    assert_eq!(observed_scores, 1);
+}
+
+#[tokio::test]
+async fn scoring_pipeline_scores_final_response_and_returns_nudge() {
+    let scorer = Arc::new(FakeFinalResponseScorer {
+        action: ClassifierAction::Block,
+        label: FinalResponseClass::MissingToolFact,
+    });
+    let pipeline = ScoringPipeline::new(None, Some(scorer));
+    let mut observed_scores = 0;
+
+    let nudge = pipeline
+        .score_final_response(
+            Arc::new(minimal_final_response_context()),
+            |score| {
+                observed_scores += 1;
+                assert_eq!(score.label, FinalResponseClass::MissingToolFact);
+            },
+            |err| panic!("unexpected final-response scoring error: {err}"),
+        )
+        .await;
+
+    assert!(nudge.is_some());
+    assert_eq!(observed_scores, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn score_final_response_async_does_not_block_current_thread_runtime() {
+    let scorer = Arc::new(BlockingFinalResponseScorer {
+        sleep: Duration::from_millis(80),
+    });
+    let ctx = Arc::new(minimal_final_response_context());
+    let started = Instant::now();
+    let scoring = score_final_response_async(scorer, ctx);
+    tokio::pin!(scoring);
+
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(10)) => {
+            assert!(
+                started.elapsed() < Duration::from_millis(60),
+                "final-response scoring blocked the current-thread runtime"
+            );
+        }
+        score = &mut scoring => {
+            panic!("blocking scorer completed before its delay: {score:?}");
+        }
+    }
+
+    let score = scoring.await.expect("score");
+    assert_eq!(score.action, ClassifierAction::Allow);
 }
 
 #[test]

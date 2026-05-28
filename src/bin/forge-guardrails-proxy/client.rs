@@ -1,7 +1,8 @@
 use forge_guardrails::{
     AnthropicClient, AnyLlmProxyClient, AnyLlmRuntimeClient, ApiFormat, BackendError, ChunkStream,
-    ContextDiscoveryError, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse, LlamafileClient,
-    OllamaClient, SamplingParams, StreamError, TokenUsage, ToolSpec,
+    ContextDiscoveryError, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse,
+    LLMResponseEnvelope, LlamafileClient, OllamaClient, SamplingParams, StreamError, TokenUsage,
+    ToolSpec,
 };
 use serde_json::Value;
 
@@ -182,6 +183,46 @@ impl LLMClient for RoutedClient {
                 client.send_with_options(messages, tools, options).await
             }
             Self::ManagedOllama(client) => client.send_with_options(messages, tools, options).await,
+        }
+    }
+
+    async fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponseEnvelope, BackendError> {
+        match self {
+            Self::Runtime(client) => {
+                client
+                    .send_envelope_with_options(messages, tools, options)
+                    .await
+            }
+            Self::DirectOpenAi(client) => {
+                client
+                    .send_envelope_with_options(messages, tools, options)
+                    .await
+            }
+            Self::DirectAnthropic(client, _) => {
+                client
+                    .send_envelope_with_options(messages, tools, options)
+                    .await
+            }
+            Self::DirectLlamafile(client, _) => {
+                client
+                    .send_envelope_with_options(messages, tools, options)
+                    .await
+            }
+            Self::ManagedLlamafile(client) => {
+                client
+                    .send_envelope_with_options(messages, tools, options)
+                    .await
+            }
+            Self::ManagedOllama(client) => {
+                client
+                    .send_envelope_with_options(messages, tools, options)
+                    .await
+            }
         }
     }
 

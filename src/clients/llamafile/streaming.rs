@@ -29,6 +29,7 @@ pub(super) fn parse_openai_sse(
         let mut acc_reasoning = String::new();
         let mut acc_tools: Vec<(String, String, Option<String>)> = Vec::new();
         let mut final_response: Option<LLMResponse> = None;
+        let mut stream_usage = None;
 
         loop {
             while let Some(newline_pos) = line_buf.find('\n') {
@@ -38,7 +39,9 @@ pub(super) fn parse_openai_sse(
                 if data == "[DONE]" {
                     match final_response.take() {
                         Some(response) => {
-                            yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
+                            yield Ok(StreamChunk::new(ChunkType::Final)
+                                .with_response(response)
+                                .with_metadata(stream_usage.clone(), None, None));
                         }
                         None => {
                             yield Err(StreamError::default());
@@ -53,9 +56,11 @@ pub(super) fn parse_openai_sse(
                 if let Some(usage) = evt.get("usage") {
                     let prompt = usage.get("prompt_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
                     let completion = usage.get("completion_tokens").and_then(|t| t.as_i64()).unwrap_or(0);
+                    let usage = TokenUsage::new(prompt, completion, prompt + completion);
                     if let Ok(mut guard) = last_usage.lock() {
-                        guard.insert(slot_id, TokenUsage::new(prompt, completion, prompt + completion));
+                        guard.insert(slot_id, usage.clone());
                     }
+                    stream_usage = Some(usage);
                 }
 
                 if !evt.get("choices").is_some_and(|c| c.as_array().map(|a| !a.is_empty()).unwrap_or(false)) {
@@ -117,7 +122,9 @@ pub(super) fn parse_openai_sse(
                 None => {
                     match final_response.take() {
                         Some(response) => {
-                            yield Ok(StreamChunk::new(ChunkType::Final).with_response(response));
+                            yield Ok(StreamChunk::new(ChunkType::Final)
+                                .with_response(response)
+                                .with_metadata(stream_usage.clone(), None, None));
                         }
                         None => {
                             yield Err(StreamError::default());

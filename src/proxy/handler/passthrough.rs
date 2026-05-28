@@ -31,14 +31,14 @@ pub async fn run_passthrough<C: LLMClient + 'static>(
         .await;
     }
 
-    let response = client
-        .send_with_options(serialized.to_vec(), None, options)
+    let envelope = client
+        .send_envelope_with_options(serialized.to_vec(), None, options)
         .await
         .map_err(|e| e.to_string())?;
-    let usage = client.last_usage();
-    let usage_details = client.last_usage_details();
+    let usage = envelope.usage;
+    let usage_details = envelope.usage_details;
 
-    match response {
+    match envelope.response {
         LLMResponse::Text(text) => Ok(text_response_result(
             &text,
             model_name,
@@ -93,6 +93,8 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
                     }
                 }
                 ChunkType::Final => {
+                    let final_usage = chunk.usage;
+                    let final_usage_details = chunk.usage_details;
                     if !emitted_text {
                         let content = match chunk.response {
                             Some(LLMResponse::Text(text)) => text.content,
@@ -113,8 +115,9 @@ async fn run_passthrough_stream<C: LLMClient + 'static>(
                         ));
                     }
                     let usage_json = if include_usage {
-                        let usage = client.last_usage();
-                        let usage_details = client.last_usage_details();
+                        let usage = final_usage.or_else(|| client.last_usage());
+                        let usage_details =
+                            final_usage_details.or_else(|| client.last_usage_details());
                         usage.as_ref().map(|u| {
                             crate::proxy::proxy::usage_to_openai_json_with_details(
                                 Some(u),

@@ -46,9 +46,9 @@ pub use classifier_download::{
 pub use clients::{
     apply_sampling_defaults, format_tool, get_sampling_defaults, AnthropicClient,
     AnyLlmProxyClient, AnyLlmRuntimeClient, ApiFormat, ChunkStream, ChunkType, LLMCallInfo,
-    LLMClient, LLMRateLimitInfo, LLMRequestOptions, LLMResponse, LLMUsageDetails, LlamafileClient,
-    OllamaClient, SamplingParams, StreamChunk, TextResponse, TokenUsage, ToolCall,
-    MODEL_SAMPLING_DEFAULTS,
+    LLMClient, LLMRateLimitInfo, LLMRequestOptions, LLMResponse, LLMResponseEnvelope,
+    LLMUsageDetails, LlamafileClient, OllamaClient, SamplingParams, StreamChunk, TextResponse,
+    TokenUsage, ToolCall, MODEL_SAMPLING_DEFAULTS,
 };
 pub use context::{
     default_context_warning, detect_hardware, CompactEvent, CompactStrategy, ContextManager,
@@ -67,14 +67,15 @@ pub use error::{
     UnsupportedModelError, WorkflowCancelledError,
 };
 pub use guardrails::{
-    recent_errors_from_messages, serialize_final_response_state_v1, serialize_state_v1,
-    serialize_state_v2, validate_tool_arguments, validate_tool_call_batch, ArgValidationError,
-    ArgValidationKind, ArtifactManifest, CandidateCallForScoring, CheckResult, ClassifierAction,
-    ClassifierArtifact, ClassifierModelKind, ErrorTracker, FinalResponseClass,
-    FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScore, FinalResponseScorer,
-    FinalResponseToolResult, GuardAction, GuardrailDecision, GuardrailHistory, GuardrailState,
-    GuardrailViolation, Guardrails, LabelThreshold, LabelsFile, NoopFinalResponseScorer,
-    NoopToolCallScorer, Nudge, RetryNudgeFn, ScorerMode, ScoringContext, ScoringMetadata,
+    recent_errors_from_messages, score_final_response_async, score_tool_call_async,
+    serialize_final_response_state_v1, serialize_state_v1, serialize_state_v2,
+    validate_tool_arguments, validate_tool_call_batch, ArgValidationError, ArgValidationKind,
+    ArtifactManifest, CandidateCallForScoring, CheckResult, ClassifierAction, ClassifierArtifact,
+    ClassifierModelKind, ErrorTracker, FinalResponseClass, FinalResponseClassifierArtifact,
+    FinalResponseContext, FinalResponseScore, FinalResponseScorer, FinalResponseToolResult,
+    GuardAction, GuardrailDecision, GuardrailHistory, GuardrailState, GuardrailViolation,
+    Guardrails, LabelThreshold, LabelsFile, NoopFinalResponseScorer, NoopToolCallScorer, Nudge,
+    RetryNudgeFn, ScorerMode, ScoringContext, ScoringExecutor, ScoringMetadata, ScoringPipeline,
     StepCheck, StepEnforcer, StepPrerequisite, TerminalTool, Thresholds, ToolCallClass,
     ToolCallScore, ToolCallScorer, ToolSpecForScoring, ValidationResult, WorkflowStateForScoring,
     DEFAULT_CLASSIFIER_REPO, DEFAULT_CLASSIFIER_REVISION, DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO,
@@ -96,11 +97,11 @@ pub use proxy::{
     extract_passthrough, extract_sampling, handle_anthropic_messages,
     handle_anthropic_messages_with_scorer, handle_anthropic_messages_with_scorers,
     handle_chat_completions, handle_chat_completions_with_scorer,
-    handle_chat_completions_with_scorers, has_respond_tool, openai_to_messages,
-    respond_tool_openai, strip_respond_calls, text_response_to_openai, text_to_sse_events,
-    tool_calls_to_openai, tool_calls_to_sse_events, AnthropicEventStream, AnthropicHandlerError,
-    AnthropicHandlerResult, HTTPServer, HandlerError, HandlerResult, OpenAiEventStream,
-    OpenAiMessageError,
+    handle_chat_completions_with_scorers, has_respond_tool,
+    init_proxy_classifier_log_sink_from_env, openai_to_messages, respond_tool_openai,
+    strip_respond_calls, text_response_to_openai, text_to_sse_events, tool_calls_to_openai,
+    tool_calls_to_sse_events, AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult,
+    HTTPServer, HandlerError, HandlerResult, OpenAiEventStream, OpenAiMessageError,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};

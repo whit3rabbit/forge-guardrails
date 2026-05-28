@@ -8,8 +8,8 @@ pub use handler::{
     handle_anthropic_messages, handle_anthropic_messages_with_scorer,
     handle_anthropic_messages_with_scorers, handle_chat_completions,
     handle_chat_completions_with_scorer, handle_chat_completions_with_scorers,
-    AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HandlerError,
-    HandlerResult, OpenAiEventStream,
+    init_proxy_classifier_log_sink_from_env, AnthropicEventStream, AnthropicHandlerError,
+    AnthropicHandlerResult, HandlerError, HandlerResult, OpenAiEventStream,
 };
 pub use proxy::{
     extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,

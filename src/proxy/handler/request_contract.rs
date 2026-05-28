@@ -4,6 +4,7 @@ use crate::core::tool_spec::ToolSpec;
 use crate::tools::respond::{respond_spec, RESPOND_TOOL_NAME};
 use indexmap::IndexSet;
 use serde_json::{Map, Value};
+use std::sync::Arc;
 
 pub(super) const FORGE_EXTENSION_FIELD: &str = "_forge";
 pub(super) const FORGE_REQUIRED_STEPS_FIELD: &str = "required_steps";
@@ -223,13 +224,13 @@ fn sanitize_guarded_passthrough(
 }
 
 pub(super) fn sanitize_guarded_anthropic_body(
-    body: Option<Value>,
+    body: Option<Arc<Value>>,
     has_required_steps: bool,
-) -> Result<Option<Value>, HandlerError> {
+) -> Result<Option<Arc<Value>>, HandlerError> {
     let Some(mut body) = body else {
         return Ok(None);
     };
-    if let Some(obj) = body.as_object_mut() {
+    if let Some(obj) = Arc::make_mut(&mut body).as_object_mut() {
         obj.remove("response_format");
         if let Some(tool_choice) = obj.get("tool_choice") {
             validate_guarded_anthropic_tool_choice(tool_choice, has_required_steps)?;

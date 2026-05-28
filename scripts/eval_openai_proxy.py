@@ -171,6 +171,8 @@ class OpenAIProxyClient:
         if stream:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 async with client.stream("POST", self.base_url, json=body) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
                     response.raise_for_status()
                     return await _parse_openai_sse(response)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -212,6 +214,20 @@ def _chat_completions_url(base_url: str) -> str:
     if trimmed.endswith("/v1"):
         return f"{trimmed}/chat/completions"
     return f"{trimmed}/v1/chat/completions"
+
+
+def _http_error_message(exc: Any) -> str:
+    message = str(exc)
+    response = getattr(exc, "response", None)
+    if response is None:
+        return message
+    try:
+        response_text = response.text
+    except Exception:
+        return message
+    if not response_text:
+        return message
+    return f"{message}: {response_text}"
 
 
 def _usage_tokens(usage: dict[str, Any] | None) -> tuple[int, int]:
@@ -531,15 +547,23 @@ async def run_proxy_scenario(
     )
     started = time.monotonic()
 
+    import httpx
+
     for _ in range(scenario.max_iterations):
-        turn = await client.chat(
-            messages,
-            tools=proxy_tools,
-            sampling=None,
-            stream=stream,
-            required_steps=proxy_required_steps,
-            terminal_tools=proxy_terminal_tools,
-        )
+        try:
+            turn = await client.chat(
+                messages,
+                tools=proxy_tools,
+                sampling=None,
+                stream=stream,
+                required_steps=proxy_required_steps,
+                terminal_tools=proxy_terminal_tools,
+            )
+        except httpx.HTTPError as exc:
+            result.iterations_used += 1
+            result.error_type = type(exc).__name__
+            result.error_message = _http_error_message(exc)
+            break
         result.iterations_used += 1
         result.input_tokens += turn.input_tokens
         result.output_tokens += turn.output_tokens

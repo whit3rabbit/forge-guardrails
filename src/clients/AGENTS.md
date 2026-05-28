@@ -5,8 +5,8 @@ When modifying files under [src/clients](file:///Users/whit3rabbit/Documents/Git
 ## Gotchas & Rules
 
 1. **Keep TokenUsage Token-Only**:
-   - The [TokenUsage](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L144) struct should only track numeric token counts (`prompt_tokens`, `completion_tokens`, `total_tokens`).
-   - Do not add provider-specific metadata (cost, cache hits, headers) to `TokenUsage`. Instead, return provider cache details via [LLMUsageDetails](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L226) and general metadata via [LLMCallInfo](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L196) from the `last_call_info()` / `last_usage_details()` methods.
+   - The [TokenUsage](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L145) struct should only track numeric token counts (`prompt_tokens`, `completion_tokens`, `total_tokens`).
+   - Do not add provider-specific metadata (cost, cache hits, headers) to `TokenUsage`. Instead, return provider cache details via [LLMUsageDetails](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L227) and general metadata via [LLMCallInfo](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L197) from the `last_call_info()` / `last_usage_details()` methods.
 2. **Immutable Instance Defaults**:
    - Per-request options/sampling parameters (`SamplingParams`) must override default instance settings *for that request only*.
    - Never mutate the client's internal struct fields during request execution.

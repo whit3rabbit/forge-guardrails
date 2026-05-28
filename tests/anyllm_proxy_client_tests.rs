@@ -347,7 +347,17 @@ async fn anyllm_proxy_client_records_stream_headers_and_cost() {
 
     assert_eq!(chunks[0].chunk_type, ChunkType::TextDelta);
     assert_eq!(chunks[0].content, "hi");
-    assert_eq!(chunks.last().unwrap().chunk_type, ChunkType::Final);
+    let final_chunk = chunks.last().unwrap();
+    assert_eq!(final_chunk.chunk_type, ChunkType::Final);
+    assert_eq!(final_chunk.usage.as_ref().unwrap().total_tokens, 5);
+    let final_info = final_chunk.call_info.as_ref().expect("final call info");
+    assert_eq!(final_info.requested_model.as_deref(), Some("gpt-4o-mini"));
+    assert_eq!(final_info.response_model.as_deref(), Some("gpt-4o-mini"));
+    assert_eq!(
+        final_info.rate_limits.requests_remaining.as_deref(),
+        Some("12")
+    );
+    assert_positive_cost(final_info.estimated_cost_usd);
     assert_eq!(client.last_usage().unwrap().total_tokens, 5);
 
     let info = client.last_call_info().expect("call info recorded");

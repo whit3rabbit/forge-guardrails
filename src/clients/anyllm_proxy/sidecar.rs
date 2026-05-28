@@ -7,12 +7,13 @@ use super::request::{build_openai_request_body, normalize_chat_completions_url};
 use super::response::parse_openai_response;
 use super::streaming::parse_openai_sse;
 use super::usage::{
-    record_usage_cell, record_usage_details_cell, usage_details_from_openai_usage_value,
+    record_usage_cell, record_usage_details_cell, token_usage_from_openai_usage,
+    usage_details_from_openai_usage_value,
 };
 use super::DEFAULT_ANYLLM_PROXY_URL;
 use crate::clients::base::{
     ApiFormat, ChunkStream, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse,
-    LLMUsageDetails, SamplingParams, TokenUsage,
+    LLMResponseEnvelope, LLMUsageDetails, SamplingParams, TokenUsage,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -166,6 +167,18 @@ impl LLMClient for AnyLlmProxyClient {
         tools: Option<Vec<ToolSpec>>,
         options: LLMRequestOptions,
     ) -> Result<LLMResponse, BackendError> {
+        Ok(self
+            .send_envelope_with_options(messages, tools, options)
+            .await?
+            .response)
+    }
+
+    async fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponseEnvelope, BackendError> {
         let body = self.build_request_body(messages, tools, options, false);
         let resp = self.send_request(body).await?;
         let status = resp.status().as_u16() as i64;
@@ -174,21 +187,26 @@ impl LLMClient for AnyLlmProxyClient {
             .json::<Value>()
             .await
             .map_err(|e| BackendError::new(status, e.to_string()))?;
-        record_usage_details_cell(
-            &self.last_usage_details,
-            usage_details_from_openai_usage_value(response_value.get("usage")),
-        );
+        let usage_details = usage_details_from_openai_usage_value(response_value.get("usage"));
+        record_usage_details_cell(&self.last_usage_details, usage_details.clone());
         let response_json = serde_json::from_value::<
             anyllm_translate::openai::ChatCompletionResponse,
         >(response_value)
         .map_err(|e| BackendError::new(status, e.to_string()))?;
-        self.record_call_info(sidecar_call_info(
+        let usage = token_usage_from_openai_usage(response_json.usage.as_ref());
+        let call_info = sidecar_call_info(
             &self.model,
             &headers,
             Some(response_json.model.clone()),
             response_json.usage.as_ref(),
-        ));
-        Ok(self.parse_response(response_json))
+        );
+        self.record_call_info(call_info.clone());
+        Ok(LLMResponseEnvelope {
+            response: self.parse_response(response_json),
+            usage: Some(usage),
+            usage_details,
+            call_info: Some(call_info),
+        })
     }
 
     async fn send_stream(
@@ -212,12 +230,14 @@ impl LLMClient for AnyLlmProxyClient {
             .send_request(body)
             .await
             .map_err(|e| StreamError::new(e.to_string()))?;
-        self.record_call_info(sidecar_call_info(&self.model, resp.headers(), None, None));
+        let call_info = sidecar_call_info(&self.model, resp.headers(), None, None);
+        self.record_call_info(call_info.clone());
         Ok(Box::pin(parse_openai_sse(
             resp,
             self.last_usage.clone(),
             self.last_usage_details.clone(),
             self.last_call_info.clone(),
+            Some(call_info),
             Some(self.model.clone()),
         )))
     }

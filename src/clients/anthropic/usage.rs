@@ -5,26 +5,34 @@ use crate::clients::base::{LLMUsageDetails, TokenUsage};
 
 impl AnthropicClient {
     pub(super) fn record_usage(&self, response: &Value) {
-        let usage = response.get("usage");
-        let prompt = usage
-            .and_then(|u| u.get("input_tokens"))
-            .and_then(|t| t.as_i64())
-            .unwrap_or(0);
-        let cache_creation = usage_i64(usage, "cache_creation_input_tokens");
-        let cache_read = usage_i64(usage, "cache_read_input_tokens");
-        let prompt_total = prompt + cache_creation.unwrap_or(0) + cache_read.unwrap_or(0);
-        let completion = usage
-            .and_then(|u| u.get("output_tokens"))
-            .and_then(|t| t.as_i64())
-            .unwrap_or(0);
-        let token_usage = TokenUsage::new(prompt_total, completion, prompt_total + completion);
+        let (token_usage, details) = usage_from_response(response);
         if let Ok(mut guard) = self.last_usage.lock() {
             *guard = Some(token_usage);
         }
         if let Ok(mut guard) = self.last_usage_details.lock() {
-            *guard = anthropic_usage_details(cache_creation, cache_read);
+            *guard = details;
         }
     }
+}
+
+pub(super) fn usage_from_response(response: &Value) -> (TokenUsage, Option<LLMUsageDetails>) {
+    let usage = response.get("usage");
+    let prompt = usage
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    let cache_creation = usage_i64(usage, "cache_creation_input_tokens");
+    let cache_read = usage_i64(usage, "cache_read_input_tokens");
+    let prompt_total = prompt + cache_creation.unwrap_or(0) + cache_read.unwrap_or(0);
+    let completion = usage
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    let token_usage = TokenUsage::new(prompt_total, completion, prompt_total + completion);
+    (
+        token_usage,
+        anthropic_usage_details(cache_creation, cache_read),
+    )
 }
 
 pub(super) fn usage_i64(usage: Option<&Value>, key: &str) -> Option<i64> {

@@ -2,9 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 
-use super::call_info::observe_stream_call_info;
+use super::call_info::{observe_stream_call_info, observe_stream_call_info_value};
 use super::response::final_stream_response;
-use super::usage::{record_usage_cell, record_usage_details_cell, usage_details_from_openai_usage};
+use super::usage::{
+    record_usage_cell, record_usage_details_cell, token_usage_from_openai_usage,
+    usage_details_from_openai_usage,
+};
 use crate::clients::base::{ChunkType, LLMCallInfo, LLMUsageDetails, StreamChunk, TokenUsage};
 use crate::error::StreamError;
 
@@ -37,6 +40,7 @@ pub(super) fn parse_openai_sse(
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
     last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
+    initial_call_info: Option<LLMCallInfo>,
     default_cost_model: Option<String>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     let byte_stream = resp.bytes_stream();
@@ -46,6 +50,9 @@ pub(super) fn parse_openai_sse(
         let mut accumulated_text = String::new();
         let mut accumulated_reasoning = String::new();
         let mut accumulated_tools: Vec<(String, String, String)> = Vec::new();
+        let mut stream_usage = None;
+        let mut stream_usage_details = None;
+        let mut stream_call_info = initial_call_info;
 
         loop {
             let raw = if let Some(raw) = take_sse_line(&mut line_buf) {
@@ -77,7 +84,13 @@ pub(super) fn parse_openai_sse(
                     &accumulated_reasoning,
                     &accumulated_tools,
                 );
-                yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
+                yield Ok(StreamChunk::new(ChunkType::Final)
+                    .with_response(final_response)
+                    .with_metadata(
+                        stream_usage.clone(),
+                        stream_usage_details.clone(),
+                        stream_call_info.clone(),
+                    ));
                 return;
             }
 
@@ -86,12 +99,19 @@ pub(super) fn parse_openai_sse(
                 Err(_) => continue,
             };
 
+            if evt.usage.is_some() {
+                stream_usage = Some(token_usage_from_openai_usage(evt.usage.as_ref()));
+                stream_usage_details = usage_details_from_openai_usage(evt.usage.as_ref());
+            }
             record_usage_cell(&last_usage, evt.usage.as_ref());
-            record_usage_details_cell(
-                &last_usage_details,
-                usage_details_from_openai_usage(evt.usage.as_ref()),
-            );
+            record_usage_details_cell(&last_usage_details, stream_usage_details.clone());
             let cost_model = default_cost_model.as_deref().unwrap_or(&evt.model);
+            observe_stream_call_info_value(
+                &mut stream_call_info,
+                &evt.model,
+                cost_model,
+                evt.usage.as_ref(),
+            );
             observe_stream_call_info(
                 &last_call_info,
                 &evt.model,
@@ -147,7 +167,13 @@ pub(super) fn parse_openai_sse(
             &accumulated_reasoning,
             &accumulated_tools,
         );
-        yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
+        yield Ok(StreamChunk::new(ChunkType::Final)
+            .with_response(final_response)
+            .with_metadata(
+                stream_usage.clone(),
+                stream_usage_details.clone(),
+                stream_call_info.clone(),
+            ));
     }
 }
 
@@ -171,6 +197,7 @@ pub(super) fn parse_openai_chunks(
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
     last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
+    initial_call_info: Option<LLMCallInfo>,
     cost_model: Option<String>,
 ) -> impl futures_core::Stream<Item = Result<StreamChunk, StreamError>> + Send {
     async_stream::stream! {
@@ -178,6 +205,9 @@ pub(super) fn parse_openai_chunks(
         let mut accumulated_text = String::new();
         let mut accumulated_reasoning = String::new();
         let mut accumulated_tools: Vec<(String, String, String)> = Vec::new();
+        let mut stream_usage = None;
+        let mut stream_usage_details = None;
+        let mut stream_call_info = initial_call_info;
 
         while let Some(chunk) = inner.next().await {
             let evt = match chunk {
@@ -188,12 +218,19 @@ pub(super) fn parse_openai_chunks(
                 }
             };
 
+            if evt.usage.is_some() {
+                stream_usage = Some(token_usage_from_openai_usage(evt.usage.as_ref()));
+                stream_usage_details = usage_details_from_openai_usage(evt.usage.as_ref());
+            }
             record_usage_cell(&last_usage, evt.usage.as_ref());
-            record_usage_details_cell(
-                &last_usage_details,
-                usage_details_from_openai_usage(evt.usage.as_ref()),
-            );
+            record_usage_details_cell(&last_usage_details, stream_usage_details.clone());
             let pricing_model = cost_model.as_deref().unwrap_or(&evt.model);
+            observe_stream_call_info_value(
+                &mut stream_call_info,
+                &evt.model,
+                pricing_model,
+                evt.usage.as_ref(),
+            );
             observe_stream_call_info(
                 &last_call_info,
                 &evt.model,
@@ -249,6 +286,12 @@ pub(super) fn parse_openai_chunks(
             &accumulated_reasoning,
             &accumulated_tools,
         );
-        yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_response));
+        yield Ok(StreamChunk::new(ChunkType::Final)
+            .with_response(final_response)
+            .with_metadata(
+                stream_usage.clone(),
+                stream_usage_details.clone(),
+                stream_call_info.clone(),
+            ));
     }
 }

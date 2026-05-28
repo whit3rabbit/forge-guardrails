@@ -1,10 +1,11 @@
 use serde_json::Value;
 
 use super::streaming::{process_anthropic_sse_line, AnthropicStreamState};
+use super::usage::usage_from_response;
 use super::{convert, AnthropicClient};
 use crate::clients::base::{
-    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMRequestOptions, LLMResponse, LLMUsageDetails,
-    SamplingParams,
+    ApiFormat, ChunkStream, ChunkType, LLMClient, LLMRequestOptions, LLMResponse,
+    LLMResponseEnvelope, LLMUsageDetails, SamplingParams,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -38,6 +39,18 @@ impl LLMClient for AnthropicClient {
         tools: Option<Vec<ToolSpec>>,
         options: LLMRequestOptions,
     ) -> Result<LLMResponse, BackendError> {
+        Ok(self
+            .send_envelope_with_options(messages, tools, options)
+            .await?
+            .response)
+    }
+
+    async fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponseEnvelope, BackendError> {
         let sampling = options.sampling.clone();
         if let Some(sp) = &sampling {
             log::debug!(
@@ -77,7 +90,13 @@ impl LLMClient for AnthropicClient {
             .map_err(|e| BackendError::new(status, e.to_string()))?;
 
         self.record_usage(&response_json);
-        Ok(convert::parse_response(&response_json))
+        let (usage, usage_details) = usage_from_response(&response_json);
+        Ok(LLMResponseEnvelope {
+            response: convert::parse_response(&response_json),
+            usage: Some(usage),
+            usage_details,
+            call_info: None,
+        })
     }
 
     async fn send_stream(

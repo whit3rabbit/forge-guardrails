@@ -10,12 +10,14 @@ use forge_guardrails::{
     ApiFormat, ChunkStream, ClassifierAction, ContextManager, FinalResponseClass,
     FinalResponseContext, FinalResponseScore, FinalResponseScorer, ForgeError, LLMClient,
     LLMResponse, Message, MessageMeta, MessageRole, MessageType, OnMessageFn, SamplingParams,
-    StreamChunk, ToolCallInfo, ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
+    ScoringContext, StreamChunk, ToolCall, ToolCallClass, ToolCallInfo, ToolCallScore,
+    ToolCallScorer, ToolResolutionError, ToolSpec, Workflow, WorkflowRunner,
 };
 use indexmap::IndexMap;
 use serde_json::Value;
 use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex};
 
 mod support;
@@ -35,10 +37,24 @@ struct SequenceFinalResponseScorer {
     call_count: AtomicI32,
 }
 
+struct SleepOnceToolCallScorer {
+    calls: AtomicI32,
+    sleep: Duration,
+}
+
 impl SequenceFinalResponseScorer {
     fn new() -> Self {
         Self {
             call_count: AtomicI32::new(0),
+        }
+    }
+}
+
+impl SleepOnceToolCallScorer {
+    fn new(sleep: Duration) -> Self {
+        Self {
+            calls: AtomicI32::new(0),
+            sleep,
         }
     }
 }
@@ -65,6 +81,22 @@ impl FinalResponseScorer for SequenceFinalResponseScorer {
                 latency_ms: 1.0,
             })
         }
+    }
+}
+
+impl ToolCallScorer for SleepOnceToolCallScorer {
+    fn score(&self, _ctx: &ScoringContext, _candidate: &ToolCall) -> anyhow::Result<ToolCallScore> {
+        if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            std::thread::sleep(self.sleep);
+        }
+        Ok(ToolCallScore {
+            label: ToolCallClass::Valid,
+            confidence: 1.0,
+            logits: vec![9.0, 0.0],
+            action: ClassifierAction::Allow,
+            model_version: "sleep-once-fake".to_string(),
+            latency_ms: self.sleep.as_secs_f64() * 1000.0,
+        })
     }
 }
 
@@ -273,6 +305,55 @@ async fn ts001_simple_two_step_workflow() {
         .await;
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
     let val = result.expect("ok");
+    assert_eq!(val, Value::String("final answer".to_string()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workflow_runner_classifier_scoring_does_not_block_current_thread_runtime() {
+    let mut args1 = IndexMap::new();
+    args1.insert("query".to_string(), Value::String("test".to_string()));
+    let mut args2 = IndexMap::new();
+    args2.insert(
+        "message".to_string(),
+        Value::String("final answer".to_string()),
+    );
+
+    let client = Arc::new(mock_client(vec![
+        make_tool_call("search", args1),
+        make_tool_call("respond", args2),
+    ]));
+    let scorer = Arc::new(SleepOnceToolCallScorer::new(Duration::from_millis(100)));
+    let runner = WorkflowRunner::new(
+        client,
+        make_context_manager(),
+        10,
+        3,
+        2,
+        false,
+        None,
+        None,
+        true,
+        None,
+    )
+    .with_tool_call_scorer(scorer, None);
+    let workflow = make_simple_workflow();
+    let started = Instant::now();
+    let run = runner.run(&workflow, "search for test", None, None, None);
+    tokio::pin!(run);
+
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {
+            assert!(
+                started.elapsed() < Duration::from_millis(80),
+                "WorkflowRunner classifier scoring blocked the current-thread runtime"
+            );
+        }
+        result = &mut run => {
+            panic!("workflow completed before blocking scorer delay: {result:?}");
+        }
+    }
+
+    let val = run.await.expect("workflow result");
     assert_eq!(val, Value::String("final answer".to_string()));
 }
 

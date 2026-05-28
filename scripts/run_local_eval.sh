@@ -70,6 +70,12 @@ FINAL_RESPONSE_CLASSIFIER_DIR="${FORGE_FINAL_RESPONSE_CLASSIFIER_DIR:-}"
 FINAL_RESPONSE_CLASSIFIER_MODE="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODE:-shadow}"
 FINAL_RESPONSE_CLASSIFIER_MODEL="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL:-quantized}"
 DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=0
+if [[ "${FORGE_RESOURCE_BASELINE:-}" =~ ^(1|true|yes|on)$ ]]; then
+  RESOURCE_BASELINE=1
+else
+  RESOURCE_BASELINE=0
+fi
+RESOURCE_INTERVAL="${FORGE_RESOURCE_INTERVAL:-1.0}"
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
 elif command -v python >/dev/null 2>&1; then
@@ -79,6 +85,8 @@ else
 fi
 PROXY_PID=""
 CURRENT_PROXY_LOG=""
+RESOURCE_SAMPLER_PID=""
+RESOURCE_SAMPLER_LABEL=""
 
 usage() {
   cat <<EOF
@@ -116,6 +124,9 @@ Options:
                             quantized|full (default: $FINAL_RESPONSE_CLASSIFIER_MODEL)
   --download-final-response-classifier
                             Download final-response classifier artifacts before running
+  --resource-baseline       Capture proxy/backend CPU and RSS stats during eval windows
+  --resource-interval SECONDS
+                            Resource sampling interval (default: 1.0)
   -h, --help                Show this help
 
 Examples:
@@ -149,6 +160,17 @@ valid_positive_int() {
       ;;
   esac
   (( 10#$1 > 0 ))
+}
+
+valid_positive_decimal() {
+  case "$1" in
+    ''|*[!0-9.]*|*.*.*|.)
+      return 1
+      ;;
+  esac
+  local digits
+  digits="${1//./}"
+  [[ "$digits" == *[1-9]* ]]
 }
 
 expand_path() {
@@ -271,18 +293,90 @@ PY
 cleanup() {
   local status="$?"
   trap - EXIT INT TERM HUP
+  stop_resource_sampler
   stop_proxy
   rm -f "${RUN_LOCAL_EVAL_SCRIPT_COPY:-}"
   exit "$status"
 }
 
 stop_proxy() {
+  stop_resource_sampler
   if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
     log "Stopping proxy pid $PROXY_PID"
     kill -TERM "$PROXY_PID" 2>/dev/null || true
     wait "$PROXY_PID" 2>/dev/null || true
   fi
   PROXY_PID=""
+}
+
+start_resource_sampler() {
+  local label sampler_log
+  label="$1"
+  [[ "$RESOURCE_BASELINE" == "1" ]] || return 0
+  [[ -n "$PROXY_PID" ]] || die "cannot start resource sampler without a proxy pid"
+
+  RESOURCE_SAMPLER_LABEL="$label"
+  sampler_log="$OUTPUT_DIR/resource_sampler_${label}.log"
+  log "Resource baseline: sampling label=$label, interval=${RESOURCE_INTERVAL}s"
+  (
+    cd "$REPO_ROOT"
+    if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+      exec "$PYTHON_BIN" scripts/proxy_resource_baseline.py sample \
+        --root-pid "$PROXY_PID" \
+        --label "$label" \
+        --output-dir "$OUTPUT_DIR" \
+        --interval "$RESOURCE_INTERVAL"
+    elif [[ -x "$REPO_ROOT/forge/.venv/bin/python" ]]; then
+      exec "$REPO_ROOT/forge/.venv/bin/python" scripts/proxy_resource_baseline.py sample \
+        --root-pid "$PROXY_PID" \
+        --label "$label" \
+        --output-dir "$OUTPUT_DIR" \
+        --interval "$RESOURCE_INTERVAL"
+    elif command -v uv >/dev/null 2>&1; then
+      exec env -u VIRTUAL_ENV uv run --project forge python scripts/proxy_resource_baseline.py sample \
+        --root-pid "$PROXY_PID" \
+        --label "$label" \
+        --output-dir "$OUTPUT_DIR" \
+        --interval "$RESOURCE_INTERVAL"
+    else
+      die "python runner not found for resource sampler"
+    fi
+  ) >"$sampler_log" 2>&1 &
+  RESOURCE_SAMPLER_PID="$!"
+}
+
+stop_resource_sampler() {
+  local status
+  if [[ -z "$RESOURCE_SAMPLER_PID" ]]; then
+    return 0
+  fi
+
+  if kill -0 "$RESOURCE_SAMPLER_PID" 2>/dev/null; then
+    log "Stopping resource sampler pid $RESOURCE_SAMPLER_PID"
+    kill -TERM "$RESOURCE_SAMPLER_PID" 2>/dev/null || true
+  fi
+
+  set +e
+  wait "$RESOURCE_SAMPLER_PID" 2>/dev/null
+  status="$?"
+  set -e
+  if [[ "$status" != "0" && "$status" != "130" && "$status" != "143" ]]; then
+    log "warning: resource sampler for $RESOURCE_SAMPLER_LABEL exited with status $status"
+  fi
+  RESOURCE_SAMPLER_PID=""
+  RESOURCE_SAMPLER_LABEL=""
+}
+
+run_resource_report() {
+  local report
+  [[ "$RESOURCE_BASELINE" == "1" ]] || return 0
+  report="$OUTPUT_DIR/resource_baseline_report.txt"
+
+  phase "Resource baseline report"
+  run_python_script scripts/proxy_resource_baseline.py report \
+    --output-dir "$OUTPUT_DIR" \
+    --report "$report"
+  log "Resource report: $report"
 }
 
 wait_for_health() {
@@ -483,6 +577,7 @@ start_proxy() {
     >"$CURRENT_PROXY_LOG" 2>&1 &
   PROXY_PID="$!"
   wait_for_health "$PROXY_PID"
+  start_resource_sampler "$label"
 }
 
 run_rust_smoke() {
@@ -705,6 +800,11 @@ final_response_classifier_dir=$FINAL_RESPONSE_CLASSIFIER_DIR
 final_response_classifier_mode=$FINAL_RESPONSE_CLASSIFIER_MODE
 final_response_classifier_model=$FINAL_RESPONSE_CLASSIFIER_MODEL
 classifier_jsonl_pattern=$OUTPUT_DIR/proxy_classifier_*.jsonl
+resource_baseline=$RESOURCE_BASELINE
+resource_interval=$RESOURCE_INTERVAL
+resource_samples_pattern=$OUTPUT_DIR/resource_samples_*.jsonl
+resource_summary_pattern=$OUTPUT_DIR/resource_summary_*.json
+resource_report=$OUTPUT_DIR/resource_baseline_report.txt
 EOF
   log "Metadata: $metadata"
 }
@@ -812,6 +912,14 @@ while [[ $# -gt 0 ]]; do
       DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=1
       shift
       ;;
+    --resource-baseline)
+      RESOURCE_BASELINE=1
+      shift
+      ;;
+    --resource-interval)
+      RESOURCE_INTERVAL="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -888,6 +996,7 @@ valid_positive_int "$RUNS" || die "--runs must be a positive integer"
 valid_positive_int "$PROXY_PORT" || die "--proxy-port must be a positive integer"
 valid_positive_int "$BACKEND_PORT" || die "--backend-port must be a positive integer"
 valid_positive_int "$HEALTH_TIMEOUT" || die "--health-timeout must be a positive integer"
+valid_positive_decimal "$RESOURCE_INTERVAL" || die "--resource-interval must be a positive number"
 [[ "$PROXY_PORT" != "$BACKEND_PORT" ]] || die "proxy and backend ports must differ"
 command -v curl >/dev/null 2>&1 || die "curl is required for health checks"
 have_python_runner || die "python runner not found; install uv, create forge/.venv, or set PYTHON"
@@ -916,6 +1025,11 @@ trap 'exit 129' HUP
 phase "Eval setup"
 log "Output directory: $OUTPUT_DIR"
 log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, proxy_backend_mode: $PROXY_BACKEND_MODE"
+if [[ "$RESOURCE_BASELINE" == "1" ]]; then
+  log "Resource baseline: enabled, interval=${RESOURCE_INTERVAL}s"
+else
+  log "Resource baseline: disabled"
+fi
 if classifier_enabled; then
   log "Classifier: dir=$CLASSIFIER_DIR, mode=$CLASSIFIER_MODE, model=$CLASSIFIER_MODEL"
 else
@@ -953,6 +1067,8 @@ else
   fi
 fi
 
+stop_resource_sampler
+run_resource_report
 run_python_report
 if [[ "$SUITE" == "release" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
   run_published_compare
@@ -965,6 +1081,9 @@ log "Local eval complete"
 log "Rust smoke:    $OUTPUT_DIR/rust_smoke.jsonl"
 log "Python oracle: $OUTPUT_DIR/python_oracle.jsonl"
 log "Python report: $OUTPUT_DIR/python_report.txt"
+if [[ "$RESOURCE_BASELINE" == "1" ]]; then
+  log "Resource rpt:  $OUTPUT_DIR/resource_baseline_report.txt"
+fi
 if [[ "$SUITE" == "release" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
   log "Published cmp: $OUTPUT_DIR/published_compare.txt"
 fi

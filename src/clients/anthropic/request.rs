@@ -12,7 +12,8 @@ impl AnthropicClient {
         options: LLMRequestOptions,
         stream: bool,
     ) -> Value {
-        if let Some(mut body) = options.inbound_anthropic_body {
+        if let Some(body) = options.inbound_anthropic_body {
+            let mut body = body.as_ref().clone();
             if let Some(obj) = body.as_object_mut() {
                 if stream {
                     obj.insert("stream".to_string(), Value::Bool(true));

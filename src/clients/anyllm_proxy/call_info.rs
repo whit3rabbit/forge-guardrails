@@ -114,12 +114,21 @@ pub(super) fn observe_stream_call_info(
     usage: Option<&anyllm_translate::openai::ChatUsage>,
 ) {
     if let Ok(mut guard) = cell.lock() {
-        let info = guard.get_or_insert_with(LLMCallInfo::default);
-        if info.response_model.is_none() {
-            info.response_model = Some(response_model.to_string());
-        }
-        if info.estimated_cost_usd.is_none() {
-            info.estimated_cost_usd = estimate_cost_usd(Some(cost_model), usage);
-        }
+        observe_stream_call_info_value(&mut guard, response_model, cost_model, usage);
+    }
+}
+
+pub(super) fn observe_stream_call_info_value(
+    info: &mut Option<LLMCallInfo>,
+    response_model: &str,
+    cost_model: &str,
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) {
+    let info = info.get_or_insert_with(LLMCallInfo::default);
+    if info.response_model.is_none() {
+        info.response_model = Some(response_model.to_string());
+    }
+    if info.estimated_cost_usd.is_none() {
+        info.estimated_cost_usd = estimate_cost_usd(Some(cost_model), usage);
     }
 }

@@ -60,6 +60,10 @@ async fn test_anthropic_streaming_request() {
     assert_eq!(chunks[1].chunk_type, ChunkType::TextDelta);
     assert_eq!(chunks[1].content, "world");
     assert_eq!(chunks[2].chunk_type, ChunkType::Final);
+    let final_usage = chunks[2].usage.as_ref().expect("final chunk usage");
+    assert_eq!(final_usage.prompt_tokens, 10);
+    assert_eq!(final_usage.completion_tokens, 5);
+    assert_eq!(final_usage.total_tokens, 15);
     let usage = client.last_usage().expect("stream usage recorded");
     assert_eq!(usage.prompt_tokens, 10);
     assert_eq!(usage.completion_tokens, 5);
@@ -108,6 +112,10 @@ async fn test_ollama_streaming_request() {
     assert_eq!(chunks[1].chunk_type, ChunkType::TextDelta);
     assert_eq!(chunks[1].content, "world");
     assert_eq!(chunks[2].chunk_type, ChunkType::Final);
+    let final_usage = chunks[2].usage.as_ref().expect("final chunk usage");
+    assert_eq!(final_usage.prompt_tokens, 5);
+    assert_eq!(final_usage.completion_tokens, 5);
+    assert_eq!(final_usage.total_tokens, 10);
     let usage = client.last_usage().expect("stream usage recorded");
     assert_eq!(usage.prompt_tokens, 5);
     assert_eq!(usage.completion_tokens, 5);
@@ -250,6 +258,10 @@ async fn test_llamafile_streaming_records_usage_after_finish() {
     assert_eq!(chunks[0].chunk_type, ChunkType::TextDelta);
     assert_eq!(chunks[0].content, "hello");
     assert_eq!(chunks[1].chunk_type, ChunkType::Final);
+    let final_usage = chunks[1].usage.as_ref().expect("final chunk usage");
+    assert_eq!(final_usage.prompt_tokens, 7);
+    assert_eq!(final_usage.completion_tokens, 3);
+    assert_eq!(final_usage.total_tokens, 10);
     let usage = client.last_usage().expect("stream usage recorded");
     assert_eq!(usage.prompt_tokens, 7);
     assert_eq!(usage.completion_tokens, 3);

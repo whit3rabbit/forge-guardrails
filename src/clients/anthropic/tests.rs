@@ -8,6 +8,7 @@ use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 use futures_util::StreamExt;
 use serde_json::json;
 use serde_json::Value;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn make_tool_spec(name: &str, desc: &str, props: &[(&str, &str)]) -> ToolSpec {
@@ -361,10 +362,22 @@ async fn stream_usage_includes_cache_tokens() {
         )
         .await
         .expect("stream starts");
+    let mut final_chunk = None;
     while let Some(chunk) = stream.next().await {
-        chunk.expect("chunk");
+        let chunk = chunk.expect("chunk");
+        if chunk.chunk_type == ChunkType::Final {
+            final_chunk = Some(chunk);
+        }
     }
 
+    let final_chunk = final_chunk.expect("final chunk");
+    let final_usage = final_chunk.usage.expect("final usage");
+    assert_eq!(final_usage.prompt_tokens, 70);
+    assert_eq!(final_usage.completion_tokens, 7);
+    assert_eq!(final_usage.total_tokens, 77);
+    let final_details = final_chunk.usage_details.expect("final details");
+    assert_eq!(final_details.cached_prompt_tokens, Some(17));
+    assert_eq!(final_details.cache_creation_prompt_tokens, Some(11));
     let u = client.get_last_usage().expect("usage");
     assert_eq!(u.prompt_tokens, 70);
     assert_eq!(u.completion_tokens, 7);
@@ -608,7 +621,7 @@ async fn raw_anthropic_body_is_sent_verbatim_for_clean_path() {
             vec![json!({"role": "user", "content": "mutated"})],
             None,
             LLMRequestOptions {
-                inbound_anthropic_body: Some(raw),
+                inbound_anthropic_body: Some(Arc::new(raw)),
                 ..Default::default()
             },
         )
@@ -721,7 +734,9 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
         "hi",
         crate::core::message::MessageMeta::new(crate::core::message::MessageType::UserInput),
     )];
-    let initial_wire = crate::core::inference::fold_and_serialize(&messages, "openai");
+    let initial_wire: Arc<[Value]> = Arc::from(
+        crate::core::inference::fold_and_serialize(&messages, "openai").into_boxed_slice(),
+    );
     let mut context = crate::context::manager::ContextManager::new(
         Box::new(crate::context::strategies::NoCompact),
         4096,
@@ -749,7 +764,7 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
         false,
         None,
         LLMRequestOptions {
-            inbound_anthropic_body: Some(raw.clone()),
+            inbound_anthropic_body: Some(Arc::new(raw.clone())),
             initial_openai_messages: Some(initial_wire),
             ..Default::default()
         },

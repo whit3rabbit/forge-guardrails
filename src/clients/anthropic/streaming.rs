@@ -129,16 +129,18 @@ pub(super) fn process_anthropic_sse_line(
             let prompt_total = state.usage_input
                 + state.usage_cache_creation.unwrap_or(0)
                 + state.usage_cache_read.unwrap_or(0);
+            let usage = TokenUsage::new(
+                prompt_total,
+                state.usage_output,
+                prompt_total + state.usage_output,
+            );
+            let usage_details =
+                anthropic_usage_details(state.usage_cache_creation, state.usage_cache_read);
             if let Ok(mut guard) = last_usage.lock() {
-                *guard = Some(TokenUsage::new(
-                    prompt_total,
-                    state.usage_output,
-                    prompt_total + state.usage_output,
-                ));
+                *guard = Some(usage.clone());
             }
             if let Ok(mut guard) = last_usage_details.lock() {
-                *guard =
-                    anthropic_usage_details(state.usage_cache_creation, state.usage_cache_read);
+                *guard = usage_details.clone();
             }
             let final_resp = if !state.tool_blocks.is_empty() {
                 let reasoning = if state.accumulated_text.is_empty() {
@@ -176,7 +178,9 @@ pub(super) fn process_anthropic_sse_line(
                 ))
             };
             return Ok(Some(
-                StreamChunk::new(ChunkType::Final).with_response(final_resp),
+                StreamChunk::new(ChunkType::Final)
+                    .with_response(final_resp)
+                    .with_metadata(Some(usage), usage_details, None),
             ));
         }
         _ => {}

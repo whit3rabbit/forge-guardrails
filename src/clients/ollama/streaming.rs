@@ -51,8 +51,9 @@ pub(super) fn parse_ollama_ndjson(
                 if done {
                     let prompt = obj.get("prompt_eval_count").and_then(|v| v.as_i64()).unwrap_or(0);
                     let completion = obj.get("eval_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let usage = TokenUsage::new(prompt, completion, prompt + completion);
                     if let Ok(mut guard) = last_usage.lock() {
-                        *guard = Some(TokenUsage::new(prompt, completion, prompt + completion));
+                        *guard = Some(usage.clone());
                     }
                     let response_val = json!({"message": {
                         "content": acc_content.clone(),
@@ -90,7 +91,9 @@ pub(super) fn parse_ollama_ndjson(
                         let content = acc_content.trim().to_string();
                         LLMResponse::Text(TextResponse::new(content))
                     };
-                    yield Ok(StreamChunk::new(ChunkType::Final).with_response(final_resp));
+                    yield Ok(StreamChunk::new(ChunkType::Final)
+                        .with_response(final_resp)
+                        .with_metadata(Some(usage), None, None));
                     return;
                 }
             }

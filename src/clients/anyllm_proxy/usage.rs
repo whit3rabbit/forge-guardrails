@@ -8,7 +8,16 @@ pub(super) fn record_usage_cell(
     cell: &Arc<Mutex<Option<TokenUsage>>>,
     usage: Option<&anyllm_translate::openai::ChatUsage>,
 ) {
-    let token_usage = usage
+    let token_usage = token_usage_from_openai_usage(usage);
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some(token_usage);
+    }
+}
+
+pub(super) fn token_usage_from_openai_usage(
+    usage: Option<&anyllm_translate::openai::ChatUsage>,
+) -> TokenUsage {
+    usage
         .map(|u| {
             TokenUsage::new(
                 u.prompt_tokens as i64,
@@ -16,10 +25,7 @@ pub(super) fn record_usage_cell(
                 u.total_tokens as i64,
             )
         })
-        .unwrap_or_else(TokenUsage::empty);
-    if let Ok(mut guard) = cell.lock() {
-        *guard = Some(token_usage);
-    }
+        .unwrap_or_else(TokenUsage::empty)
 }
 
 pub(super) fn record_usage_details_cell(

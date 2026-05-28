@@ -1,7 +1,7 @@
 use super::*;
 use crate::clients::base::{
-    ApiFormat, ChunkStream, ChunkType, LLMRequestOptions, LLMUsageDetails, SamplingParams,
-    StreamChunk, TokenUsage, ToolCall,
+    ApiFormat, ChunkStream, ChunkType, LLMRequestOptions, LLMResponseEnvelope, LLMUsageDetails,
+    SamplingParams, StreamChunk, TokenUsage, ToolCall,
 };
 use crate::clients::AnthropicClient;
 use crate::core::tool_spec::ToolSpec;
@@ -54,19 +54,25 @@ fn process_response_text_non_streaming() {
     }
 }
 
-#[test]
-fn append_proxy_classifier_jsonl_writes_one_event_per_line() {
+#[tokio::test]
+async fn classifier_log_sink_writes_one_event_per_line() {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "forge-proxy-classifier-{}-{}.jsonl",
         std::process::id(),
         super::classifier_log::unix_ms()
     ));
+    std::fs::remove_file(&path).ok();
     let first = json!({"kind": "tool_call", "tool": "search"});
     let second = json!({"kind": "tool_call", "tool": "read"});
 
-    super::classifier_log::append_proxy_classifier_jsonl(&path, &first).expect("first write");
-    super::classifier_log::append_proxy_classifier_jsonl(&path, &second).expect("second write");
+    let sink = super::classifier_log::ClassifierLogSink::spawn(
+        super::classifier_log::ClassifierLogConfig::new(path.clone()).with_queue_capacity(4),
+    )
+    .expect("sink");
+    sink.emit(first.clone());
+    sink.emit(second.clone());
+    sink.flush().await.expect("flush");
 
     let text = std::fs::read_to_string(&path).expect("jsonl");
     let rows = text
@@ -74,6 +80,64 @@ fn append_proxy_classifier_jsonl_writes_one_event_per_line() {
         .map(|line| serde_json::from_str::<Value>(line).expect("json row"))
         .collect::<Vec<_>>();
     assert_eq!(rows, vec![first, second]);
+    std::fs::remove_file(path).ok();
+}
+
+#[tokio::test]
+async fn classifier_log_sink_redacts_sensitive_payload_fields() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "forge-proxy-classifier-redacted-{}-{}.jsonl",
+        std::process::id(),
+        super::classifier_log::unix_ms()
+    ));
+    std::fs::remove_file(&path).ok();
+    let event = json!({
+        "kind": "final_response",
+        "user_request": "secret request",
+        "initial_user_request": "initial secret",
+        "workflow_state": {"recent_errors": ["secret error"]},
+        "required_facts": ["secret fact"],
+        "candidate_call": {"name": "search", "arguments": {"q": "secret query"}},
+        "tool_results": [{"tool_name": "search", "content": "secret result"}],
+        "candidate_final_response": "secret answer",
+        "label": "valid_final_response"
+    });
+
+    let sink = super::classifier_log::ClassifierLogSink::spawn(
+        super::classifier_log::ClassifierLogConfig::new(path.clone()).with_redaction(true),
+    )
+    .expect("sink");
+    sink.emit(event);
+    sink.flush().await.expect("flush");
+
+    let text = std::fs::read_to_string(&path).expect("jsonl");
+    assert!(!text.contains("secret"));
+    let row = serde_json::from_str::<Value>(text.trim()).expect("json row");
+    assert_eq!(row["user_request"], "[redacted]");
+    assert_eq!(row["candidate_call"]["arguments"], "[redacted]");
+    assert_eq!(row["tool_results"][0]["content"], "[redacted]");
+    std::fs::remove_file(path).ok();
+}
+
+#[tokio::test]
+async fn classifier_log_sink_drops_oversized_events() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "forge-proxy-classifier-oversized-{}-{}.jsonl",
+        std::process::id(),
+        super::classifier_log::unix_ms()
+    ));
+    std::fs::remove_file(&path).ok();
+    let sink = super::classifier_log::ClassifierLogSink::spawn(
+        super::classifier_log::ClassifierLogConfig::new(path.clone()).with_max_event_bytes(32),
+    )
+    .expect("sink");
+    sink.emit(json!({"payload": "x".repeat(128)}));
+    sink.flush().await.expect("flush");
+
+    let text = std::fs::read_to_string(&path).expect("jsonl");
+    assert!(text.is_empty());
     std::fs::remove_file(path).ok();
 }
 
@@ -287,6 +351,109 @@ struct MockOptionsClient {
 struct MockStreamingOptionsClient {
     send_calls: AtomicUsize,
     stream_calls: AtomicUsize,
+}
+
+struct IsolatedUsageClient;
+
+struct StreamMetadataClient;
+
+impl LLMClient for IsolatedUsageClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+
+    fn last_usage(&self) -> Option<TokenUsage> {
+        Some(TokenUsage::new(999, 999, 1998))
+    }
+
+    async fn send(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, crate::error::BackendError> {
+        Ok(LLMResponse::Text(TextResponse::new("unused")))
+    }
+
+    async fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _options: LLMRequestOptions,
+    ) -> Result<LLMResponseEnvelope, crate::error::BackendError> {
+        let content = messages
+            .first()
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let prompt_tokens = if content == "first" { 1 } else { 2 };
+        Ok(LLMResponseEnvelope {
+            response: LLMResponse::Text(TextResponse::new(content)),
+            usage: Some(TokenUsage::new(prompt_tokens, 10, prompt_tokens + 10)),
+            usage_details: None,
+            call_info: None,
+        })
+    }
+
+    async fn send_stream(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, crate::error::StreamError> {
+        Err(crate::error::StreamError::new("not implemented"))
+    }
+
+    async fn get_context_length(&self) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+        Ok(Some(4096))
+    }
+}
+
+impl LLMClient for StreamMetadataClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+
+    fn last_usage(&self) -> Option<TokenUsage> {
+        Some(TokenUsage::new(999, 999, 1998))
+    }
+
+    async fn send(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, crate::error::BackendError> {
+        Ok(LLMResponse::Text(TextResponse::new("unused")))
+    }
+
+    async fn send_stream(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, crate::error::StreamError> {
+        Err(crate::error::StreamError::new("use options"))
+    }
+
+    async fn send_stream_with_options(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _options: LLMRequestOptions,
+    ) -> Result<ChunkStream, crate::error::StreamError> {
+        Ok(Box::pin(futures_util::stream::iter(vec![
+            Ok(StreamChunk::new(ChunkType::TextDelta).with_content("streamed")),
+            Ok(StreamChunk::new(ChunkType::Final)
+                .with_response(LLMResponse::Text(TextResponse::new("streamed")))
+                .with_metadata(Some(TokenUsage::new(4, 2, 6)), None, None)),
+        ])))
+    }
+
+    async fn get_context_length(&self) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+        Ok(Some(4096))
+    }
 }
 
 impl MockStreamingOptionsClient {
@@ -660,6 +827,37 @@ async fn handle_no_tools_forwards_passthrough_options_and_usage() {
 }
 
 #[tokio::test]
+async fn handle_no_tools_uses_envelope_usage_per_concurrent_response() {
+    let first_body = json!({
+        "messages": [{"role": "user", "content": "first"}],
+        "model": "request-model"
+    });
+    let second_body = json!({
+        "messages": [{"role": "user", "content": "second"}],
+        "model": "request-model"
+    });
+    let client = Arc::new(IsolatedUsageClient);
+    let first_ctx = Arc::new(Mutex::new(dummy_ctx()));
+    let second_ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let (first, second) = tokio::join!(
+        handle_chat_completions(&first_body, &client, &first_ctx, 3, true),
+        handle_chat_completions(&second_body, &client, &second_ctx, 3, true),
+    );
+
+    let first = match first.expect("first response") {
+        HandlerResult::Response(value) => value,
+        _ => panic!("expected first response"),
+    };
+    let second = match second.expect("second response") {
+        HandlerResult::Response(value) => value,
+        _ => panic!("expected second response"),
+    };
+    assert_eq!(first["usage"]["prompt_tokens"], 1);
+    assert_eq!(second["usage"]["prompt_tokens"], 2);
+}
+
+#[tokio::test]
 async fn handle_no_tools_stream_usage_requires_include_usage_and_is_final_only() {
     let body = json!({
         "messages": [{"role": "user", "content": "hi"}],
@@ -696,6 +894,32 @@ async fn handle_no_tools_stream_usage_requires_include_usage_and_is_final_only()
     )
     .await;
     assert!(events.iter().all(|event| event.get("usage").is_none()));
+}
+
+#[tokio::test]
+async fn handle_no_tools_stream_uses_final_chunk_usage_before_last_usage() {
+    let body = json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "request-model",
+        "stream": true,
+        "stream_options": {"include_usage": true}
+    });
+    let client = Arc::new(StreamMetadataClient);
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+    let events = collect_stream_events(
+        handle_chat_completions(&body, &client, &ctx, 3, true)
+            .await
+            .expect("handler result"),
+    )
+    .await;
+
+    let usage_event = events
+        .iter()
+        .find(|event| event.get("usage").is_some())
+        .expect("usage event");
+    assert_eq!(usage_event["usage"]["prompt_tokens"], 4);
+    assert_eq!(usage_event["usage"]["completion_tokens"], 2);
+    assert_eq!(usage_event["usage"]["total_tokens"], 6);
 }
 
 #[tokio::test]
@@ -965,13 +1189,17 @@ async fn handle_tools_strips_response_format_from_passthrough() {
 
 #[test]
 fn guarded_anthropic_body_rejects_incompatible_tool_choice() {
-    let err =
-        sanitize_guarded_anthropic_body(Some(json!({"tool_choice": {"type": "none"}})), false)
-            .expect_err("tool_choice none rejected");
+    let err = sanitize_guarded_anthropic_body(
+        Some(Arc::new(json!({"tool_choice": {"type": "none"}}))),
+        false,
+    )
+    .expect_err("tool_choice none rejected");
     assert!(err.message().contains("tool_choice=none"));
 
     let err = sanitize_guarded_anthropic_body(
-        Some(json!({"tool_choice": {"type": "tool", "name": "search"}})),
+        Some(Arc::new(
+            json!({"tool_choice": {"type": "tool", "name": "search"}}),
+        )),
         true,
     )
     .expect_err("forced tool choice rejected");
@@ -1061,7 +1289,7 @@ async fn anthropic_messages_translates_nonzero_usage() {
         .unwrap()
         .clone()
         .expect("options recorded");
-    assert_eq!(options.inbound_anthropic_body, Some(raw));
+    assert_eq!(options.inbound_anthropic_body.as_deref(), Some(&raw));
 }
 
 #[tokio::test]

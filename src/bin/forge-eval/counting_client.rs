@@ -2,7 +2,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use forge_guardrails::clients::base::LLMCallInfo;
 use forge_guardrails::{
-    ApiFormat, ChunkStream, LLMClient, LLMRequestOptions, LLMResponse, SamplingParams, ToolSpec,
+    ApiFormat, ChunkStream, LLMClient, LLMRequestOptions, LLMResponse, LLMResponseEnvelope,
+    SamplingParams, ToolSpec,
 };
 use serde_json::Value;
 
@@ -55,6 +56,18 @@ impl<C: LLMClient> LLMClient for CountingClient<C> {
     ) -> Result<LLMResponse, forge_guardrails::BackendError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.send_with_options(messages, tools, options).await
+    }
+
+    async fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponseEnvelope, forge_guardrails::BackendError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .send_envelope_with_options(messages, tools, options)
+            .await
     }
 
     async fn send_stream(

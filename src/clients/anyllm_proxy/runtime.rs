@@ -7,10 +7,13 @@ use super::call_info::{record_call_info_cell, runtime_call_info};
 use super::request::build_openai_request_body;
 use super::response::parse_openai_response;
 use super::streaming::parse_openai_chunks;
-use super::usage::{record_usage_cell, record_usage_details_cell, usage_details_from_openai_usage};
+use super::usage::{
+    record_usage_cell, record_usage_details_cell, token_usage_from_openai_usage,
+    usage_details_from_openai_usage,
+};
 use crate::clients::base::{
     ApiFormat, ChunkStream, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse,
-    LLMUsageDetails, SamplingParams, TokenUsage,
+    LLMResponseEnvelope, LLMUsageDetails, SamplingParams, TokenUsage,
 };
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -141,6 +144,18 @@ impl LLMClient for AnyLlmRuntimeClient {
         tools: Option<Vec<ToolSpec>>,
         options: LLMRequestOptions,
     ) -> Result<LLMResponse, BackendError> {
+        Ok(self
+            .send_envelope_with_options(messages, tools, options)
+            .await?
+            .response)
+    }
+
+    async fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> Result<LLMResponseEnvelope, BackendError> {
         let req = self.build_request(messages, tools, options, false)?;
         let result = self
             .service
@@ -148,22 +163,24 @@ impl LLMClient for AnyLlmRuntimeClient {
             .await
             .map_err(runtime_error_to_backend_error)?;
         let usage = result.usage.as_ref().or(result.response.usage.as_ref());
+        let token_usage = token_usage_from_openai_usage(usage);
+        let usage_details = usage_details_from_openai_usage(usage);
+        let call_info = runtime_call_info(
+            &result.metadata,
+            &result.rate_limits,
+            &result.warnings,
+            Some(result.response.model.clone()),
+            usage,
+        );
         record_usage_cell(&self.last_usage, usage);
-        record_usage_details_cell(
-            &self.last_usage_details,
-            usage_details_from_openai_usage(usage),
-        );
-        record_call_info_cell(
-            &self.last_call_info,
-            runtime_call_info(
-                &result.metadata,
-                &result.rate_limits,
-                &result.warnings,
-                Some(result.response.model.clone()),
-                usage,
-            ),
-        );
-        Ok(parse_openai_response(result.response))
+        record_usage_details_cell(&self.last_usage_details, usage_details.clone());
+        record_call_info_cell(&self.last_call_info, call_info.clone());
+        Ok(LLMResponseEnvelope {
+            response: parse_openai_response(result.response),
+            usage: Some(token_usage),
+            usage_details,
+            call_info: Some(call_info),
+        })
     }
 
     async fn send_stream(
@@ -191,21 +208,20 @@ impl LLMClient for AnyLlmRuntimeClient {
             .await
             .map_err(|e| StreamError::new(runtime_error_to_backend_error(e).to_string()))?;
         let cost_model = result.metadata.mapped_model.clone();
-        record_call_info_cell(
-            &self.last_call_info,
-            runtime_call_info(
-                &result.metadata,
-                &result.rate_limits,
-                &result.warnings,
-                None,
-                None,
-            ),
+        let call_info = runtime_call_info(
+            &result.metadata,
+            &result.rate_limits,
+            &result.warnings,
+            None,
+            None,
         );
+        record_call_info_cell(&self.last_call_info, call_info.clone());
         Ok(Box::pin(parse_openai_chunks(
             result.chunks,
             self.last_usage.clone(),
             self.last_usage_details.clone(),
             self.last_call_info.clone(),
+            Some(call_info),
             Some(cost_model),
         )))
     }

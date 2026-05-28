@@ -9,11 +9,11 @@ When modifying files under [src/core](file:///Users/whit3rabbit/Documents/GitHub
    - If an LLM client or proxy layer generates a tool call ID, that ID must remain associated with the call and propagate to the result. Never drop or mismatch these IDs as it will break provider wire format checks (e.g., Anthropic requires matching `tool_use` and `tool_result` blocks).
 2. **Reasoning Fold Preservation**:
    - LLMs supporting chain-of-thought (e.g., DeepSeek, Qwen) emit raw thinking segments (typically wrapped in `<think>` tags).
-   - [inference.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/core/inference.rs) folds these segments into the [ToolCall](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L43)'s `reasoning` field or the assistant message metadata.
+   - [inference.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/core/inference.rs) folds these segments into the [ToolCall](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/clients/base.rs#L44)'s `reasoning` field or the assistant message metadata.
    - Ensure reasoning extraction occurs before arguments parsing, and do not let raw reasoning text bleed into the tool execution parameters.
 3. **Execution Runner Constraints**:
    - The loop in [runner.rs](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/src/core/runner.rs) enforces hard error budgets (from validators) and soft nudge retries.
-   - Do not bypass step enforcers or execute blocked tools. The runner's step completion logic must match the Python reference flow precisely (see [forge/src/core/runner.py](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/forge/src/core/runner.py)).
+   - Do not bypass step enforcers or execute blocked tools. The runner's step completion logic must match the Python reference flow precisely (see [forge/src/forge/core/runner.py](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/forge/src/forge/core/runner.py)).
    - Do not leave invalid tool calls in history when correcting them via retry/rescue nudges.
 
 ## Testing Target

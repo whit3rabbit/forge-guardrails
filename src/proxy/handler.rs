@@ -51,6 +51,11 @@ use response_shape::{collect_anthropic_events, collect_openai_events};
 use scoring::{score_proxy_final_text, score_proxy_final_tool_calls, score_proxy_tool_calls};
 pub use tool_specs::parse_tool_specs;
 
+/// Initialize the optional bounded proxy classifier JSONL sink from environment.
+pub fn init_proxy_classifier_log_sink_from_env() {
+    classifier_log::init_proxy_classifier_log_sink_from_env();
+}
+
 /// Stream of OpenAI chat completion chunk objects.
 pub type OpenAiEventStream = Pin<Box<dyn Stream<Item = Result<Value, StreamError>> + Send>>;
 
@@ -388,16 +393,19 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     let mut request_options = LLMRequestOptions {
         sampling,
         passthrough,
-        inbound_anthropic_body,
+        inbound_anthropic_body: inbound_anthropic_body.map(Arc::new),
         initial_openai_messages: None,
     };
 
     // Convert inbound OpenAI messages to internal format.
     let mut internal_msgs = openai_to_messages(messages)?;
     if request_options.inbound_anthropic_body.is_some() {
-        request_options.initial_openai_messages = Some(crate::core::inference::fold_and_serialize(
-            &internal_msgs,
-            client.api_format().as_str(),
+        request_options.initial_openai_messages = Some(Arc::from(
+            crate::core::inference::fold_and_serialize(
+                &internal_msgs,
+                client.api_format().as_str(),
+            )
+            .into_boxed_slice(),
         ));
     }
 
@@ -454,6 +462,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         enforcer
     });
 
+    let mut accepted_usage = None;
+    let mut accepted_usage_details = None;
     let response = loop {
         let step_hint = step_enforcer
             .as_ref()
@@ -503,6 +513,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
         tool_call_counter = result.tool_call_counter;
 
+        let result_usage = result.usage;
+        let result_usage_details = result.usage_details;
         let response = result.response;
         let Some(enforcer) = step_enforcer.as_mut() else {
             match response {
@@ -545,6 +557,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                         .map_err(HandlerError::Upstream)?;
                         continue;
                     }
+                    accepted_usage = result_usage;
+                    accepted_usage_details = result_usage_details;
                     break LLMResponse::ToolCalls(tool_calls);
                 }
                 LLMResponse::Text(text) => {
@@ -565,6 +579,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                         .map_err(HandlerError::Upstream)?;
                         continue;
                     }
+                    accepted_usage = result_usage;
+                    accepted_usage_details = result_usage_details;
                     break LLMResponse::Text(text);
                 }
             }
@@ -625,6 +641,8 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     .map_err(HandlerError::Upstream)?;
                     continue;
                 }
+                accepted_usage = result_usage;
+                accepted_usage_details = result_usage_details;
                 break LLMResponse::ToolCalls(tool_calls);
             }
             LLMResponse::Text(text) => {
@@ -661,13 +679,15 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     .map_err(HandlerError::Upstream)?;
                     continue;
                 }
+                accepted_usage = result_usage;
+                accepted_usage_details = result_usage_details;
                 break LLMResponse::Text(text);
             }
         }
     };
 
-    let usage = client.last_usage();
-    let usage_details = client.last_usage_details();
+    let usage = accepted_usage;
+    let usage_details = accepted_usage_details;
 
     let handler_result = match response {
         LLMResponse::Text(ref text) => text_response_result(

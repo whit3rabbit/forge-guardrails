@@ -6,9 +6,9 @@ use crate::clients::base::ToolCall;
 use crate::core::message::{Message, MessageRole, MessageType};
 use crate::core::tool_spec::ToolSpec;
 use crate::guardrails::{
-    recent_errors_from_messages, ClassifierAction, FinalResponseContext, FinalResponseScore,
-    FinalResponseScorer, FinalResponseToolResult, ScoringContext, StepEnforcer, ToolCallScore,
-    ToolCallScorer, WorkflowStateForScoring,
+    recent_errors_from_messages, FinalResponseContext, FinalResponseScorer,
+    FinalResponseToolResult, ScoringContext, ScoringPipeline, StepEnforcer, ToolCallScorer,
+    WorkflowStateForScoring,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 
@@ -22,9 +22,10 @@ pub(super) async fn score_proxy_tool_calls(
     tool_specs: &[ToolSpec],
 ) -> Option<String> {
     let scorer = scorer?;
+    let pipeline = ScoringPipeline::new(Some(scorer), None);
     let user_request = latest_proxy_user_request(messages).unwrap_or_default();
     let recent_errors = recent_errors_from_messages(messages, 8);
-    let ctx = match step_enforcer {
+    let ctx = Arc::new(match step_enforcer {
         Some(enforcer) => ScoringContext::from_step_enforcer(
             user_request,
             enforcer,
@@ -41,12 +42,14 @@ pub(super) async fn score_proxy_tool_calls(
             recent_errors,
             tool_specs,
         ),
-    };
+    });
 
-    let mut nudge: Option<String> = None;
-    for call in tool_calls {
-        match score_tool_call_blocking(scorer.clone(), ctx.clone(), call.clone()).await {
-            Ok(score) => {
+    let ctx_for_log = ctx.clone();
+    pipeline
+        .score_tool_calls(
+            ctx,
+            tool_calls,
+            |call, score| {
                 tracing::info!(
                     target: "forge.classifier",
                     label = ?score.label,
@@ -59,9 +62,9 @@ pub(super) async fn score_proxy_tool_calls(
                 emit_proxy_classifier_jsonl(json!({
                     "kind": "tool_call",
                     "unix_ms": unix_ms(),
-                    "user_request": ctx.user_request.as_str(),
+                    "user_request": ctx_for_log.user_request.as_str(),
                     "initial_user_request": initial_proxy_user_request(messages).unwrap_or_default(),
-                    "workflow_state": &ctx.workflow_state,
+                    "workflow_state": &ctx_for_log.workflow_state,
                     "candidate_call": proxy_tool_call_for_json(call),
                     "tool": call.tool.as_str(),
                     "label": score.label.as_label().as_ref(),
@@ -70,27 +73,17 @@ pub(super) async fn score_proxy_tool_calls(
                     "latency_ms": score.latency_ms,
                     "model_version": score.model_version.as_str(),
                 }));
-                if matches!(
-                    score.action,
-                    ClassifierAction::AdvisoryNudge | ClassifierAction::Block
-                ) {
-                    let content = crate::prompts::classifier_nudge(score.label.as_label().as_ref());
-                    if score.action == ClassifierAction::Block || nudge.is_none() {
-                        nudge = Some(content);
-                    }
-                }
-            }
-            Err(err) => {
+            },
+            |call, err| {
                 tracing::warn!(
                     target: "forge.classifier",
                     error = %err,
                     tool = %call.tool,
                     "classifier scoring failed; allowing deterministic path"
                 );
-            }
-        }
-    }
-    nudge
+            },
+        )
+        .await
 }
 
 pub(super) async fn score_proxy_final_tool_calls(
@@ -156,6 +149,7 @@ async fn score_proxy_final_candidate(
     terminal_tool: Option<&str>,
 ) -> Option<String> {
     let scorer = scorer?;
+    let pipeline = ScoringPipeline::new(None, Some(scorer));
     let user_request = latest_proxy_user_request(messages).unwrap_or_default();
     let workflow_state = match step_enforcer {
         Some(enforcer) => WorkflowStateForScoring {
@@ -173,7 +167,7 @@ async fn score_proxy_final_candidate(
             recent_errors: recent_errors_from_messages(messages, 8),
         },
     };
-    let ctx = FinalResponseContext {
+    let ctx = Arc::new(FinalResponseContext {
         schema_version: "final-response-verifier-input/v1".to_string(),
         user_request: user_request.to_string(),
         workflow_state,
@@ -182,77 +176,52 @@ async fn score_proxy_final_candidate(
         tool_results: proxy_tool_results_from_messages(messages),
         candidate_final_response: candidate.to_string(),
         metadata: None,
-    };
-    match score_final_response_blocking(scorer, ctx.clone()).await {
-        Ok(score) => {
-            tracing::info!(
-                target: "forge.classifier",
-                label = %score.label.as_label(),
-                confidence = score.confidence,
-                action = %score.action.as_str(),
-                latency_ms = score.latency_ms,
-                terminal_tool = terminal_tool.unwrap_or("text"),
-                "final-response classifier score"
-            );
-            emit_proxy_classifier_jsonl(json!({
-                "kind": "final_response",
-                "unix_ms": unix_ms(),
-                "user_request": ctx.user_request.as_str(),
-                "initial_user_request": initial_proxy_user_request(messages).unwrap_or_default(),
-                "workflow_state": &ctx.workflow_state,
-                "required_facts": &ctx.required_facts,
-                "tool_trace": &ctx.tool_trace,
-                "tool_results": ctx.tool_results.iter().map(|result| {
-                    json!({"tool_name": result.tool_name.as_str(), "content": result.content.as_str()})
-                }).collect::<Vec<_>>(),
-                "candidate_final_response": ctx.candidate_final_response.as_str(),
-                "terminal_tool": terminal_tool.unwrap_or("text"),
-                "label": score.label.as_label().as_ref(),
-                "confidence": score.confidence,
-                "action": score.action.as_str(),
-                "latency_ms": score.latency_ms,
-                "model_version": score.model_version.as_str(),
-            }));
-            if matches!(
-                score.action,
-                ClassifierAction::AdvisoryNudge | ClassifierAction::Block
-            ) {
-                Some(crate::prompts::classifier_nudge(
-                    score.label.as_label().as_ref(),
-                ))
-            } else {
-                None
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "forge.classifier",
-                error = %err,
-                terminal_tool = terminal_tool.unwrap_or("text"),
-                "final-response classifier scoring failed; allowing deterministic path"
-            );
-            None
-        }
-    }
-}
-
-async fn score_tool_call_blocking(
-    scorer: Arc<dyn ToolCallScorer>,
-    ctx: ScoringContext,
-    candidate: ToolCall,
-) -> anyhow::Result<ToolCallScore> {
-    tokio::task::spawn_blocking(move || scorer.score(&ctx, &candidate))
+    });
+    let ctx_for_log = ctx.clone();
+    let terminal_tool_name = terminal_tool.unwrap_or("text");
+    pipeline
+        .score_final_response(
+            ctx,
+            |score| {
+                tracing::info!(
+                    target: "forge.classifier",
+                    label = %score.label.as_label(),
+                    confidence = score.confidence,
+                    action = %score.action.as_str(),
+                    latency_ms = score.latency_ms,
+                    terminal_tool = terminal_tool_name,
+                    "final-response classifier score"
+                );
+                emit_proxy_classifier_jsonl(json!({
+                    "kind": "final_response",
+                    "unix_ms": unix_ms(),
+                    "user_request": ctx_for_log.user_request.as_str(),
+                    "initial_user_request": initial_proxy_user_request(messages).unwrap_or_default(),
+                    "workflow_state": &ctx_for_log.workflow_state,
+                    "required_facts": &ctx_for_log.required_facts,
+                    "tool_trace": &ctx_for_log.tool_trace,
+                    "tool_results": ctx_for_log.tool_results.iter().map(|result| {
+                        json!({"tool_name": result.tool_name.as_str(), "content": result.content.as_str()})
+                    }).collect::<Vec<_>>(),
+                    "candidate_final_response": ctx_for_log.candidate_final_response.as_str(),
+                    "terminal_tool": terminal_tool_name,
+                    "label": score.label.as_label().as_ref(),
+                    "confidence": score.confidence,
+                    "action": score.action.as_str(),
+                    "latency_ms": score.latency_ms,
+                    "model_version": score.model_version.as_str(),
+                }));
+            },
+            |err| {
+                tracing::warn!(
+                    target: "forge.classifier",
+                    error = %err,
+                    terminal_tool = terminal_tool_name,
+                    "final-response classifier scoring failed; allowing deterministic path"
+                );
+            },
+        )
         .await
-        .map_err(|err| anyhow::anyhow!("classifier scoring task failed: {err}"))?
-}
-
-async fn score_final_response_blocking(
-    scorer: Arc<dyn FinalResponseScorer>,
-    ctx: FinalResponseContext,
-) -> anyhow::Result<FinalResponseScore> {
-    tokio::task::spawn_blocking(move || scorer.score(&ctx))
-        .await
-        .map_err(|err| anyhow::anyhow!("final-response scoring task failed: {err}"))?
 }
 
 fn proxy_terminal_tool_set<'a>(

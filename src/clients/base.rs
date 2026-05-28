@@ -3,6 +3,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -110,6 +111,12 @@ pub struct StreamChunk {
     pub content: String,
     /// The fully resolved response, if this is a final chunk.
     pub response: Option<LLMResponse>,
+    /// Token usage reported for this stream, normally present on FINAL.
+    pub usage: Option<TokenUsage>,
+    /// Provider-specific token/cache details reported for this stream.
+    pub usage_details: Option<LLMUsageDetails>,
+    /// Provider-routing and accounting metadata reported for this stream.
+    pub call_info: Option<LLMCallInfo>,
 }
 
 impl StreamChunk {
@@ -119,6 +126,9 @@ impl StreamChunk {
             chunk_type,
             content: String::new(),
             response: None,
+            usage: None,
+            usage_details: None,
+            call_info: None,
         }
     }
 
@@ -131,6 +141,19 @@ impl StreamChunk {
     /// Sets the final response.
     pub fn with_response(mut self, response: LLMResponse) -> Self {
         self.response = Some(response);
+        self
+    }
+
+    /// Attaches stream metadata, normally to a final chunk.
+    pub fn with_metadata(
+        mut self,
+        usage: Option<TokenUsage>,
+        usage_details: Option<LLMUsageDetails>,
+        call_info: Option<LLMCallInfo>,
+    ) -> Self {
+        self.usage = usage;
+        self.usage_details = usage_details;
+        self.call_info = call_info;
         self
     }
 }
@@ -253,6 +276,44 @@ impl LLMUsageDetails {
     }
 }
 
+/// Response plus per-call metadata from one LLM request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LLMResponseEnvelope {
+    /// Parsed model response.
+    pub response: LLMResponse,
+    /// Token usage reported for this call.
+    pub usage: Option<TokenUsage>,
+    /// Provider-specific token/cache details reported for this call.
+    pub usage_details: Option<LLMUsageDetails>,
+    /// Provider-routing and accounting metadata reported for this call.
+    pub call_info: Option<LLMCallInfo>,
+}
+
+impl LLMResponseEnvelope {
+    /// Build an envelope with no metadata.
+    pub fn from_response(response: LLMResponse) -> Self {
+        Self {
+            response,
+            usage: None,
+            usage_details: None,
+            call_info: None,
+        }
+    }
+
+    /// Attach optional metadata to an envelope.
+    pub fn with_metadata(
+        mut self,
+        usage: Option<TokenUsage>,
+        usage_details: Option<LLMUsageDetails>,
+        call_info: Option<LLMCallInfo>,
+    ) -> Self {
+        self.usage = usage;
+        self.usage_details = usage_details;
+        self.call_info = call_info;
+        self
+    }
+}
+
 /// Sampling parameters passed to an LLM call.
 ///
 /// Values are optional; when `None`, the backend or client instance defaults
@@ -275,9 +336,9 @@ pub struct LLMRequestOptions {
     /// Extra request fields to merge into the outbound body.
     pub passthrough: Option<serde_json::Map<String, serde_json::Value>>,
     /// Original inbound Anthropic body for clean Path-1 proxy calls.
-    pub inbound_anthropic_body: Option<Value>,
+    pub inbound_anthropic_body: Option<Arc<Value>>,
     /// Initial translated OpenAI messages matching `inbound_anthropic_body`.
-    pub initial_openai_messages: Option<Vec<Value>>,
+    pub initial_openai_messages: Option<Arc<[Value]>>,
 }
 
 impl LLMRequestOptions {
@@ -372,6 +433,27 @@ pub trait LLMClient: Send + Sync {
         options: LLMRequestOptions,
     ) -> impl std::future::Future<Output = Result<LLMResponse, BackendError>> + Send {
         async move { self.send(messages, tools, options.sampling).await }
+    }
+
+    /// Send messages with proxy request options and return per-call metadata.
+    ///
+    /// The default preserves compatibility for clients that only implement
+    /// `send_with_options`. Native clients should override this method to avoid
+    /// reading metadata through mutable side channels.
+    fn send_envelope_with_options(
+        &self,
+        messages: Vec<Value>,
+        tools: Option<Vec<ToolSpec>>,
+        options: LLMRequestOptions,
+    ) -> impl std::future::Future<Output = Result<LLMResponseEnvelope, BackendError>> + Send {
+        async move {
+            let response = self.send_with_options(messages, tools, options).await?;
+            Ok(LLMResponseEnvelope::from_response(response).with_metadata(
+                self.last_usage(),
+                self.last_usage_details(),
+                self.last_call_info(),
+            ))
+        }
     }
 
     /// Send messages and yield `StreamChunk` objects progressively.

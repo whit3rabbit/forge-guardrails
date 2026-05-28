@@ -67,6 +67,38 @@ class FakeProxyClient:
         return self.turns.pop(0)
 
 
+class FailingHttpProxyClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        sampling: dict[str, Any] | None = None,
+        stream: bool = False,
+        required_steps: list[str] | None = None,
+        terminal_tools: list[str] | None = None,
+    ) -> Any:
+        import httpx
+
+        self.calls += 1
+        request = httpx.Request(
+            "POST",
+            "http://127.0.0.1:8081/v1/chat/completions",
+        )
+        response = httpx.Response(
+            502,
+            request=request,
+            text='{"error":"upstream gone"}',
+        )
+        raise httpx.HTTPStatusError(
+            "Server error '502 Bad Gateway'",
+            request=request,
+            response=response,
+        )
+
+
 class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
     def test_recommended_sampling_merges_and_overrides(self) -> None:
         client = proxy_eval.OpenAIProxyClient(
@@ -274,6 +306,24 @@ class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.step_nudges, 0)
         self.assertEqual(result.iterations_used, 1)
         self.assertEqual(len(client.messages_by_call), 1)
+
+    async def test_http_status_error_records_failed_result(self) -> None:
+        client = FailingHttpProxyClient()
+
+        result = await proxy_eval.run_proxy_scenario(
+            client,
+            scenario_by_name("basic_2step"),
+            stream=True,
+            budget_tokens=8192,
+            ablation=proxy_eval.ABLATION_PRESETS["reforged"],
+        )
+
+        self.assertFalse(result.completeness)
+        self.assertEqual(result.error_type, "HTTPStatusError")
+        self.assertIn("502", result.error_message or "")
+        self.assertIn("upstream gone", result.error_message or "")
+        self.assertEqual(result.iterations_used, 1)
+        self.assertEqual(client.calls, 1)
 
     def test_result_row_labels_proxy_backend(self) -> None:
         scenario = scenario_by_name("tool_selection")

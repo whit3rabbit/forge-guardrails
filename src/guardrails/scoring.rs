@@ -3,11 +3,15 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::{Arc, LazyLock};
 
 use crate::clients::base::ToolCall;
 use crate::guardrails::scoring_context::{
     ScoringContext, ScoringMetadata, WorkflowStateForScoring,
 };
+
+static DEFAULT_SCORING_EXECUTOR: LazyLock<ScoringExecutor> =
+    LazyLock::new(ScoringExecutor::default);
 
 /// Classifier operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -139,6 +143,180 @@ pub trait ToolCallScorer: Send + Sync {
     fn score(&self, ctx: &ScoringContext, candidate: &ToolCall) -> anyhow::Result<ToolCallScore>;
 }
 
+/// Bounded async executor for synchronous classifier scorers.
+#[derive(Clone)]
+pub struct ScoringExecutor {
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl ScoringExecutor {
+    /// Create a classifier scoring executor with bounded concurrency.
+    pub fn new(max_concurrency: usize) -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrency.max(1))),
+        }
+    }
+
+    /// Default scorer concurrency, bounded by CPU parallelism and capped at four.
+    pub fn default_concurrency() -> usize {
+        std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1)
+            .clamp(1, 4)
+    }
+
+    /// Score one tool call on Tokio's blocking pool.
+    pub async fn score_tool_call_async(
+        &self,
+        scorer: Arc<dyn ToolCallScorer>,
+        ctx: Arc<ScoringContext>,
+        candidate: ToolCall,
+    ) -> anyhow::Result<ToolCallScore> {
+        self.run_blocking("classifier scoring task failed", move || {
+            scorer.score(&ctx, &candidate)
+        })
+        .await
+    }
+
+    async fn run_blocking<T, F>(&self, task_error: &'static str, task: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    {
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| anyhow::anyhow!("classifier scoring semaphore closed: {err}"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            task()
+        })
+        .await
+        .map_err(|err| anyhow::anyhow!("{task_error}: {err}"))?
+    }
+}
+
+impl Default for ScoringExecutor {
+    fn default() -> Self {
+        Self::new(Self::default_concurrency())
+    }
+}
+
+/// Shared async scoring pipeline for tool-call and final-response classifiers.
+#[derive(Clone)]
+pub struct ScoringPipeline {
+    tool_call_scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    executor: ScoringExecutor,
+}
+
+impl ScoringPipeline {
+    /// Create a pipeline with the default bounded scoring executor.
+    pub fn new(
+        tool_call_scorer: Option<Arc<dyn ToolCallScorer>>,
+        final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    ) -> Self {
+        Self {
+            tool_call_scorer,
+            final_response_scorer,
+            executor: (*DEFAULT_SCORING_EXECUTOR).clone(),
+        }
+    }
+
+    /// Create a pipeline with an explicit scoring executor.
+    pub fn with_executor(
+        tool_call_scorer: Option<Arc<dyn ToolCallScorer>>,
+        final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+        executor: ScoringExecutor,
+    ) -> Self {
+        Self {
+            tool_call_scorer,
+            final_response_scorer,
+            executor,
+        }
+    }
+
+    /// Score candidate tool calls and return the first applicable classifier nudge.
+    pub async fn score_tool_calls<F, E>(
+        &self,
+        ctx: Arc<ScoringContext>,
+        candidates: &[ToolCall],
+        mut on_score: F,
+        mut on_error: E,
+    ) -> Option<String>
+    where
+        F: FnMut(&ToolCall, &ToolCallScore),
+        E: FnMut(&ToolCall, &anyhow::Error),
+    {
+        let scorer = self.tool_call_scorer.clone()?;
+        let mut nudge = None;
+        for candidate in candidates {
+            match self
+                .executor
+                .score_tool_call_async(scorer.clone(), ctx.clone(), candidate.clone())
+                .await
+            {
+                Ok(score) => {
+                    on_score(candidate, &score);
+                    if matches!(
+                        score.action,
+                        ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+                    ) {
+                        let content =
+                            crate::prompts::classifier_nudge(score.label.as_label().as_ref());
+                        if score.action == ClassifierAction::Block || nudge.is_none() {
+                            nudge = Some(content);
+                        }
+                    }
+                }
+                Err(err) => on_error(candidate, &err),
+            }
+        }
+        nudge
+    }
+
+    /// Score one final-response candidate and return an applicable classifier nudge.
+    pub async fn score_final_response<F, E>(
+        &self,
+        ctx: Arc<FinalResponseContext>,
+        mut on_score: F,
+        mut on_error: E,
+    ) -> Option<String>
+    where
+        F: FnMut(&FinalResponseScore),
+        E: FnMut(&anyhow::Error),
+    {
+        let scorer = self.final_response_scorer.clone()?;
+        match self.executor.score_final_response_async(scorer, ctx).await {
+            Ok(score) => {
+                on_score(&score);
+                if matches!(
+                    score.action,
+                    ClassifierAction::AdvisoryNudge | ClassifierAction::Block
+                ) {
+                    Some(crate::prompts::classifier_nudge(
+                        score.label.as_label().as_ref(),
+                    ))
+                } else {
+                    None
+                }
+            }
+            Err(err) => {
+                on_error(&err);
+                None
+            }
+        }
+    }
+}
+
+impl Default for ScoringPipeline {
+    fn default() -> Self {
+        Self::new(None, None)
+    }
+}
+
 /// Tool result included in final-response scoring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalResponseToolResult {
@@ -221,6 +399,41 @@ pub struct FinalResponseScore {
 pub trait FinalResponseScorer: Send + Sync {
     /// Score one candidate final response.
     fn score(&self, ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore>;
+}
+
+impl ScoringExecutor {
+    /// Score one final response on Tokio's blocking pool.
+    pub async fn score_final_response_async(
+        &self,
+        scorer: Arc<dyn FinalResponseScorer>,
+        ctx: Arc<FinalResponseContext>,
+    ) -> anyhow::Result<FinalResponseScore> {
+        self.run_blocking("final-response scoring task failed", move || {
+            scorer.score(&ctx)
+        })
+        .await
+    }
+}
+
+/// Score one tool call on the shared bounded scoring executor.
+pub async fn score_tool_call_async(
+    scorer: Arc<dyn ToolCallScorer>,
+    ctx: Arc<ScoringContext>,
+    candidate: ToolCall,
+) -> anyhow::Result<ToolCallScore> {
+    DEFAULT_SCORING_EXECUTOR
+        .score_tool_call_async(scorer, ctx, candidate)
+        .await
+}
+
+/// Score one final response on the shared bounded scoring executor.
+pub async fn score_final_response_async(
+    scorer: Arc<dyn FinalResponseScorer>,
+    ctx: Arc<FinalResponseContext>,
+) -> anyhow::Result<FinalResponseScore> {
+    DEFAULT_SCORING_EXECUTOR
+        .score_final_response_async(scorer, ctx)
+        .await
 }
 
 /// Serialize final-response verifier input with the published v1 format.

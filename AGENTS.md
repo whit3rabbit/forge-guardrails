@@ -21,9 +21,9 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 
 - `src/`: Rust library and binary implementation
   - `core/`: Core types and runner orchestration loop
-    - `inference.rs`: Low-level LLM request/response parsing and role/reasoning folding
+    - `inference.rs`: Low-level LLM request/response envelopes, stream metadata, and role/reasoning folding
     - `message.rs`: Unified message format, roles, and metadata models
-    - `runner.rs`: Multi-turn stateful executor enforcing the guardrails loop
+    - `runner.rs`: Multi-turn stateful executor enforcing the guardrails loop and shared scoring pipeline
     - `slot_worker.rs`: Handles slot allocation and queuing for backend runtimes
     - `steps.rs`: Required step tracking and workflow iteration constraints
     - `tool_spec.rs`: ToolSpec schemas, properties, and parameter conversion
@@ -35,9 +35,10 @@ The reference Python implementation is available in the [forge](file:///Users/wh
     - `nudge.rs`: Manages nudge states for retrying/rescuing tools
     - `policy.rs`: Allowed/blocked tools based on sequence prerequisites
     - `response_validator.rs`: JSON Schema verification and malformed argument checking
+    - `scoring.rs`: Classifier traits, bounded async scoring executor, and shared scoring pipeline
     - `step_enforcer.rs`: Sequences verification and prerequisite rules
   - `clients/`: Multi-provider backend adapters and settings
-    - `base.rs`: `LLMClient` trait, streaming, and tool formatting definitions
+    - `base.rs`: `LLMClient` trait, response envelope, streaming, and tool formatting definitions
     - `sampling.rs`: Model-specific sampling presets for 69+ models
     - `anthropic/`: Messages format translations, thinking extraction, and cache controls
     - `llamafile/`: Llamafile/llama.cpp server adapter, NDJSON stream parsing, and reasoning folding
@@ -51,7 +52,7 @@ The reference Python implementation is available in the [forge](file:///Users/wh
     - `nudges.rs`: System template builders for step, unknown tool, and error retries
     - `parse_strategies.rs`: Robust extraction of JSON/XML tool calls from chat text
   - `proxy/`: OpenAI-compatible and Anthropic-compatible proxy server
-    - `handler.rs`: Route handling, stream intercepts, and result mapping
+    - `handler.rs`: Route handling, stream intercepts, scoring, and result mapping
     - `proxy.rs`: Request translations, SSE chunk shaping, and respond stripping
     - `server.rs`: Lifecycle of the proxy daemon
   - `tools/`: Built-in terminal commands
@@ -94,6 +95,8 @@ Focused eval/parity checks:
 
 ```bash
 cargo test --test parity_tests
+cargo test --test classifier_tests
+cargo test --test backend_streaming_tests
 cargo test proxy::handler
 cargo test server::tests
 cargo test --bin forge-eval
@@ -368,13 +371,14 @@ gates.
 Proxy parity must cover client-visible behavior: no-tools passthrough, empty
 text for unexpected no-tools tool calls, retry-exhaustion raw text, rescue
 success/failure, unknown-tool retry, `respond` stripping, mixed respond plus
-real tool calls, and streaming final chunk shape.
+real tool calls, streaming final chunk shape, and final chunk usage/call
+metadata.
 
 ## Agent rules
 
 Keep changes small and behavior-driven. Align design and behavior with the Python codebase by checking the reference implementation in the `forge` submodule.
 
-Refer to the [Python forge src](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/forge/src) as the gold standard for logic, defaults, and API shapes. Implement and verify all benchmark matrices/evaluation scenarios to ensure complete parity.
+Refer to the [Python forge src](file:///Users/whit3rabbit/Documents/GitHub/forge-rs/forge/src/forge) as the gold standard for logic, defaults, and API shapes. Implement and verify all benchmark matrices/evaluation scenarios to ensure complete parity.
 
 Preserve these invariants:
 - Tool-call IDs and tool-result IDs must stay paired.
@@ -393,13 +397,16 @@ Preserve these invariants:
 - Do not assume GGUF-on-MLX behaves like llama.cpp GGUF. MLX GGUF support is model, architecture, and quantization dependent; document live smoke recipes instead of putting live MLX/GGUF requirements in CI.
 - Unless a specific MLX server/model combination is qualified for native tool calls, evaluate MLX through Forge prompt/rescue guardrails rather than assuming llama-server `--jinja`-style native tool parity.
 - Keep anyllm server-side tool execution out of Forge's guarded path. Forge must inspect tool calls before anything executes them.
-- Keep `TokenUsage` token-only. Surface anyllm provider metadata, rate limits, warnings, cache state, and estimated cost through `LLMClient::last_call_info()`.
+- `LLMResponseEnvelope` and the final `StreamChunk` are the primary per-call metadata carriers. Treat `last_usage()`, `last_usage_details()`, and `last_call_info()` as compatibility and observability shims, not the primary source for accepted proxy or runner responses.
+- Keep `TokenUsage` token-only. Surface anyllm provider metadata, rate limits, warnings, cache state, and estimated cost through `LLMResponseEnvelope::call_info`, `StreamChunk::call_info`, and compatibility `LLMClient::last_call_info()`.
+- Async proxy and runner classifier paths must use `ScoringPipeline` / `ScoringExecutor`; do not call blocking scorer traits directly on Tokio worker threads.
 - Treat anyllm pricing-derived cost as observability, not billing authority.
 
 When changing workflow execution:
 1. Add or update tests first.
 2. Cover blocked steps, malformed tool calls, terminal tools, and mixed tool batches.
-3. Check both non-streaming and streaming paths when touching backend clients.
+3. Cover classifier nudges through `ScoringPipeline` when touching scoring.
+4. Check both non-streaming and streaming paths when touching backend clients.
 
 When changing context or compaction:
 1. Preserve system/user setup messages.

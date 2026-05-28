@@ -76,6 +76,37 @@ small run-to-run deltas in completed-but-inaccurate rows as stochastic model
 accuracy changes unless the current run shows incomplete rows, missing required
 steps, or `proxy_contract_mismatch` classifications.
 
+## Proxy Resource Baseline
+
+`scripts/run_local_eval.sh` can sample local CPU and resident memory while eval
+requests are running:
+
+```bash
+scripts/run_local_eval.sh --suite smoke --runs 1 --resource-baseline
+```
+
+Use `--resource-interval SECONDS` to adjust the sample interval. The default is
+`1.0`.
+
+The launcher starts the sampler only after `/health` succeeds and stops it
+before eval reports are generated. This excludes proxy and model startup CPU,
+but includes loaded memory during the measured eval window. Output files are
+written beside the eval JSONL:
+
+```text
+resource_samples_<label>.jsonl
+resource_summary_<label>.json
+resource_baseline_report.txt
+```
+
+The report treats the Rust proxy process as the headline. Managed
+`llama-server` resource use is reported separately as backend context, followed
+by the combined wrapper/proxy/backend process tree. CPU is the sampled `ps`
+`%CPU` value and can exceed `100` for multithreaded processes. RSS is process
+resident memory, not total system pressure, allocator high-water marks, VRAM, or
+billing-grade usage. The v1 report is a baseline artifact only; it does not set
+or enforce regression thresholds.
+
 ## Native Rust Smoke Runner
 
 ```bash
@@ -251,6 +282,10 @@ telemetry to `proxy_classifier_<budget>.jsonl` whenever the classifier is
 enabled, using the `FORGE_CLASSIFIER_LOG` environment variable. Use that JSONL
 and Rust smoke JSONL classifier fields to inspect classifier scores; use the
 Python oracle JSONL and reports to confirm behavior changes.
+
+Classifier JSONL writes use a bounded async sink. Optional controls are
+`FORGE_CLASSIFIER_LOG_QUEUE_CAPACITY`, `FORGE_CLASSIFIER_LOG_MAX_EVENT_BYTES`,
+and `FORGE_CLASSIFIER_LOG_REDACT=true` for payload redaction.
 
 ONNX scorer throughput knobs are opt-in. Keep defaults for parity baselines.
 For proxy throughput comparisons, set `FORGE_CLASSIFIER_SESSION_POOL_SIZE` and

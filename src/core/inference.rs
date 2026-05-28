@@ -1,7 +1,10 @@
 //! Core inference: compaction, folding, validation, and retries.
 //! fold_and_serialize converts internal messages to API wire format.
 
-use crate::clients::base::{ChunkType, LLMClient, LLMRequestOptions, LLMResponse, StreamChunk};
+use crate::clients::base::{
+    ChunkType, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse, LLMResponseEnvelope,
+    LLMUsageDetails, StreamChunk, TokenUsage,
+};
 use crate::context::manager::ContextManager;
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
@@ -20,6 +23,12 @@ const TOOL_CALL_ID_WIDTH: usize = 9;
 pub struct InferenceResult {
     /// The response payload received from the LLM client.
     pub response: LLMResponse,
+    /// Token usage reported by the backend for the accepted attempt.
+    pub usage: Option<TokenUsage>,
+    /// Provider-specific token/cache details for the accepted attempt.
+    pub usage_details: Option<LLMUsageDetails>,
+    /// Provider-routing and accounting metadata for the accepted attempt.
+    pub call_info: Option<LLMCallInfo>,
     /// Any new messages generated during the inference process (e.g. nudges).
     pub new_messages: Vec<Message>,
     /// The running count of tool calls processed.
@@ -351,35 +360,52 @@ async fn run_inference_with_options_inner<C: LLMClient>(
         next_options.initial_openai_messages = None;
 
         // Send to LLM.
-        let response = if stream {
+        let envelope = if stream {
             let mut stream = client
                 .send_stream_with_options(wire, tools_opt.clone(), request_options)
                 .await
                 .map_err(ForgeError::from)?;
             let mut final_response: Option<LLMResponse> = None;
+            let mut final_usage = None;
+            let mut final_usage_details = None;
+            let mut final_call_info = None;
             while let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result.map_err(ForgeError::from)?;
                 if let Some(ref cb) = on_chunk {
                     cb(&chunk);
                 }
                 if chunk.chunk_type == ChunkType::Final {
-                    final_response = chunk.response.clone();
+                    final_usage = chunk.usage;
+                    final_usage_details = chunk.usage_details;
+                    final_call_info = chunk.call_info;
+                    final_response = chunk.response;
                 }
             }
-            final_response.ok_or_else(|| {
+            let response = final_response.ok_or_else(|| {
                 ForgeError::Stream(StreamError::new(
                     "Stream ended without FINAL chunk - the client adapter may be malformed or the connection was interrupted",
                 ))
-            })?
+            })?;
+            LLMResponseEnvelope::from_response(response).with_metadata(
+                final_usage.or_else(|| client.last_usage()),
+                final_usage_details.or_else(|| client.last_usage_details()),
+                final_call_info.or_else(|| client.last_call_info()),
+            )
         } else {
             client
-                .send_with_options(wire, tools_opt.clone(), request_options)
+                .send_envelope_with_options(wire, tools_opt.clone(), request_options)
                 .await
                 .map_err(ForgeError::from)?
         };
+        let LLMResponseEnvelope {
+            response,
+            usage,
+            usage_details,
+            call_info,
+        } = envelope;
 
         // Sync token count: prefer real usage from client, fall back to heuristic.
-        let observed_tokens = if let Some(usage) = client.last_usage() {
+        let observed_tokens = if let Some(usage) = usage.as_ref() {
             usage.total_tokens
         } else {
             estimate_tokens_from_response(&response)
@@ -504,6 +530,9 @@ async fn run_inference_with_options_inner<C: LLMClient>(
 
         return Ok(Some(InferenceResult {
             response: LLMResponse::ToolCalls(tool_calls),
+            usage,
+            usage_details,
+            call_info,
             new_messages,
             tool_call_counter: *tool_call_counter,
             attempts,
@@ -560,6 +589,7 @@ mod tests {
     use crate::core::tool_spec::ToolSpec;
     use indexmap::IndexMap;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn tool_call_id_format() {
@@ -670,6 +700,9 @@ mod tests {
     fn inference_result_fields() {
         let result = InferenceResult {
             response: LLMResponse::Text(crate::clients::base::TextResponse::new("hi")),
+            usage: None,
+            usage_details: None,
+            call_info: None,
             new_messages: vec![],
             tool_call_counter: 5,
             attempts: 1,
@@ -679,13 +712,15 @@ mod tests {
     }
 
     struct RetryRecordingClient {
-        raw_bodies: std::sync::Mutex<Vec<Option<Value>>>,
+        raw_bodies: std::sync::Mutex<Vec<Option<Arc<Value>>>>,
+        initial_messages: std::sync::Mutex<Vec<Option<Arc<[Value]>>>>,
     }
 
     impl RetryRecordingClient {
         fn new() -> Self {
             Self {
                 raw_bodies: std::sync::Mutex::new(Vec::new()),
+                initial_messages: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -714,6 +749,10 @@ mod tests {
             let attempt = raw_bodies.len();
             raw_bodies.push(options.inbound_anthropic_body);
             drop(raw_bodies);
+            self.initial_messages
+                .lock()
+                .unwrap()
+                .push(options.initial_openai_messages);
 
             if attempt == 0 {
                 Ok(LLMResponse::Text(TextResponse::new("not a tool call")))
@@ -743,7 +782,7 @@ mod tests {
     #[tokio::test]
     async fn raw_anthropic_body_is_cleared_after_clean_attempt() {
         let client = RetryRecordingClient::new();
-        let raw = json!({
+        let raw = Arc::new(json!({
             "model": "claude-3",
             "max_tokens": 64,
             "system": [{
@@ -759,12 +798,14 @@ mod tests {
                     "cache_control": {"type": "ephemeral"}
                 }]
             }]
-        });
+        }));
         let mut messages = vec![Message::new(
             MessageRole::User,
             "hi",
             MessageMeta::new(MessageType::UserInput),
         )];
+        let initial_messages: Arc<[Value]> =
+            Arc::from(fold_and_serialize(&messages, "openai").into_boxed_slice());
         let mut context = ContextManager::new(Box::new(NoCompact), 4096, None, None, None);
         let validator = ResponseValidator::new(vec!["respond".to_string()], false, None);
         let mut tracker = ErrorTracker::new(3, 2);
@@ -786,6 +827,7 @@ mod tests {
             None,
             LLMRequestOptions {
                 inbound_anthropic_body: Some(raw.clone()),
+                initial_openai_messages: Some(initial_messages.clone()),
                 ..Default::default()
             },
         )
@@ -795,6 +837,16 @@ mod tests {
 
         assert_eq!(result.attempts, 2);
         let raw_bodies = client.raw_bodies.lock().unwrap().clone();
-        assert_eq!(raw_bodies, vec![Some(raw), None]);
+        assert_eq!(raw_bodies.len(), 2);
+        assert!(raw_bodies[0]
+            .as_ref()
+            .is_some_and(|body| Arc::ptr_eq(body, &raw)));
+        assert!(raw_bodies[1].is_none());
+        let recorded_initial_messages = client.initial_messages.lock().unwrap().clone();
+        assert_eq!(recorded_initial_messages.len(), 2);
+        assert!(recorded_initial_messages[0]
+            .as_ref()
+            .is_some_and(|messages| Arc::ptr_eq(messages, &initial_messages)));
+        assert!(recorded_initial_messages[1].is_none());
     }
 }

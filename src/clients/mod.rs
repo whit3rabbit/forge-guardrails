@@ -17,8 +17,8 @@ pub use anthropic::AnthropicClient;
 pub use anyllm_proxy::{AnyLlmProxyClient, AnyLlmRuntimeClient};
 pub use base::{
     format_tool, ApiFormat, ChunkStream, ChunkType, LLMCallInfo, LLMClient, LLMRateLimitInfo,
-    LLMRequestOptions, LLMResponse, LLMUsageDetails, SamplingParams, StreamChunk, TextResponse,
-    TokenUsage, ToolCall,
+    LLMRequestOptions, LLMResponse, LLMResponseEnvelope, LLMUsageDetails, SamplingParams,
+    StreamChunk, TextResponse, TokenUsage, ToolCall,
 };
 pub use llamafile::LlamafileClient;
 pub use ollama::OllamaClient;

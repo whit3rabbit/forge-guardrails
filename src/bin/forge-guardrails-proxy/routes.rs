@@ -7,8 +7,9 @@ use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    handle_anthropic_messages_with_scorers, handle_chat_completions_with_scorers, ContextManager,
-    FinalResponseScorer, LLMClient, NoCompact, ServerManager, ToolCallScorer,
+    handle_anthropic_messages_with_scorers, handle_chat_completions_with_scorers,
+    init_proxy_classifier_log_sink_from_env, ContextManager, FinalResponseScorer, LLMClient,
+    NoCompact, ServerManager, ToolCallScorer,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
@@ -75,6 +76,7 @@ async fn serve_inner(
         scorer,
         final_response_scorer,
     };
+    init_proxy_classifier_log_sink_from_env();
 
     eprintln!(
         "forge-guardrails-proxy listening on http://{}:{}",
