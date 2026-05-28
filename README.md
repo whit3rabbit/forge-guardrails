@@ -55,6 +55,16 @@ cd forge-rs
 cargo build
 ```
 
+The Makefile wraps common development and eval commands. `make build` builds
+all targets with the default `classifier` feature; override with
+`FEATURES=""` for a no-feature build.
+
+```bash
+make build
+make test
+make clippy
+```
+
 The `forge/` submodule contains the Python reference for fixture generation and parity checks. Initialize it with:
 
 ```bash
@@ -409,6 +419,16 @@ uv run --project forge python tests/parity/generate_fixtures.py
 The eval harness measures how reliably a model + backend combo navigates multi-step tool-calling workflows. See [Eval Guide](docs/EVAL_GUIDE.md) for full CLI reference.
 
 ```bash
+# 10-run release benchmark without classifier, with resource baseline enabled.
+make eval-release
+
+# 10-run release benchmark with classifier, with resource baseline enabled.
+make eval-release-classify
+
+# Fast smoke variants, also with resource baseline enabled.
+make eval-smoke
+make eval-smoke-classify
+
 # Managed local smoke without the classifier
 scripts/run_local_eval.sh --suite smoke --runs 1
 
@@ -435,6 +455,14 @@ cargo run --bin forge-eval -- \
   --runs 3 \
   --scenario basic_2step \
   --stream
+```
+
+Common Makefile overrides:
+
+```bash
+make eval-release OUTPUT_DIR=target/local-eval/release-baseline
+make eval-release-classify CLASSIFIER_MODE=enforce
+make eval-release RUNS=3 EVAL_ARGS="--skip-published-compare"
 ```
 
 The Rust smoke runner supports `basic_2step`, `sequential_3step`, and `error_recovery` scenarios and emits JSONL for quick CI/smoke checks.

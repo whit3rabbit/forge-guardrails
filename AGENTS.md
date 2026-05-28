@@ -91,6 +91,19 @@ cargo test
 
 Use `cargo fmt --all` to apply formatting.
 
+Makefile shortcuts:
+
+```bash
+make build
+make fmt-check
+make clippy
+make test
+```
+
+`make build`, `make check`, `make test`, and `make clippy` use
+`FEATURES=classifier` by default. Override with `FEATURES=""` when a no-feature
+build is intentional.
+
 Focused eval/parity checks:
 
 ```bash
@@ -102,6 +115,7 @@ cargo test server::tests
 cargo test --bin forge-eval
 python scripts/eval_openai_proxy.py --help
 scripts/run_local_eval.sh --suite smoke --runs 1
+make eval-smoke
 ```
 
 Verifier model training:
@@ -242,12 +256,14 @@ Standard local smoke run:
 
 ```bash
 scripts/run_local_eval.sh --suite smoke --runs 1
+make eval-smoke
 ```
 
 Standard local release benchmark:
 
 ```bash
 scripts/run_local_eval.sh --suite release --runs 10
+make eval-release
 ```
 
 User-cache classifier benchmark, downloading the quantized tool-call artifact
@@ -257,6 +273,7 @@ if missing:
 scripts/run_local_eval.sh --suite release --runs 10 \
   --classify \
   --classifier-mode shadow
+make eval-release-classify
 ```
 
 ONNX classifier mode comparison:
@@ -274,7 +291,15 @@ scripts/run_local_eval.sh --suite release --runs 10 \
   --classify \
   --classifier-mode enforce \
   --output-dir target/local-eval/release-onnx-enforce
+
+make eval-release OUTPUT_DIR=target/local-eval/release-baseline
+make eval-release-classify OUTPUT_DIR=target/local-eval/release-onnx-shadow
+make eval-release-classify CLASSIFIER_MODE=enforce OUTPUT_DIR=target/local-eval/release-onnx-enforce
 ```
+
+The Makefile eval targets enable `--resource-baseline` by default. Use
+`RESOURCE_INTERVAL=...`, `RUNS=...`, `OUTPUT_DIR=...`, and `EVAL_ARGS="..."`
+to pass common overrides without editing the launcher.
 
 When evaluating a final-response verifier, include the matching
 `--final-response-classifier-dir`, `--final-response-classifier-mode`, and
