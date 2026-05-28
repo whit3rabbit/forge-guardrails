@@ -161,6 +161,18 @@ if [[ -n "${FORGE_SERIALIZE_REQUESTS:-}" ]] && is_truthy "$FORGE_SERIALIZE_REQUE
     fi
 fi
 
+if [[ -n "${FORGE_CLASSIFIER_DIR:-}" ]]; then
+    append_default "--classifier-dir" "$FORGE_CLASSIFIER_DIR"
+fi
+
+if [[ -n "${FORGE_CLASSIFIER_MODE:-}" ]]; then
+    append_default "--classifier-mode" "$FORGE_CLASSIFIER_MODE"
+fi
+
+if [[ -n "${FORGE_CLASSIFIER_MODEL:-}" ]]; then
+    append_default "--classifier-model" "$FORGE_CLASSIFIER_MODEL"
+fi
+
 echo "forge-docker-entrypoint: starting Forge proxy on ${FORGE_HOST:-0.0.0.0}:${FORGE_PORT:-${PORT:-${LISTEN_PORT:-8081}}}" >&2
 if [[ "$using_sidecar" == "true" ]]; then
     OPENAI_API_KEY="$sidecar_key" forge-guardrails-proxy "${args[@]}" &

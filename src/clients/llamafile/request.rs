@@ -1,4 +1,5 @@
 use serde_json::{json, Map, Value};
+use std::time::Duration;
 
 use super::{helpers, streaming, LlamafileClient, LlamafileMode};
 use crate::clients::base::{
@@ -7,6 +8,9 @@ use crate::clients::base::{
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, StreamError};
 use crate::prompts::build_tool_prompt;
+
+const UPSTREAM_SEND_MAX_ATTEMPTS: usize = 3;
+const UPSTREAM_SEND_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 impl LlamafileClient {
     pub(super) async fn native_send(
@@ -18,11 +22,7 @@ impl LlamafileClient {
     ) -> Result<LLMResponse, BackendError> {
         let body = self.build_native_body(&messages, tools, sampling, passthrough);
         let resp = self
-            .http_client
-            .post(format!("{}/chat/completions", self.base_url))
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .json(&body)
-            .send()
+            .send_chat_completions(&body)
             .await
             .map_err(|e| BackendError::new(0, e.to_string()))?;
         let status = resp.status().as_u16() as i64;
@@ -54,11 +54,7 @@ impl LlamafileClient {
     ) -> Result<LLMResponse, BackendError> {
         let body = self.build_prompt_body(&messages, tools, sampling, passthrough);
         let resp = self
-            .http_client
-            .post(format!("{}/chat/completions", self.base_url))
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .json(&body)
-            .send()
+            .send_chat_completions(&body)
             .await
             .map_err(|e| BackendError::new(0, e.to_string()))?;
         let status = resp.status().as_u16() as i64;
@@ -97,11 +93,7 @@ impl LlamafileClient {
             mode,
         );
         let resp = self
-            .http_client
-            .post(format!("{}/chat/completions", self.base_url))
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .json(&body)
-            .send()
+            .send_chat_completions(&body)
             .await
             .map_err(|e| StreamError::new(e.to_string()))?;
 
@@ -136,6 +128,34 @@ impl LlamafileClient {
             self.slot_id.unwrap_or(0),
         );
         Ok(Box::pin(stream))
+    }
+
+    async fn send_chat_completions(
+        &self,
+        body: &Value,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let timeout = Duration::from_secs_f64(self.timeout_secs);
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+            let result = self
+                .http_client
+                .post(&url)
+                .timeout(timeout)
+                .json(body)
+                .send()
+                .await;
+
+            match result {
+                Ok(resp) => return Ok(resp),
+                Err(err) if attempt < UPSTREAM_SEND_MAX_ATTEMPTS && retryable_send_error(&err) => {
+                    tokio::time::sleep(UPSTREAM_SEND_RETRY_DELAY * attempt as u32).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     pub(super) fn build_native_body(
@@ -243,6 +263,15 @@ impl LlamafileClient {
     }
 }
 
+fn retryable_send_error(err: &reqwest::Error) -> bool {
+    !err.is_status()
+        && !err.is_builder()
+        && !err.is_body()
+        && !err.is_decode()
+        && !err.is_timeout()
+        && (err.is_connect() || err.is_request())
+}
+
 fn inject_tool_prompt(messages: &mut [Value], tools: &[ToolSpec]) {
     let tool_prompt = build_tool_prompt(tools);
     if let Some(first) = messages.first_mut() {
@@ -262,7 +291,9 @@ fn inject_tool_prompt(messages: &mut [Value], tools: &[ToolSpec]) {
 mod tests {
     use std::path::Path;
 
+    use futures_util::StreamExt;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
@@ -413,5 +444,94 @@ mod tests {
             .with_temperature(0.99);
         let body = c.build_native_body(&[], None, None, None);
         assert_eq!(body["temperature"], 0.99);
+    }
+
+    #[tokio::test]
+    async fn native_send_retries_pre_response_transport_error() {
+        let base_url = retry_server(
+            "application/json",
+            json!({
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string(),
+        )
+        .await;
+        let c = LlamafileClient::new(Path::new("t.gguf")).with_base_url(base_url);
+
+        let response = c
+            .native_send(
+                vec![json!({"role": "user", "content": "go"})],
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("request retried");
+
+        match response {
+            LLMResponse::Text(text) => assert_eq!(text.content, "ok"),
+            _ => panic!("expected text response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_send_retries_pre_response_transport_error() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let base_url = retry_server("text/event-stream", body).await;
+        let c = LlamafileClient::new(Path::new("t.gguf")).with_base_url(base_url);
+
+        let mut stream = c
+            .stream_send(
+                vec![json!({"role": "user", "content": "go"})],
+                None,
+                None,
+                None,
+                LlamafileMode::Native,
+            )
+            .await
+            .expect("stream request retried");
+        let mut final_text = None;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("stream chunk");
+            if chunk.chunk_type == ChunkType::Final {
+                if let Some(LLMResponse::Text(text)) = chunk.response {
+                    final_text = Some(text.content);
+                }
+            }
+        }
+
+        assert_eq!(final_text.as_deref(), Some("ok"));
+    }
+
+    async fn retry_server(content_type: &'static str, body: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry server");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let (first, _) = listener.accept().await.expect("first connection");
+            drop(first);
+
+            let (mut second, _) = listener.accept().await.expect("second connection");
+            let mut buffer = [0_u8; 4096];
+            let _ = second.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            second
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        format!("http://{addr}/v1")
     }
 }

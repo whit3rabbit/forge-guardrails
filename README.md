@@ -252,6 +252,9 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |
 | `FORGE_SERIALIZE_REQUESTS` | `false` | Force request serialization |
 | `FORGE_CLASSIFIER_CACHE_DIR` | platform cache | User-facing classifier download cache root |
+| `FORGE_CLASSIFIER_DIR` | — | Local ONNX tool-call classifier artifact directory |
+| `FORGE_CLASSIFIER_MODE` | `shadow` | `disabled`, `shadow`, `advisory`, or `enforce` |
+| `FORGE_CLASSIFIER_MODEL` | `quantized` | `quantized` or `full` classifier ONNX file |
 | `FORGE_START_SIDECAR` | Docker: auto | Start the internal anyllm sidecar in Docker |
 | `ANYLLM_LISTEN_PORT` | Docker: `3000` | Internal anyllm sidecar port; do not publish it |
 | `FORGE_SIDECAR_API_KEY` / `PROXY_API_KEYS` | generated | Shared Forge-to-sidecar key in Docker |
@@ -271,6 +274,26 @@ Build the image locally:
 docker build -t forge-guardrails:local .
 ```
 
+The default `Dockerfile` builds the normal proxy image without ONNX classifier
+support. Use `Dockerfile.classifier` when you want the quantized tool-call
+classifier artifact downloaded into the image and loaded on proxy startup:
+
+```bash
+docker build -f Dockerfile.classifier -t forge-guardrails:classifier .
+```
+
+The classifier image sets:
+
+```text
+FORGE_CLASSIFIER_DIR=/opt/forge/classifiers/tool-call/onnx
+FORGE_CLASSIFIER_MODE=advisory
+FORGE_CLASSIFIER_MODEL=quantized
+```
+
+Set `FORGE_CLASSIFIER_MODE=disabled` at runtime to use the classifier image as a
+plain proxy. This image bundles only the ONNX classifier artifact; it does not
+bundle a GGUF or provider LLM.
+
 After publishing, replace `forge-guardrails:local` in these examples with `followthewhit3rabbit/forge-guardrails:latest`.
 
 Run with OpenAI through the internal anyllm sidecar:
@@ -280,6 +303,15 @@ docker run --rm -p 8081:8081 \
   -e OPENAI_API_KEY=sk-... \
   -e FORGE_MODEL=gpt-4o-mini \
   forge-guardrails:local
+```
+
+Run the classifier-ready image the same way:
+
+```bash
+docker run --rm -p 8081:8081 \
+  -e OPENAI_API_KEY=sk-... \
+  -e FORGE_MODEL=gpt-4o-mini \
+  forge-guardrails:classifier
 ```
 
 The entrypoint generates a private Forge-to-sidecar key unless you set `FORGE_SIDECAR_API_KEY` or `PROXY_API_KEYS`. It starts the sidecar with the upstream provider environment, then starts Forge with `OPENAI_API_KEY` set to the sidecar key and `--backend-url http://127.0.0.1:3000`.

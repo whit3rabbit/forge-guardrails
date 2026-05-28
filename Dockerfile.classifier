@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:trixie AS builder
+
+ARG ANYLLM_PROXY_VERSION=0.9.6
+ARG CLASSIFIER_MODEL=quantized
+ARG CLASSIFIER_OUTPUT_DIR=/opt/forge/classifiers/tool-call
+ENV LD_LIBRARY_PATH=/usr/local/lib/forge-onnxruntime:/usr/local/lib
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked --features classifier --bin forge-guardrails-proxy --bin download-classifier && \
+    cp target/release/forge-guardrails-proxy /usr/local/bin/forge-guardrails-proxy && \
+    cp target/release/download-classifier /usr/local/bin/download-classifier && \
+    mkdir -p /usr/local/lib/forge-onnxruntime && \
+    find /app/target/release -type f -name 'libonnxruntime*' -exec cp {} /usr/local/lib/forge-onnxruntime/ \; && \
+    strip /usr/local/bin/forge-guardrails-proxy /usr/local/bin/download-classifier
+
+RUN /usr/local/bin/download-classifier \
+    --artifact tool-call \
+    --output-dir "${CLASSIFIER_OUTPUT_DIR}" \
+    --classifier-model "${CLASSIFIER_MODEL}"
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target-anyllm \
+    CARGO_TARGET_DIR=/app/target-anyllm cargo install anyllm_proxy --version "${ANYLLM_PROXY_VERSION}" --locked --root /usr/local && \
+    strip /usr/local/bin/anyllm_proxy
+
+FROM debian:trixie-slim AS runtime
+
+ARG CLASSIFIER_MODEL=quantized
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system forge && \
+    useradd --system --gid forge --home-dir /nonexistent --shell /usr/sbin/nologin forge && \
+    mkdir -p /var/lib/forge/anyllm && \
+    chown -R forge:forge /var/lib/forge
+
+COPY --from=builder /usr/local/bin/forge-guardrails-proxy /usr/local/bin/forge-guardrails-proxy
+COPY --from=builder /usr/local/bin/anyllm_proxy /usr/local/bin/anyllm_proxy
+COPY --from=builder /usr/local/lib/forge-onnxruntime/ /usr/local/lib/
+COPY --from=builder /opt/forge/classifiers /opt/forge/classifiers
+COPY docker/entrypoint.sh /usr/local/bin/forge-docker-entrypoint
+
+ENV FORGE_HOST=0.0.0.0
+ENV FORGE_PORT=8081
+ENV ANYLLM_HOME=/var/lib/forge/anyllm
+ENV FORGE_CLASSIFIER_DIR=/opt/forge/classifiers/tool-call/onnx
+ENV FORGE_CLASSIFIER_MODE=advisory
+ENV FORGE_CLASSIFIER_MODEL=${CLASSIFIER_MODEL}
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+USER forge
+EXPOSE 8081
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -fsS "http://127.0.0.1:${FORGE_PORT:-8081}/health" >/dev/null || exit 1
+ENTRYPOINT ["forge-docker-entrypoint"]

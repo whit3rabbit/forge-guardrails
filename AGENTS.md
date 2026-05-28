@@ -76,7 +76,10 @@ The reference Python implementation is available in the [forge](file:///Users/wh
   - `CLEANROOM.md`: Summary of clean-room implementation history
   - `BACKEND_SETUP.md`: Setup configurations for local and remote providers
   - `EVAL_GUIDE.md`: Guide to setting up, running, and analyzing evaluation benchmarks
-- `Dockerfile`: Single-port deployment configuration for production use cases
+- `Dockerfile`: Single-port deployment configuration for normal proxy use
+- `Dockerfile.classifier`: Single-port proxy image that builds with
+  `--features classifier` and preloads the quantized tool-call ONNX classifier
+  artifact
 - `docker/entrypoint.sh`: Process supervisor for private sidecar and public proxy services
 
 ## Commands
@@ -181,6 +184,7 @@ Docker image and publish flow:
 
 ```bash
 docker build -t forge-guardrails:local .
+docker build -f Dockerfile.classifier -t forge-guardrails:classifier .
 docker image inspect forge-guardrails:local --format '{{json .Config.ExposedPorts}}'
 docker run --rm -p 8081:8081 \
   -e OPENAI_API_KEY=sk-... \
@@ -191,6 +195,11 @@ docker run --rm -p 8081:8081 \
 The Docker image must expose only the Forge proxy port, `8081/tcp`. The
 anyllm sidecar is an internal upstream hop and must not be published as a
 client-facing port. Keep the entrypoint behavior aligned with that invariant.
+The default `Dockerfile` must remain the normal no-classifier proxy image.
+`Dockerfile.classifier` may preload the ONNX tool-call classifier artifact and
+enable it by default, but it must still support `FORGE_CLASSIFIER_MODE=disabled`
+at runtime. Do not bundle GGUF/provider LLM weights into either Docker image
+unless explicitly asked.
 
 Publish Docker Hub image `followthewhit3rabbit/forge-guardrails` only when
 explicitly asked to publish:
