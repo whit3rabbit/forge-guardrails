@@ -116,6 +116,7 @@ REVIEW_VERIFICATION_SCHEMA: dict[str, Any] = {
 
 
 def review_schema_prompt() -> str:
+    """Return the schema validation prompt instructions for evaluations."""
     return (
         "Output fields, all required: disposition, label, confidence, rationale, "
         "corrected_candidate_call, corrected_final_response, required_facts, metadata, privacy_warnings.\n"
@@ -129,6 +130,7 @@ def review_schema_prompt() -> str:
 
 
 def tool_call_review_prompt(payload: dict[str, Any]) -> str:
+    """Build the prompt for reviewing a tool-call transcript."""
     return (
         "Review this sanitized tool-call transcript for a Forge tool-call verifier.\n"
         "Choose one tool-call label. If the call is a normal exploratory or verification "
@@ -144,6 +146,7 @@ def tool_call_review_prompt(payload: dict[str, Any]) -> str:
 
 
 def final_response_review_prompt(payload: dict[str, Any]) -> str:
+    """Build the prompt for reviewing a final response transcript."""
     return (
         "Review this sanitized terminal response for a Forge final-response verifier.\n"
         "Choose a final-response label. Mark missing facts, contradictions, unsupported claims, "
@@ -156,6 +159,7 @@ def final_response_review_prompt(payload: dict[str, Any]) -> str:
 
 
 def review_verification_prompt(payload: dict[str, Any], decision: dict[str, Any]) -> str:
+    """Build the verification prompt for a proposed training row and decision."""
     return (
         "Verify a proposed Forge verifier training row. You are a gatekeeper, not a second generator.\n"
         "Approve only when the proposed label and rationale are supported by the sanitized transcript. "

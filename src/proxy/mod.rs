@@ -1,7 +1,12 @@
+//! HTTP proxy interfaces, request handlers, and servers.
+
+/// Low-level endpoint intercept handlers and validation logic.
 pub mod handler;
+/// Anthropic/OpenAI protocol translations and payload shaping.
 #[allow(clippy::module_inception)]
 pub mod proxy;
 mod response;
+/// HTTP server lifecycle and endpoints.
 pub mod server;
 
 pub use handler::{

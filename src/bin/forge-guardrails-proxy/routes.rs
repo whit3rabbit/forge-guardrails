@@ -33,7 +33,7 @@ mod request_http {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     config: Arc<ProxyConfig>,
     client_factory: Arc<ClientFactory>,
     request_mutex: Arc<TokioMutex<()>>,
@@ -62,6 +62,7 @@ pub(crate) async fn serve(
     result
 }
 
+/// Internal helper to bind TcpListener and start serving the axum Router.
 async fn serve_inner(
     config: ProxyConfig,
     client_factory: ClientFactory,
@@ -119,6 +120,7 @@ async fn serve_inner(
         .map_err(|err| format!("server failed: {err}"))
 }
 
+/// Helper that waits for SIGINT or SIGTERM and triggers graceful shutdown.
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -148,11 +150,11 @@ async fn shutdown_signal() {
     }
 }
 
-async fn health() -> Response {
+pub async fn health() -> Response {
     build_response(200, "application/json", json!({"status": "ok"}).to_string())
 }
 
-async fn models(State(state): State<AppState>) -> Response {
+pub async fn models(State(state): State<AppState>) -> Response {
     build_response(
         200,
         "application/json",
@@ -169,7 +171,7 @@ async fn models(State(state): State<AppState>) -> Response {
     )
 }
 
-async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
+pub async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
     let parsed = match request_http::parse_openai_body(body.as_ref()) {
         Ok(value) => value,
         Err(response) => return build_http_response(response),
@@ -210,7 +212,7 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
     }
 }
 
-async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Response {
+pub async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Response {
     let request = match request_http::parse_anthropic_body(body.as_ref()) {
         Ok(request) => request,
         Err(response) => return build_http_response(response),
@@ -298,7 +300,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     }
 }
 
-async fn cors_preflight() -> Response {
+pub async fn cors_preflight() -> Response {
     build_response(204, "", String::new())
 }
 

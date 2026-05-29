@@ -1,6 +1,13 @@
 //! Lightweight HTTP server with OpenAI-compatible endpoints.
 //!
-//! Provides /health, /v1/models, /v1/chat/completions, and CORS preflight.
+//! # Endpoints
+//! - `GET /health`
+//! - `GET /v1/models`
+//! - `POST /v1/chat/completions`
+//! - `OPTIONS /v1/chat/completions`
+//! - `POST /v1/messages`
+//! - `OPTIONS /v1/messages`
+//!
 //! Supports optional request serialization via a single-worker queue for
 //! single-GPU environments.
 
@@ -122,7 +129,86 @@ impl HTTPServer {
             Ok::<(), anyhow::Error>(())
         })
     }
+}
 
+/// Shared state passed to axum route handlers.
+#[derive(Clone)]
+pub struct RouterState<C> {
+    /// Server configuration and handler methods.
+    pub server: Arc<HTTPServer>,
+    /// Backend LLM client.
+    pub client: Arc<C>,
+    /// Per-server context manager.
+    pub ctx: Arc<Mutex<ContextManager>>,
+}
+
+/// Return the proxy health response.
+pub async fn health() -> axum::response::Response {
+    response::build_response(200, "application/json", json!({"status": "ok"}).to_string())
+}
+
+/// Return the OpenAI-compatible model list.
+pub async fn models<C>(
+    axum::extract::State(state): axum::extract::State<Arc<RouterState<C>>>,
+) -> axum::response::Response
+where
+    C: LLMClient + 'static,
+{
+    response::build_response(
+        200,
+        "application/json",
+        json!({
+            "object": "list",
+            "data": [{
+                "id": state.server.model_name,
+                "object": "model",
+                "created": 0,
+                "owned_by": "local"
+            }]
+        })
+        .to_string(),
+    )
+}
+
+/// Handle an OpenAI-compatible chat completion request.
+pub async fn chat<C>(
+    axum::extract::State(state): axum::extract::State<Arc<RouterState<C>>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response
+where
+    C: LLMClient + 'static,
+{
+    state
+        .server
+        .handle_chat_completions_response(&body, &state.client, &state.ctx)
+        .await
+}
+
+/// Handle an Anthropic-compatible messages request.
+pub async fn messages<C>(
+    axum::extract::State(state): axum::extract::State<Arc<RouterState<C>>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response
+where
+    C: LLMClient + 'static,
+{
+    state
+        .server
+        .handle_anthropic_messages_response(&body, &state.client, &state.ctx)
+        .await
+}
+
+/// Return the chat-completions CORS preflight response.
+pub async fn opts_chat() -> axum::response::Response {
+    response::cors_preflight_response()
+}
+
+/// Return the messages CORS preflight response.
+pub async fn opts_messages() -> axum::response::Response {
+    response::cors_preflight_response()
+}
+
+impl HTTPServer {
     fn build_router<C>(
         server: Arc<Self>,
         client: Arc<C>,
@@ -132,76 +218,24 @@ impl HTTPServer {
         C: LLMClient + 'static,
     {
         use axum::{
-            body::Bytes,
             routing::{get, options, post},
+            Router,
         };
 
-        // Capture shared state in Arcs for each route closure.
-        let srv_models = server.clone();
+        let state = Arc::new(RouterState {
+            server,
+            client,
+            ctx,
+        });
 
-        let srv_chat = server.clone();
-        let cli_chat = client.clone();
-        let ctx_chat = ctx.clone();
-
-        let srv_messages = server.clone();
-        let cli_messages = client.clone();
-        let ctx_messages = ctx.clone();
-
-        let health = move || async move {
-            response::build_response(200, "application/json", json!({"status": "ok"}).to_string())
-        };
-
-        let models = move || {
-            let srv = srv_models.clone();
-            async move {
-                response::build_response(
-                    200,
-                    "application/json",
-                    json!({
-                        "object": "list",
-                        "data": [{
-                            "id": srv.model_name,
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": "local"
-                        }]
-                    })
-                    .to_string(),
-                )
-            }
-        };
-
-        let chat = move |body: Bytes| {
-            let srv = srv_chat.clone();
-            let cli = cli_chat.clone();
-            let ctx = ctx_chat.clone();
-            async move {
-                srv.handle_chat_completions_response(&body, &cli, &ctx)
-                    .await
-            }
-        };
-
-        let messages = move |body: Bytes| {
-            let srv = srv_messages.clone();
-            let cli = cli_messages.clone();
-            let ctx = ctx_messages.clone();
-            async move {
-                srv.handle_anthropic_messages_response(&body, &cli, &ctx)
-                    .await
-            }
-        };
-
-        let opts_chat = || async move { response::cors_preflight_response() };
-
-        let opts_messages = || async move { response::cors_preflight_response() };
-
-        axum::Router::new()
+        Router::new()
             .route("/health", get(health))
-            .route("/v1/models", get(models))
-            .route("/v1/chat/completions", post(chat))
+            .route("/v1/models", get(models::<C>))
+            .route("/v1/chat/completions", post(chat::<C>))
             .route("/v1/chat/completions", options(opts_chat))
-            .route("/v1/messages", post(messages))
+            .route("/v1/messages", post(messages::<C>))
             .route("/v1/messages", options(opts_messages))
+            .with_state(state)
     }
 
     /// Build CORS headers for OPTIONS responses.

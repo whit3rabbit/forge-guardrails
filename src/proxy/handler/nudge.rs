@@ -1,0 +1,210 @@
+use crate::clients::base::{TextResponse, ToolCall};
+use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
+use crate::guardrails::{ErrorTracker, StepCheck, StepEnforcer};
+use crate::tools::respond::RESPOND_TOOL_NAME;
+use indexmap::IndexMap;
+use serde_json::Value;
+
+const PROXY_STEP_INDEX: i64 = 0;
+
+/// Synthesizes a mock tool call to the respond tool, wrapping the final response text.
+pub fn synthetic_respond_tool_call(text: &TextResponse) -> ToolCall {
+    let mut args = IndexMap::new();
+    args.insert("message".to_string(), Value::String(text.content.clone()));
+    ToolCall::new(RESPOND_TOOL_NAME, args)
+}
+
+/// Emits a step nudge or returns an error if the premature attempts budget is exhausted.
+pub fn emit_proxy_step_nudge_or_error(
+    enforcer: &StepEnforcer,
+    step_check: StepCheck,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+) -> Result<(), String> {
+    if enforcer.premature_exhausted() {
+        return Err(format!(
+            "step enforcement exhausted after {} premature terminal tool attempts; pending required steps: {}",
+            enforcer.premature_attempts(),
+            enforcer.pending().join(", ")
+        ));
+    }
+    let nudge = step_check.nudge.expect("step nudge required");
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::StepNudge,
+        "[StepEnforcementError]",
+        &nudge.content,
+    );
+    Ok(())
+}
+
+/// Emits a classifier nudge or returns an error if the retries budget is exhausted.
+pub fn emit_proxy_classifier_nudge_or_error(
+    error_tracker: &mut ErrorTracker,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "classifier objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::RetryNudge,
+        "[ClassifierNudge]",
+        nudge_content,
+    );
+    Ok(())
+}
+
+/// Emits a tool policy nudge or returns an error if the retries budget is exhausted.
+pub fn emit_proxy_tool_policy_nudge_or_error(
+    error_tracker: &mut ErrorTracker,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "tool-call policy objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::RetryNudge,
+        "[ToolCallPolicyNudge]",
+        nudge_content,
+    );
+    Ok(())
+}
+
+/// Emits a final response nudge or returns an error if the retries budget is exhausted.
+pub fn emit_proxy_final_response_tool_nudge_or_error(
+    error_tracker: &mut ErrorTracker,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "final-response classifier objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::RetryNudge,
+        "[FinalResponseNudge]",
+        nudge_content,
+    );
+    Ok(())
+}
+
+/// Emits a classifier nudge to the user or returns an error if retries are exhausted.
+pub fn emit_proxy_user_classifier_nudge_or_error(
+    error_tracker: &mut ErrorTracker,
+    messages: &mut Vec<Message>,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "final-response classifier objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    messages.push(Message::new(
+        MessageRole::User,
+        format!("[FinalResponseNudge] {nudge_content}"),
+        MessageMeta::new(MessageType::RetryNudge).with_step_index(PROXY_STEP_INDEX),
+    ));
+    Ok(())
+}
+
+/// Emits the assistant's reasoning and tool calls into the message history, generating IDs if missing.
+pub fn emit_proxy_assistant_tool_calls(
+    mut calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    step_index: i64,
+) -> Vec<ToolCall> {
+    if let Some(reasoning) = calls.first().and_then(|tc| tc.reasoning.as_ref()) {
+        messages.push(Message::new(
+            MessageRole::Assistant,
+            reasoning.as_str(),
+            MessageMeta::new(MessageType::Reasoning).with_step_index(step_index),
+        ));
+    }
+
+    let mut infos = Vec::with_capacity(calls.len());
+    for tc in &mut calls {
+        let call_id = tc.id.clone().unwrap_or_else(|| {
+            let id = crate::core::inference::format_tool_call_id(*tool_call_counter);
+            *tool_call_counter += 1;
+            id
+        });
+        tc.id = Some(call_id.clone());
+        infos.push(ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), call_id));
+    }
+
+    messages.push(
+        Message::new(
+            MessageRole::Assistant,
+            "",
+            MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
+        )
+        .with_tool_calls(infos),
+    );
+    calls
+}
+
+/// Emits guardrail nudge results into the message history for each tool call.
+pub fn emit_proxy_guardrail_nudge_results(
+    calls: &[ToolCall],
+    messages: &mut Vec<Message>,
+    step_index: i64,
+    msg_type: MessageType,
+    prefix: &str,
+    nudge_content: &str,
+) {
+    let error_content = format!("{prefix} {nudge_content}");
+    for tc in calls {
+        let call_id = tc.id.as_deref().unwrap_or_default();
+        messages.push(
+            Message::new(
+                MessageRole::Tool,
+                error_content.as_str(),
+                MessageMeta::new(msg_type).with_step_index(step_index),
+            )
+            .with_tool_name(&tc.tool)
+            .with_tool_call_id(call_id),
+        );
+    }
+}

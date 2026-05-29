@@ -3,26 +3,27 @@
 //! WorkflowRunner drives the iterative loop: inference, guardrails check,
 //! tool execution, error tracking, and termination on terminal tool success.
 
+pub(crate) mod execution;
+pub(crate) mod guardrails;
+pub(crate) mod scoring;
+
 use super::inference::{self, OnChunkFn};
 use super::message::{Message, MessageMeta, MessageRole, MessageType};
 use super::steps::Prerequisite;
 use super::tool_spec::ToolSpec;
-use super::workflow::{PrerequisiteSpec, Workflow};
+use super::workflow::Workflow;
 use crate::clients::base::LLMClient;
 use crate::clients::base::{LLMResponse, ToolCall};
 use crate::context::manager::ContextManager;
 use crate::error::{
     ForgeError, MaxIterationsError, PrerequisiteError, StepEnforcementError, ToolCallError,
-    ToolError, ToolExecutionError, WorkflowCancelledError,
+    WorkflowCancelledError,
 };
 use crate::guardrails::{
-    recent_errors_from_messages, ClassifierAction, ErrorTracker, FinalResponseContext,
-    FinalResponseScore, FinalResponseScorer, FinalResponseToolResult, ResponseValidator,
-    RetryNudgeFn, ScoringContext, ScoringPipeline, StepEnforcer, StepPrerequisite, ToolCallScore,
-    ToolCallScorer, WorkflowStateForScoring,
+    ErrorTracker, FinalResponseScore, FinalResponseScorer, ResponseValidator, RetryNudgeFn,
+    StepEnforcer, ToolCallScore, ToolCallScorer,
 };
-use crate::prompts::nudges;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -43,67 +44,20 @@ pub type FinalResponseScoreFn = dyn Fn(&FinalResponseScore) + Send + Sync;
 /// Generic over the LLM client type because the LLMClient trait uses
 /// async methods and is not dyn-compatible.
 pub struct WorkflowRunner<C: LLMClient> {
-    client: Arc<C>,
-    context_manager: Arc<tokio::sync::Mutex<ContextManager>>,
-    max_iterations: i32,
-    max_retries_per_step: i32,
-    max_tool_errors: i32,
-    stream: bool,
-    on_chunk: Option<Arc<OnChunkFn>>,
-    on_message: Option<Arc<OnMessageFn>>,
-    rescue_enabled: bool,
-    retry_nudge_fn: Option<Arc<NudgeCallbackFn>>,
-    scorer: Option<Arc<dyn ToolCallScorer>>,
-    on_tool_call_score: Option<Arc<ToolCallScoreFn>>,
-    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
-    on_final_response_score: Option<Arc<FinalResponseScoreFn>>,
-}
-
-struct RunnerGuardrails {
-    validator: ResponseValidator,
-    error_tracker: ErrorTracker,
-    step_enforcer: StepEnforcer,
-}
-
-struct ToolResultRecord {
-    tool_name: String,
-    call_id: String,
-    content: String,
-}
-
-fn map_tool_prerequisites(workflow: &Workflow) -> IndexMap<String, Vec<StepPrerequisite>> {
-    let mut tool_prerequisites = IndexMap::new();
-    for (name, tool_def) in &workflow.tools {
-        if !tool_def.prerequisites.is_empty() {
-            let mapped = tool_def
-                .prerequisites
-                .iter()
-                .map(map_prerequisite_spec)
-                .collect();
-            tool_prerequisites.insert(name.clone(), mapped);
-        }
-    }
-    tool_prerequisites
-}
-
-fn map_prerequisite_spec(prereq: &PrerequisiteSpec) -> StepPrerequisite {
-    match prereq {
-        PrerequisiteSpec::NameOnly(name) => StepPrerequisite::NameOnly(name.clone()),
-        PrerequisiteSpec::ArgMatched { tool, match_arg } => StepPrerequisite::ArgMatched {
-            tool: tool.clone(),
-            match_arg: match_arg.clone(),
-        },
-    }
-}
-
-fn map_step_prerequisite(prereq: &StepPrerequisite) -> Prerequisite {
-    match prereq {
-        StepPrerequisite::NameOnly(name) => Prerequisite::NameOnly(name.clone()),
-        StepPrerequisite::ArgMatched { tool, match_arg } => Prerequisite::ArgMatched {
-            tool: tool.clone(),
-            match_arg: match_arg.clone(),
-        },
-    }
+    pub(super) client: Arc<C>,
+    pub(super) context_manager: Arc<tokio::sync::Mutex<ContextManager>>,
+    pub(super) max_iterations: i32,
+    pub(super) max_retries_per_step: i32,
+    pub(super) max_tool_errors: i32,
+    pub(super) stream: bool,
+    pub(super) on_chunk: Option<Arc<OnChunkFn>>,
+    pub(super) on_message: Option<Arc<OnMessageFn>>,
+    pub(super) rescue_enabled: bool,
+    pub(super) retry_nudge_fn: Option<Arc<NudgeCallbackFn>>,
+    pub(super) scorer: Option<Arc<dyn ToolCallScorer>>,
+    pub(super) on_tool_call_score: Option<Arc<ToolCallScoreFn>>,
+    pub(super) final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    pub(super) on_final_response_score: Option<Arc<FinalResponseScoreFn>>,
 }
 
 impl<C: LLMClient> WorkflowRunner<C> {
@@ -195,15 +149,16 @@ impl<C: LLMClient> WorkflowRunner<C> {
         self
     }
 
-    fn build_guardrails(&self, workflow: &Workflow) -> RunnerGuardrails {
+    fn build_guardrails(&self, workflow: &Workflow) -> guardrails::RunnerGuardrails {
         let tool_specs: Vec<ToolSpec> = workflow.tools.values().map(|d| d.spec.clone()).collect();
-        let terminal_set: IndexSet<String> = workflow.terminal_tools.iter().cloned().collect();
+        let terminal_set: indexmap::IndexSet<String> =
+            workflow.terminal_tools.iter().cloned().collect();
         let retry_nudge_for_validator: Option<RetryNudgeFn> = self
             .retry_nudge_fn
             .clone()
             .map(|f| Box::new(move |raw: &str| f(raw)) as RetryNudgeFn);
 
-        RunnerGuardrails {
+        guardrails::RunnerGuardrails {
             validator: ResponseValidator::from_tool_specs(
                 tool_specs,
                 self.rescue_enabled,
@@ -213,7 +168,7 @@ impl<C: LLMClient> WorkflowRunner<C> {
             step_enforcer: StepEnforcer::new(
                 workflow.required_steps.clone(),
                 terminal_set,
-                Some(map_tool_prerequisites(workflow)),
+                Some(guardrails::map_tool_prerequisites(workflow)),
                 3, // max premature attempts
                 2, // max prerequisite violations
             ),
@@ -226,8 +181,6 @@ impl<C: LLMClient> WorkflowRunner<C> {
         prompt_vars: Option<&IndexMap<String, String>>,
         initial_messages: Option<Vec<Message>>,
     ) -> Vec<Message> {
-        // Note: on_message is NOT fired for seed messages — only for new messages
-        // produced during this run. This matches the current Rust behavior.
         if let Some(seed) = initial_messages {
             return seed;
         }
@@ -250,8 +203,10 @@ impl<C: LLMClient> WorkflowRunner<C> {
     fn prerequisite_error(step_enforcer: &StepEnforcer, tool_calls: &[ToolCall]) -> ForgeError {
         for tc in tool_calls {
             if let Some(prereqs) = step_enforcer.tool_prerequisites.get(&tc.tool) {
-                let rust_prereqs: Vec<Prerequisite> =
-                    prereqs.iter().map(map_step_prerequisite).collect();
+                let rust_prereqs: Vec<Prerequisite> = prereqs
+                    .iter()
+                    .map(guardrails::map_step_prerequisite)
+                    .collect();
                 let check_res =
                     step_enforcer
                         .tracker
@@ -570,413 +525,14 @@ impl<C: LLMClient> WorkflowRunner<C> {
         )))
     }
 
-    async fn score_tool_calls(
-        &self,
-        fallback_user_message: &str,
-        messages: &[Message],
-        tool_calls: &[ToolCall],
-        step_enforcer: &StepEnforcer,
-        tool_specs: &[ToolSpec],
-    ) -> Option<String> {
-        let scorer = self.scorer.clone()?;
-        let pipeline = ScoringPipeline::new(Some(scorer), None);
-        let user_request = latest_user_request(messages).unwrap_or(fallback_user_message);
-        let ctx = Arc::new(ScoringContext::from_step_enforcer(
-            user_request,
-            step_enforcer,
-            &step_enforcer.terminal_tools,
-            recent_errors_from_messages(messages, 8),
-            tool_specs,
-        ));
-        pipeline
-            .score_tool_calls(
-                ctx,
-                tool_calls,
-                |call, score| {
-                    tracing::info!(
-                        target: "forge.classifier",
-                        label = ?score.label,
-                        confidence = score.confidence,
-                        action = ?score.action,
-                        latency_ms = score.latency_ms,
-                        tool = %call.tool,
-                        "tool-call classifier score"
-                    );
-                    if let Some(callback) = &self.on_tool_call_score {
-                        callback(call, score);
-                    }
-                },
-                |call, err| {
-                    tracing::warn!(
-                        target: "forge.classifier",
-                        error = %err,
-                        tool = %call.tool,
-                        "classifier scoring failed; allowing deterministic path"
-                    );
-                },
-            )
-            .await
-    }
-
-    async fn score_candidate_final_responses(
-        &self,
-        fallback_user_message: &str,
-        messages: &[Message],
-        tool_calls: &[ToolCall],
-        step_enforcer: &StepEnforcer,
-    ) -> Option<String> {
-        let scorer = self.final_response_scorer.clone()?;
-        let pipeline = ScoringPipeline::new(None, Some(scorer));
-        let user_request = latest_user_request(messages).unwrap_or(fallback_user_message);
-        let base_trace = Self::tool_trace_from_messages(messages);
-        let tool_results = Self::tool_results_from_messages(messages);
-        let mut nudge: Option<String> = None;
-        for call in tool_calls
-            .iter()
-            .filter(|call| step_enforcer.terminal_tools.contains(&call.tool))
-        {
-            let mut tool_trace = base_trace.clone();
-            tool_trace.push(call.tool.clone());
-            let ctx = Arc::new(FinalResponseContext {
-                schema_version: "final-response-verifier-input/v1".to_string(),
-                user_request: user_request.to_string(),
-                workflow_state: WorkflowStateForScoring {
-                    required_steps: step_enforcer.tracker.required_steps().to_vec(),
-                    completed_steps: step_enforcer.completed_steps().keys().cloned().collect(),
-                    pending_steps: step_enforcer.pending(),
-                    terminal_tools: step_enforcer.terminal_tools.iter().cloned().collect(),
-                    recent_errors: recent_errors_from_messages(messages, 8),
-                },
-                required_facts: Vec::new(),
-                tool_trace,
-                tool_results: tool_results.clone(),
-                candidate_final_response: Self::candidate_final_response_from_call(call),
-                metadata: None,
-            });
-            let mut action = None;
-            if let Some(content) = pipeline
-                .score_final_response(
-                    ctx,
-                    |score| {
-                        action = Some(score.action);
-                        tracing::info!(
-                                target: "forge.classifier",
-                                label = %score.label.as_label(),
-                            confidence = score.confidence,
-                            action = %score.action.as_str(),
-                            latency_ms = score.latency_ms,
-                            terminal_tool = %call.tool,
-                            "final-response classifier score"
-                        );
-                        if let Some(callback) = &self.on_final_response_score {
-                            callback(score);
-                        }
-                    },
-                    |err| {
-                        tracing::warn!(
-                            target: "forge.classifier",
-                            error = %err,
-                            terminal_tool = %call.tool,
-                            "final-response classifier scoring failed; allowing deterministic path"
-                        );
-                    },
-                )
-                .await
-            {
-                if action == Some(ClassifierAction::Block) || nudge.is_none() {
-                    nudge = Some(content);
-                }
-            }
-        }
-        nudge
-    }
-
-    fn candidate_final_response_from_call(call: &ToolCall) -> String {
-        for key in ["message", "answer", "content", "report", "summary"] {
-            if let Some(value) = call.args.get(key) {
-                return value
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| value.to_string());
-            }
-        }
-        Value::Object(
-            call.args
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        )
-        .to_string()
-    }
-
-    fn tool_trace_from_messages(messages: &[Message]) -> Vec<String> {
-        messages
-            .iter()
-            .filter_map(|message| message.tool_calls.as_ref())
-            .flat_map(|calls| calls.iter().map(|call| call.name.clone()))
-            .collect()
-    }
-
-    fn tool_results_from_messages(messages: &[Message]) -> Vec<FinalResponseToolResult> {
-        messages
-            .iter()
-            .filter(|message| message.metadata.msg_type == MessageType::ToolResult)
-            .filter_map(|message| {
-                Some(FinalResponseToolResult {
-                    tool_name: message.tool_name.clone()?,
-                    content: message.content.clone(),
-                })
-            })
-            .collect()
-    }
-
-    fn emit_guardrail_nudge_results(
-        &self,
-        calls: &[ToolCall],
-        messages: &mut Vec<Message>,
-        step_index: i64,
-        msg_type: MessageType,
-        prefix: &str,
-        nudge_content: &str,
-    ) {
-        for tc in calls {
-            let call_id = tc.id.clone().unwrap_or_default();
-            let error_content = format!("{} {}", prefix, nudge_content);
-            let result_msg = Message::new(
-                MessageRole::Tool,
-                &error_content,
-                MessageMeta::new(msg_type).with_step_index(step_index),
-            )
-            .with_tool_name(&tc.tool)
-            .with_tool_call_id(&call_id);
-            self.fire_message(&result_msg);
-            messages.push(result_msg);
-        }
-    }
-
-    fn terminal_output_value(output: &Value) -> Value {
-        if output.is_null() {
-            Value::Null
-        } else if let Some(s) = output.as_str() {
-            serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string()))
-        } else {
-            output.clone()
-        }
-    }
-
-    fn tool_result_content(output: &Value) -> String {
-        if let Some(s) = output.as_str() {
-            s.to_string()
-        } else {
-            output.to_string()
-        }
-    }
-
-    fn emit_tool_result_records(
-        &self,
-        records: &[ToolResultRecord],
-        messages: &mut Vec<Message>,
-        iteration: i32,
-    ) {
-        for record in records {
-            let result_msg = Message::new(
-                MessageRole::Tool,
-                record.content.as_str(),
-                MessageMeta::new(MessageType::ToolResult).with_step_index(iteration as i64),
-            )
-            .with_tool_name(record.tool_name.as_str())
-            .with_tool_call_id(record.call_id.as_str());
-            self.fire_message(&result_msg);
-            messages.push(result_msg);
-        }
-    }
-
-    /// Execute a batch of tool calls, returning the terminal tool result if found.
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_tool_batch(
-        &self,
-        calls: &[crate::clients::base::ToolCall],
-        messages: &mut Vec<Message>,
-        workflow: &Workflow,
-        step_enforcer: &mut StepEnforcer,
-        error_tracker: &mut ErrorTracker,
-        tool_call_counter: &mut i64,
-        iteration: i32,
-    ) -> Result<Option<Value>, ForgeError> {
-        let mut terminal_result: Option<Value> = None;
-        let mut batch_had_error = false;
-        let mut last_error: Option<ForgeError> = None;
-
-        // Execute each tool sequentially.
-        let mut results: Vec<ToolResultRecord> = Vec::new();
-        for tc in calls {
-            let call_id = if let Some(ref id) = tc.id {
-                id.clone()
-            } else {
-                let id = inference::format_tool_call_id(*tool_call_counter);
-                *tool_call_counter += 1;
-                id
-            };
-
-            let callable = match workflow.get_callable(&tc.tool) {
-                Ok(c) => c,
-                Err(_) => {
-                    results.push(ToolResultRecord {
-                        tool_name: tc.tool.clone(),
-                        call_id,
-                        content: "[TOOL_ERROR] Tool not found".to_string(),
-                    });
-                    continue;
-                }
-            };
-
-            match callable(tc.args.clone()).await {
-                Ok(output) => {
-                    step_enforcer.record(&tc.tool, Some(&tc.args));
-
-                    let is_terminal = workflow.terminal_tools.contains(&tc.tool);
-                    if is_terminal {
-                        terminal_result = Some(Self::terminal_output_value(&output));
-                    }
-
-                    results.push(ToolResultRecord {
-                        tool_name: tc.tool.clone(),
-                        call_id,
-                        content: Self::tool_result_content(&output),
-                    });
-                }
-                Err(ToolError::Resolution(e)) => {
-                    // Soft error: feed back as tool result, don't count toward tool_errors.
-                    error_tracker.record_result(false, true);
-                    results.push(ToolResultRecord {
-                        tool_name: tc.tool.clone(),
-                        call_id,
-                        content: format!("[ToolResolutionError] {}", e),
-                    });
-                }
-                Err(ToolError::Execution(e)) => {
-                    // Hard error: increment consecutive tool errors count.
-                    batch_had_error = true;
-                    error_tracker.record_result(false, false);
-                    last_error = Some(ForgeError::ToolExecution(ToolExecutionError::new(
-                        tc.tool.clone(),
-                        e.to_string(),
-                    )));
-                    results.push(ToolResultRecord {
-                        tool_name: tc.tool.clone(),
-                        call_id,
-                        content: format!("[ToolError] ToolExecutionError: {}", e),
-                    });
-                }
-            }
-        }
-
-        self.emit_tool_result_records(&results, messages, iteration);
-
-        // Post-batch bookkeeping — matches current Rust behavior.
-        if batch_had_error {
-            if error_tracker.tool_errors_exhausted() {
-                if let Some(err) = last_error {
-                    return Err(err);
-                }
-            }
-        } else {
-            error_tracker.reset_errors();
-            step_enforcer.reset_premature();
-            step_enforcer.reset_prereq_violations();
-        }
-
-        // Check for terminal result.
-        if let Some(val) = terminal_result {
-            return Ok(Some(val));
-        }
-
-        Ok(None)
-    }
-
-    fn is_mixed_terminal_batch(tool_calls: &[ToolCall], workflow: &Workflow) -> bool {
-        let mut has_terminal = false;
-        let mut has_nonterminal = false;
-        for tc in tool_calls {
-            if workflow.terminal_tools.contains(&tc.tool) {
-                has_terminal = true;
-            } else {
-                has_nonterminal = true;
-            }
-            if has_terminal && has_nonterminal {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn mixed_terminal_batch_nudge(workflow: &Workflow, step_enforcer: &StepEnforcer) -> String {
-        let pending = step_enforcer.pending();
-        let allowed_owned: Vec<String> = if pending.is_empty() {
-            workflow
-                .tools
-                .keys()
-                .filter(|name| !workflow.terminal_tools.contains(*name))
-                .cloned()
-                .collect()
-        } else {
-            pending
-        };
-        let allowed: Vec<&str> = allowed_owned.iter().map(String::as_str).collect();
-        let blocked: Vec<&str> = workflow.terminal_tools.iter().map(String::as_str).collect();
-        nudges::unsafe_batch_nudge(&allowed, &blocked)
-    }
-
-    /// Record the assistant's successful tool-call turn after guardrail checks.
-    fn emit_assistant_tool_calls(
-        &self,
-        mut calls: Vec<ToolCall>,
-        messages: &mut Vec<Message>,
-        tool_call_counter: &mut i64,
-        step_index: i64,
-    ) -> Vec<ToolCall> {
-        if let Some(reasoning) = calls.first().and_then(|tc| tc.reasoning.as_ref()) {
-            let reasoning_msg = Message::new(
-                MessageRole::Assistant,
-                reasoning.as_str(),
-                MessageMeta::new(MessageType::Reasoning).with_step_index(step_index),
-            );
-            self.fire_message(&reasoning_msg);
-            messages.push(reasoning_msg);
-        }
-
-        let mut infos = Vec::with_capacity(calls.len());
-        for tc in &mut calls {
-            let call_id = inference::format_tool_call_id(*tool_call_counter);
-            *tool_call_counter += 1;
-            tc.id = Some(call_id.clone());
-            infos.push(crate::core::message::ToolCallInfo::new(
-                &tc.tool,
-                Some(tc.args.clone()),
-                call_id,
-            ));
-        }
-
-        let tool_call_msg = Message::new(
-            MessageRole::Assistant,
-            "",
-            MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
-        )
-        .with_tool_calls(infos);
-        self.fire_message(&tool_call_msg);
-        messages.push(tool_call_msg);
-
-        calls
-    }
-
-    fn fire_message(&self, msg: &Message) {
+    pub(super) fn fire_message(&self, msg: &Message) {
         if let Some(ref cb) = self.on_message {
             cb(msg);
         }
     }
 }
 
-fn latest_user_request(messages: &[Message]) -> Option<&str> {
+pub(super) fn latest_user_request(messages: &[Message]) -> Option<&str> {
     messages
         .iter()
         .rev()
