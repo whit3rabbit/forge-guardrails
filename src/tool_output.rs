@@ -720,6 +720,20 @@ mod tests {
     }
 
     #[test]
+    fn safe_redacts_secret_split_by_ansi_sequences() {
+        let result = compress_tool_output(
+            "bash",
+            None,
+            "token sk-\u{1b}[31mabcdefghijklmnopqrstuvwxyz\u{1b}[0m",
+            &safe_config(),
+            None,
+        );
+        assert!(result.redacted);
+        assert!(result.output.contains("[REDACTED_SECRET]"));
+        assert!(!result.output.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
     fn safe_preserves_thinking_blocks_from_tool_output() {
         let raw = "visible before\n<thinking>\nprivate chain\n</thinking>\nvisible after\n";
         let result = compress_tool_output("bash", None, raw, &safe_config(), None);

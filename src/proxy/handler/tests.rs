@@ -2220,6 +2220,96 @@ async fn anthropic_tool_output_compression_rebuilds_messages_when_content_change
 }
 
 #[tokio::test]
+async fn anthropic_tool_output_compression_patches_raw_body_and_preserves_cache_control() {
+    let mut server = mockito::Server::new_async().await;
+    let raw_for_parse = json!({
+        "model": "claude-3",
+        "max_tokens": 64,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "summarize",
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            },
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_search",
+                    "name": "search",
+                    "input": {"query": "x"}
+                }]
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_search",
+                    "content": "sk-\u{1b}[31mabcdefghijklmnopqrstuvwxyz\u{1b}[0m",
+                    "is_error": true
+                }]
+            }
+        ],
+        "metadata": {"user_id": "user-123"},
+        "thinking": {"type": "disabled"}
+    });
+    let mut raw_with_forge = raw_for_parse.clone();
+    raw_with_forge["_forge"] = json!({
+        "tool_output_compression": {"mode": "safe"}
+    });
+    let mut expected = raw_for_parse.clone();
+    expected["messages"][2]["content"][0]["content"] = json!("[REDACTED_SECRET]");
+
+    let mock = server
+        .mock("POST", "/messages")
+        .match_body(mockito::Matcher::Json(expected))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let body: MessageCreateRequest = serde_json::from_value(raw_for_parse).expect("request");
+    let client = Arc::new(
+        AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0),
+    );
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let result = handle_anthropic_messages_with_scorers_and_tool_output_compression(
+        &body,
+        &raw_with_forge,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    match result {
+        AnthropicHandlerResult::Response(value) => {
+            assert_eq!(value["content"][0]["text"], "ok");
+        }
+        _ => panic!("expected Response"),
+    }
+    mock.assert_async().await;
+}
+
+#[tokio::test]
 async fn tool_call_policy_lsp_nudge_fires_only_when_replacement_tool_exists() {
     let mut grep_args = IndexMap::new();
     grep_args.insert("pattern".into(), json!("UserService"));

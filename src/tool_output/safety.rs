@@ -21,6 +21,12 @@ pub(super) fn apply_safe_filters(
     let mut binary_suppressed = false;
     let mut strategies = Vec::new();
 
+    let stripped = strip_ansi(&output);
+    if stripped != output {
+        output = stripped;
+        strategies.push("strip_ansi".to_string());
+    }
+
     if config.redact_secrets {
         let redacted_output = redact_secrets(&output);
         if redacted_output != output {
@@ -43,12 +49,6 @@ pub(super) fn apply_safe_filters(
             binary_suppressed,
             strategies,
         };
-    }
-
-    let stripped = strip_ansi(&output);
-    if stripped != output {
-        output = stripped;
-        strategies.push("strip_ansi".to_string());
     }
 
     let capped_output = cap_output(&output, config.max_output_bytes);
