@@ -5,7 +5,8 @@ use crate::client::ClientFactory;
 use crate::config::{
     classifier_settings_from_env_cli, cli_host, cli_max_retries, cli_port,
     final_response_classifier_settings_from_env_cli, normalized_extra_flags, require_cli_gguf,
-    require_cli_llamafile_runtime, require_cli_model, resolve_serialize, validate_nonempty,
+    require_cli_llamafile_runtime, require_cli_model, resolve_serialize,
+    tool_call_policy_from_env_cli, tool_output_compression_from_env_cli, validate_nonempty,
     validate_nonzero_u16, validate_optional_positive_i64,
 };
 
@@ -37,6 +38,8 @@ pub(super) fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<St
         final_response_classifier_mode,
         final_response_classifier_model,
     ) = final_response_classifier_settings_from_env_cli(cli)?;
+    let tool_output_compression = tool_output_compression_from_env_cli(cli)?;
+    let tool_call_policy = tool_call_policy_from_env_cli(cli)?;
 
     let (default_model, client_factory, managed_server, context_tokens) = match backend {
         CliBackend::Ollama => {
@@ -179,6 +182,8 @@ pub(super) fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<St
         final_response_classifier_mode,
         final_response_classifier_model,
         final_response_classifier_max_latency_ms: cli.final_response_classifier_max_latency_ms,
+        tool_output_compression,
+        tool_call_policy,
     };
 
     Ok(Startup {

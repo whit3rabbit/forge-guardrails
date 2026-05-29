@@ -21,6 +21,10 @@ pub mod prompts;
 pub mod proxy;
 /// In-process server backend manager.
 pub mod server;
+/// Tool-output compression for proxy-forwarded tool result messages.
+pub mod tool_output;
+/// Opt-in tool-call policy nudges for proxy-intercepted tool calls.
+pub mod tool_policy;
 /// Built-in tools like `respond`.
 pub mod tools;
 
@@ -96,12 +100,25 @@ pub use prompts::{
 pub use proxy::{
     extract_passthrough, extract_sampling, handle_anthropic_messages,
     handle_anthropic_messages_with_scorer, handle_anthropic_messages_with_scorers,
-    handle_chat_completions, handle_chat_completions_with_scorer,
-    handle_chat_completions_with_scorers, has_respond_tool,
+    handle_anthropic_messages_with_scorers_and_tool_controls,
+    handle_anthropic_messages_with_scorers_and_tool_output_compression, handle_chat_completions,
+    handle_chat_completions_with_scorer, handle_chat_completions_with_scorers,
+    handle_chat_completions_with_scorers_and_tool_controls,
+    handle_chat_completions_with_scorers_and_tool_output_compression, has_respond_tool,
     init_proxy_classifier_log_sink_from_env, openai_to_messages, respond_tool_openai,
     strip_respond_calls, text_response_to_openai, text_to_sse_events, tool_calls_to_openai,
     tool_calls_to_sse_events, AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult,
     HTTPServer, HandlerError, HandlerResult, OpenAiEventStream, OpenAiMessageError,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
+pub use tool_output::{
+    canonical_tool_name, compress_tool_output, detect_family, estimate_tokens,
+    ToolOutputCompressionConfig, ToolOutputCompressionMode, ToolOutputCompressionResult,
+    ToolOutputCompressionState, DEFAULT_MAX_DEDUP_ENTRIES_PER_SESSION, DEFAULT_MAX_DEDUP_SESSIONS,
+    DEFAULT_MAX_OUTPUT_BYTES,
+};
+pub use tool_policy::{
+    evaluate_tool_call_policy, ToolCallPolicyConfig, ToolCallPolicyMode, ToolCallPolicyNudge,
+    ToolCallPolicyRequestState, DEFAULT_MAX_WRITE_PAYLOAD_BYTES,
+};
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};

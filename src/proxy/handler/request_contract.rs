@@ -1,9 +1,12 @@
 use super::HandlerError;
 use crate::clients::base::LLMRequestOptions;
 use crate::core::tool_spec::ToolSpec;
+use crate::tool_output::{ToolOutputCompressionConfig, ToolOutputCompressionMode};
+use crate::tool_policy::{ToolCallPolicyConfig, ToolCallPolicyMode};
 use crate::tools::respond::{respond_spec, RESPOND_TOOL_NAME};
 use indexmap::IndexSet;
 use serde_json::{Map, Value};
+use std::str::FromStr;
 use std::sync::Arc;
 
 pub(super) const FORGE_EXTENSION_FIELD: &str = "_forge";
@@ -11,6 +14,8 @@ pub(super) const FORGE_REQUIRED_STEPS_FIELD: &str = "required_steps";
 pub(super) const FORGE_TERMINAL_TOOLS_FIELD: &str = "terminal_tools";
 pub(super) const FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD: &str =
     "return_raw_on_guardrail_failure";
+pub(super) const FORGE_TOOL_CALL_POLICY_FIELD: &str = "tool_call_policy";
+pub(super) const FORGE_TOOL_OUTPUT_COMPRESSION_FIELD: &str = "tool_output_compression";
 
 #[derive(Debug, Clone)]
 pub(super) struct ProxyStepContract {
@@ -174,6 +179,175 @@ pub(super) fn extract_forge_bool_field(body: &Value, field: &str) -> Result<bool
     value.as_bool().ok_or_else(|| {
         HandlerError::BadRequest(format!("{FORGE_EXTENSION_FIELD}.{field} must be a boolean"))
     })
+}
+
+pub(super) fn extract_tool_output_compression_config(
+    body: &Value,
+    default: &ToolOutputCompressionConfig,
+) -> Result<ToolOutputCompressionConfig, HandlerError> {
+    let Some(forge_obj) = forge_object(body)? else {
+        return Ok(default.clone());
+    };
+    let Some(value) = forge_obj.get(FORGE_TOOL_OUTPUT_COMPRESSION_FIELD) else {
+        return Ok(default.clone());
+    };
+    parse_tool_output_compression_value(value, default)
+}
+
+fn parse_tool_output_compression_value(
+    value: &Value,
+    default: &ToolOutputCompressionConfig,
+) -> Result<ToolOutputCompressionConfig, HandlerError> {
+    match value {
+        Value::String(mode) => {
+            let mode = ToolOutputCompressionMode::from_str(mode).map_err(HandlerError::BadRequest)?;
+            Ok(ToolOutputCompressionConfig {
+                mode,
+                ..default.clone()
+            })
+        }
+        Value::Object(obj) => {
+            let mut config = default.clone();
+            if let Some(mode) = obj.get("mode") {
+                let Some(mode) = mode.as_str() else {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.mode must be a string"
+                    )));
+                };
+                config.mode =
+                    ToolOutputCompressionMode::from_str(mode).map_err(HandlerError::BadRequest)?;
+            }
+            if let Some(session_id) = obj.get("session_id") {
+                let Some(session_id) = session_id.as_str() else {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.session_id must be a string"
+                    )));
+                };
+                config.session_id = if session_id.trim().is_empty() {
+                    None
+                } else {
+                    Some(session_id.to_string())
+                };
+            }
+            if let Some(dedup) = obj.get("dedup") {
+                config.enable_dedup = dedup.as_bool().ok_or_else(|| {
+                    HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.dedup must be a boolean"
+                    ))
+                })?;
+            }
+            if let Some(redact) = obj.get("redact_secrets") {
+                config.redact_secrets = redact.as_bool().ok_or_else(|| {
+                    HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.redact_secrets must be a boolean"
+                    ))
+                })?;
+            }
+            if let Some(max_output_bytes) = obj.get("max_output_bytes") {
+                config.max_output_bytes = parse_positive_usize(
+                    max_output_bytes,
+                    "max_output_bytes",
+                )?;
+            }
+            Ok(config)
+        }
+        _ => Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD} must be a string or object"
+        ))),
+    }
+}
+
+pub(super) fn extract_tool_call_policy_config(
+    body: &Value,
+    default: &ToolCallPolicyConfig,
+) -> Result<ToolCallPolicyConfig, HandlerError> {
+    let Some(forge_obj) = forge_object(body)? else {
+        return Ok(default.clone());
+    };
+    let Some(value) = forge_obj.get(FORGE_TOOL_CALL_POLICY_FIELD) else {
+        return Ok(default.clone());
+    };
+    parse_tool_call_policy_value(value, default)
+}
+
+fn parse_tool_call_policy_value(
+    value: &Value,
+    default: &ToolCallPolicyConfig,
+) -> Result<ToolCallPolicyConfig, HandlerError> {
+    match value {
+        Value::Bool(enabled) => Ok(if *enabled {
+            ToolCallPolicyConfig::standard()
+        } else {
+            ToolCallPolicyConfig::disabled()
+        }),
+        Value::String(mode) => {
+            let mode = ToolCallPolicyMode::from_str(mode).map_err(HandlerError::BadRequest)?;
+            Ok(ToolCallPolicyConfig::from_mode(mode))
+        }
+        Value::Object(obj) => {
+            let mut config = default.clone();
+            if let Some(mode) = obj.get("mode") {
+                let Some(mode) = mode.as_str() else {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_CALL_POLICY_FIELD}.mode must be a string"
+                    )));
+                };
+                config =
+                    ToolCallPolicyConfig::from_mode(ToolCallPolicyMode::from_str(mode).map_err(
+                        HandlerError::BadRequest,
+                    )?);
+            }
+            if let Some(lsp_first) = obj.get("lsp_first") {
+                config.lsp_first = parse_bool_setting(lsp_first, "lsp_first")?;
+            }
+            if let Some(quiet_commands) = obj.get("quiet_commands") {
+                config.quiet_commands = parse_bool_setting(quiet_commands, "quiet_commands")?;
+            }
+            if let Some(write_payload_caps) = obj.get("write_payload_caps") {
+                config.write_payload_caps =
+                    parse_bool_setting(write_payload_caps, "write_payload_caps")?;
+            }
+            if let Some(max_bytes) = obj.get("max_write_payload_bytes") {
+                let Some(max_bytes) = max_bytes.as_u64() else {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_CALL_POLICY_FIELD}.max_write_payload_bytes must be a positive integer"
+                    )));
+                };
+                if max_bytes == 0 || max_bytes > usize::MAX as u64 {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_CALL_POLICY_FIELD}.max_write_payload_bytes must be a positive integer"
+                    )));
+                }
+                config.max_write_payload_bytes = max_bytes as usize;
+            }
+            Ok(config)
+        }
+        _ => Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_CALL_POLICY_FIELD} must be a string, boolean, or object"
+        ))),
+    }
+}
+
+fn parse_bool_setting(value: &Value, field: &str) -> Result<bool, HandlerError> {
+    value.as_bool().ok_or_else(|| {
+        HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_CALL_POLICY_FIELD}.{field} must be a boolean"
+        ))
+    })
+}
+
+fn parse_positive_usize(value: &Value, field: &str) -> Result<usize, HandlerError> {
+    let Some(raw) = value.as_u64() else {
+        return Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.{field} must be a positive integer"
+        )));
+    };
+    if raw == 0 || raw > usize::MAX as u64 {
+        return Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.{field} must be a positive integer"
+        )));
+    }
+    Ok(raw as usize)
 }
 
 pub(super) fn extract_stream_include_usage(body: &Value) -> Result<bool, HandlerError> {

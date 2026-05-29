@@ -15,6 +15,12 @@ use crate::proxy::{
     extract_passthrough, extract_sampling, openai_to_messages, strip_respond_calls,
     OpenAiMessageError,
 };
+use crate::tool_output::{
+    compress_tool_output, ToolOutputCompressionConfig, ToolOutputCompressionState,
+};
+use crate::tool_policy::{
+    evaluate_tool_call_policy, ToolCallPolicyConfig, ToolCallPolicyRequestState,
+};
 use crate::tools::respond::RESPOND_TOOL_NAME;
 use anyllm_translate::anthropic::streaming::StreamEvent;
 use anyllm_translate::anthropic::MessageCreateRequest;
@@ -40,8 +46,10 @@ use prior_tool_results::record_completed_proxy_tool_results;
 use request_contract::sanitize_guarded_anthropic_body;
 use request_contract::{
     add_proxy_respond_tool_if_needed, extract_forge_bool_field, extract_proxy_step_contract,
-    extract_stream_include_usage, sanitize_guarded_request_options, validate_proxy_step_contract,
-    FORGE_EXTENSION_FIELD, FORGE_REQUIRED_STEPS_FIELD, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
+    extract_stream_include_usage, extract_tool_call_policy_config,
+    extract_tool_output_compression_config, sanitize_guarded_request_options,
+    validate_proxy_step_contract, FORGE_EXTENSION_FIELD, FORGE_REQUIRED_STEPS_FIELD,
+    FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
 };
 use response_shape::{
     anthropic_events_stream, text_content_result, text_response_result, tool_calls_result,
@@ -219,11 +227,75 @@ pub async fn handle_anthropic_messages_with_scorers<C: LLMClient + 'static>(
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 ) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
+    handle_anthropic_messages_with_scorers_and_tool_controls(
+        body,
+        raw_body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        final_response_scorer,
+        ToolOutputCompressionConfig::disabled(),
+        None,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+}
+
+/// Handle /v1/messages with optional scorers and tool-output compression.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_anthropic_messages_with_scorers_and_tool_output_compression<
+    C: LLMClient + 'static,
+>(
+    body: &MessageCreateRequest,
+    raw_body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    default_tool_output_compression: ToolOutputCompressionConfig,
+    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
+) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
+    handle_anthropic_messages_with_scorers_and_tool_controls(
+        body,
+        raw_body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        final_response_scorer,
+        default_tool_output_compression,
+        tool_output_state,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+}
+
+/// Handle /v1/messages with optional scorers, tool-output compression, and tool-call policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_anthropic_messages_with_scorers_and_tool_controls<C: LLMClient + 'static>(
+    body: &MessageCreateRequest,
+    raw_body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    default_tool_output_compression: ToolOutputCompressionConfig,
+    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
+    default_tool_call_policy: ToolCallPolicyConfig,
+) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
     let config = anyllm_translate::TranslationConfig::default();
     let openai_req = anyllm_translate::translate_request(body, &config)
         .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
     let mut openai_value = serde_json::to_value(&openai_req)
         .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
+    copy_forge_extension_if_missing(raw_body, &mut openai_value);
     if let (Some(max_tokens), Some(obj)) =
         (raw_body.get("max_tokens"), openai_value.as_object_mut())
     {
@@ -240,6 +312,9 @@ pub async fn handle_anthropic_messages_with_scorers<C: LLMClient + 'static>(
         Some(raw_body.clone()),
         scorer,
         final_response_scorer,
+        default_tool_output_compression,
+        tool_output_state,
+        default_tool_call_policy,
     )
     .await
     .map_err(chat_error_to_anthropic)?
@@ -258,6 +333,17 @@ pub async fn handle_anthropic_messages_with_scorers<C: LLMClient + 'static>(
             anthropic_events_stream(openai_events, body.model.clone()),
         )),
     }
+}
+
+fn copy_forge_extension_if_missing(raw_body: &Value, openai_value: &mut Value) {
+    let Some(forge) = raw_body.get(FORGE_EXTENSION_FIELD) else {
+        return;
+    };
+    let Some(obj) = openai_value.as_object_mut() else {
+        return;
+    };
+    obj.entry(FORGE_EXTENSION_FIELD.to_string())
+        .or_insert_with(|| forge.clone());
 }
 
 fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDetails>) {
@@ -335,6 +421,65 @@ pub async fn handle_chat_completions_with_scorers<C: LLMClient + 'static>(
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 ) -> Result<HandlerResult, HandlerError> {
+    handle_chat_completions_with_scorers_and_tool_controls(
+        body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        final_response_scorer,
+        ToolOutputCompressionConfig::disabled(),
+        None,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+}
+
+/// Main handler with optional scorers and tool-output compression.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_chat_completions_with_scorers_and_tool_output_compression<
+    C: LLMClient + 'static,
+>(
+    body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    default_tool_output_compression: ToolOutputCompressionConfig,
+    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
+) -> Result<HandlerResult, HandlerError> {
+    handle_chat_completions_with_scorers_and_tool_controls(
+        body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        final_response_scorer,
+        default_tool_output_compression,
+        tool_output_state,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+}
+
+/// Main handler with optional scorers, tool-output compression, and tool-call policy.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_chat_completions_with_scorers_and_tool_controls<C: LLMClient + 'static>(
+    body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    default_tool_output_compression: ToolOutputCompressionConfig,
+    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
+    default_tool_call_policy: ToolCallPolicyConfig,
+) -> Result<HandlerResult, HandlerError> {
     handle_chat_completions_impl(
         body,
         client,
@@ -344,6 +489,9 @@ pub async fn handle_chat_completions_with_scorers<C: LLMClient + 'static>(
         None,
         scorer,
         final_response_scorer,
+        default_tool_output_compression,
+        tool_output_state,
+        default_tool_call_policy,
     )
     .await
 }
@@ -358,6 +506,9 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     inbound_anthropic_body: Option<Value>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    default_tool_output_compression: ToolOutputCompressionConfig,
+    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
+    default_tool_call_policy: ToolCallPolicyConfig,
 ) -> Result<HandlerResult, HandlerError> {
     let messages = body
         .get("messages")
@@ -387,6 +538,9 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     let step_contract = extract_proxy_step_contract(body)?;
     let return_raw_on_guardrail_failure =
         extract_forge_bool_field(body, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD)?;
+    let tool_output_compression =
+        extract_tool_output_compression_config(body, &default_tool_output_compression)?;
+    let tool_call_policy = extract_tool_call_policy_config(body, &default_tool_call_policy)?;
 
     let sampling = extract_sampling(body);
     let passthrough = extract_passthrough(body);
@@ -399,6 +553,14 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
     // Convert inbound OpenAI messages to internal format.
     let mut internal_msgs = openai_to_messages(messages)?;
+    let tool_output_changed = compress_proxy_tool_results(
+        &mut internal_msgs,
+        &tool_output_compression,
+        tool_output_state.as_deref(),
+    );
+    if tool_output_changed {
+        request_options.inbound_anthropic_body = None;
+    }
     if request_options.inbound_anthropic_body.is_some() {
         request_options.initial_openai_messages = Some(Arc::from(
             crate::core::inference::fold_and_serialize(
@@ -464,6 +626,7 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
     let mut accepted_usage = None;
     let mut accepted_usage_details = None;
+    let mut tool_call_policy_state = ToolCallPolicyRequestState::new();
     let response = loop {
         let step_hint = step_enforcer
             .as_ref()
@@ -519,6 +682,22 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         let Some(enforcer) = step_enforcer.as_mut() else {
             match response {
                 LLMResponse::ToolCalls(tool_calls) => {
+                    if let Some(nudge) = evaluate_tool_call_policy(
+                        &tool_calls,
+                        &tool_specs,
+                        &tool_call_policy,
+                        &mut tool_call_policy_state,
+                    ) {
+                        emit_proxy_tool_policy_nudge_or_error(
+                            &mut error_tracker,
+                            tool_calls,
+                            &mut internal_msgs,
+                            &mut tool_call_counter,
+                            &nudge.content,
+                        )
+                        .map_err(HandlerError::Upstream)?;
+                        continue;
+                    }
                     if let Some(nudge) = score_proxy_tool_calls(
                         scorer.clone(),
                         &internal_msgs,
@@ -603,6 +782,22 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     }
                 }
 
+                if let Some(nudge) = evaluate_tool_call_policy(
+                    &tool_calls,
+                    &tool_specs,
+                    &tool_call_policy,
+                    &mut tool_call_policy_state,
+                ) {
+                    emit_proxy_tool_policy_nudge_or_error(
+                        &mut error_tracker,
+                        tool_calls,
+                        &mut internal_msgs,
+                        &mut tool_call_counter,
+                        &nudge.content,
+                    )
+                    .map_err(HandlerError::Upstream)?;
+                    continue;
+                }
                 if let Some(nudge) = score_proxy_tool_calls(
                     scorer.clone(),
                     &internal_msgs,
@@ -729,6 +924,66 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     Ok(handler_result)
 }
 
+fn compress_proxy_tool_results(
+    messages: &mut [Message],
+    config: &ToolOutputCompressionConfig,
+    state: Option<&ToolOutputCompressionState>,
+) -> bool {
+    if !config.enabled() {
+        return false;
+    }
+
+    let mut pending_tool_calls: IndexMap<String, ToolCallInfo> = IndexMap::new();
+    let mut changed = false;
+    for message in messages {
+        match message.role {
+            MessageRole::Assistant => {
+                let Some(tool_calls) = &message.tool_calls else {
+                    continue;
+                };
+                for call in tool_calls {
+                    pending_tool_calls.insert(call.call_id.clone(), call.clone());
+                }
+            }
+            MessageRole::Tool => {
+                if message.metadata.msg_type != MessageType::ToolResult {
+                    continue;
+                }
+                let call = message
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|call_id| pending_tool_calls.get(call_id));
+                let tool_name = call
+                    .map(|call| call.name.as_str())
+                    .or(message.tool_name.as_deref())
+                    .unwrap_or("generic");
+                let args = call.and_then(|call| call.args.as_ref());
+                let result = compress_tool_output(tool_name, args, &message.content, config, state);
+                if result.output != message.content {
+                    tracing::info!(
+                        target: "forge.tool_output",
+                        tool = %result.canonical_tool,
+                        family = %result.family,
+                        mode = %result.mode,
+                        before_tokens = result.before_tokens,
+                        after_tokens = result.after_tokens,
+                        saved_tokens = result.saved_tokens,
+                        saved_pct = result.saved_pct,
+                        redacted = result.redacted,
+                        capped = result.capped,
+                        deduped = result.deduped,
+                        "compressed proxy tool output"
+                    );
+                    message.content = result.output;
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
 fn synthetic_respond_tool_call(text: &TextResponse) -> ToolCall {
     let mut args = IndexMap::new();
     args.insert("message".to_string(), Value::String(text.content.clone()));
@@ -785,6 +1040,33 @@ fn emit_proxy_classifier_nudge_or_error(
         PROXY_STEP_INDEX,
         MessageType::RetryNudge,
         "[ClassifierNudge]",
+        nudge_content,
+    );
+    Ok(())
+}
+
+fn emit_proxy_tool_policy_nudge_or_error(
+    error_tracker: &mut crate::guardrails::ErrorTracker,
+    tool_calls: Vec<ToolCall>,
+    messages: &mut Vec<Message>,
+    tool_call_counter: &mut i64,
+    nudge_content: &str,
+) -> Result<(), String> {
+    error_tracker.record_retry();
+    if error_tracker.retries_exhausted() {
+        return Err(format!(
+            "tool-call policy objections exhausted after {} retries",
+            error_tracker.max_retries()
+        ));
+    }
+    let calls =
+        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
+    emit_proxy_guardrail_nudge_results(
+        &calls,
+        messages,
+        PROXY_STEP_INDEX,
+        MessageType::RetryNudge,
+        "[ToolCallPolicyNudge]",
         nudge_content,
     );
     Ok(())

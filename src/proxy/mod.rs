@@ -6,8 +6,12 @@ pub mod server;
 
 pub use handler::{
     handle_anthropic_messages, handle_anthropic_messages_with_scorer,
-    handle_anthropic_messages_with_scorers, handle_chat_completions,
+    handle_anthropic_messages_with_scorers,
+    handle_anthropic_messages_with_scorers_and_tool_controls,
+    handle_anthropic_messages_with_scorers_and_tool_output_compression, handle_chat_completions,
     handle_chat_completions_with_scorer, handle_chat_completions_with_scorers,
+    handle_chat_completions_with_scorers_and_tool_controls,
+    handle_chat_completions_with_scorers_and_tool_output_compression,
     init_proxy_classifier_log_sink_from_env, AnthropicEventStream, AnthropicHandlerError,
     AnthropicHandlerResult, HandlerError, HandlerResult, OpenAiEventStream,
 };

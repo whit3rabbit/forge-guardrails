@@ -142,6 +142,14 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "MS")]
     pub(crate) final_response_classifier_max_latency_ms: Option<u64>,
 
+    /// Tool-output compression mode.
+    #[arg(long, value_name = "disabled|safe|standard|aggressive")]
+    pub(crate) tool_output_compression: Option<String>,
+
+    /// Tool-call policy nudge mode.
+    #[arg(long, value_name = "disabled|standard")]
+    pub(crate) tool_call_policy: Option<String>,
+
     /// Disable rescue parsing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_rescue: bool,
@@ -255,6 +263,8 @@ mod tests {
         assert_eq!(cli.final_response_classifier_mode, None);
         assert_eq!(cli.final_response_classifier_model, None);
         assert_eq!(cli.final_response_classifier_max_latency_ms, None);
+        assert_eq!(cli.tool_output_compression, None);
+        assert_eq!(cli.tool_call_policy, None);
     }
 
     #[test]

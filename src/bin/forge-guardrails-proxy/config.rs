@@ -4,7 +4,10 @@ use std::str::FromStr;
 use crate::cli::Cli;
 #[cfg(feature = "classifier")]
 use forge_guardrails::default_tool_call_classifier_artifact_dir;
-use forge_guardrails::{ClassifierModelKind, ScorerMode};
+use forge_guardrails::{
+    ClassifierModelKind, ScorerMode, ToolCallPolicyConfig, ToolCallPolicyMode,
+    ToolOutputCompressionConfig, ToolOutputCompressionMode,
+};
 
 pub(crate) const DEFAULT_PROXY_PORT: u16 = 8081;
 pub(crate) const DEFAULT_BACKEND_PORT: u16 = 8080;
@@ -35,6 +38,8 @@ pub(crate) struct ProxyConfig {
     pub(crate) final_response_classifier_mode: ScorerMode,
     pub(crate) final_response_classifier_model: ClassifierModelKind,
     pub(crate) final_response_classifier_max_latency_ms: Option<u64>,
+    pub(crate) tool_output_compression: ToolOutputCompressionConfig,
+    pub(crate) tool_call_policy: ToolCallPolicyConfig,
 }
 
 impl ProxyConfig {
@@ -76,6 +81,8 @@ impl ProxyConfig {
             final_response_classifier_max_latency_ms: env_optional_u64(
                 "FORGE_FINAL_RESPONSE_CLASSIFIER_MAX_LATENCY_MS",
             )?,
+            tool_output_compression: env_tool_output_compression()?,
+            tool_call_policy: env_tool_call_policy()?,
         })
     }
 }
@@ -129,7 +136,27 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     if let Some(value) = cli.final_response_classifier_max_latency_ms {
         config.final_response_classifier_max_latency_ms = Some(value);
     }
+    config.tool_output_compression = tool_output_compression_from_env_cli(cli)?;
+    config.tool_call_policy = tool_call_policy_from_env_cli(cli)?;
     Ok(())
+}
+
+pub(crate) fn tool_output_compression_from_env_cli(
+    cli: &Cli,
+) -> Result<ToolOutputCompressionConfig, String> {
+    let mut config = env_tool_output_compression()?;
+    if let Some(mode) = cli.tool_output_compression.as_deref() {
+        config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::from_str(mode)?);
+    }
+    Ok(config)
+}
+
+pub(crate) fn tool_call_policy_from_env_cli(cli: &Cli) -> Result<ToolCallPolicyConfig, String> {
+    let mut config = env_tool_call_policy()?;
+    if let Some(mode) = cli.tool_call_policy.as_deref() {
+        config = ToolCallPolicyConfig::from_mode(ToolCallPolicyMode::from_str(mode)?);
+    }
+    Ok(config)
 }
 
 pub(crate) fn classifier_settings_from_env_cli(
@@ -325,6 +352,24 @@ fn env_string(keys: &[&str], default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+fn env_tool_output_compression() -> Result<ToolOutputCompressionConfig, String> {
+    match env_optional_string("FORGE_TOOL_OUTPUT_COMPRESSION") {
+        Some(mode) => Ok(ToolOutputCompressionConfig::from_mode(
+            ToolOutputCompressionMode::from_str(&mode)?,
+        )),
+        None => Ok(ToolOutputCompressionConfig::disabled()),
+    }
+}
+
+fn env_tool_call_policy() -> Result<ToolCallPolicyConfig, String> {
+    match env_optional_string("FORGE_TOOL_CALL_POLICY") {
+        Some(mode) => Ok(ToolCallPolicyConfig::from_mode(
+            ToolCallPolicyMode::from_str(&mode)?,
+        )),
+        None => Ok(ToolCallPolicyConfig::disabled()),
+    }
+}
+
 fn env_optional_string(key: &str) -> Option<String> {
     env::var(key)
         .ok()
@@ -457,6 +502,8 @@ mod tests {
             final_response_classifier_mode: ScorerMode::Shadow,
             final_response_classifier_model: ClassifierModelKind::Quantized,
             final_response_classifier_max_latency_ms: None,
+            tool_output_compression: ToolOutputCompressionConfig::disabled(),
+            tool_call_policy: ToolCallPolicyConfig::disabled(),
         }
     }
 
@@ -499,6 +546,11 @@ mod tests {
             ClassifierModelKind::Quantized
         );
         assert_eq!(config.final_response_classifier_max_latency_ms, None);
+        assert_eq!(
+            config.tool_output_compression.mode,
+            ToolOutputCompressionMode::Disabled
+        );
+        assert_eq!(config.tool_call_policy.mode, ToolCallPolicyMode::Disabled);
     }
 
     #[test]
@@ -543,6 +595,32 @@ mod tests {
             ClassifierModelKind::Quantized
         );
         assert_eq!(config.final_response_classifier_max_latency_ms, Some(40));
+    }
+
+    #[test]
+    fn tool_output_compression_cli_override_sets_mode() {
+        let cli = parse(&["--tool-output-compression", "standard"]);
+        let mut config = sample_config();
+
+        apply_env_cli_overrides(&mut config, &cli).expect("overrides");
+
+        assert_eq!(
+            config.tool_output_compression.mode,
+            ToolOutputCompressionMode::Standard
+        );
+    }
+
+    #[test]
+    fn tool_call_policy_cli_override_sets_mode() {
+        let cli = parse(&["--tool-call-policy", "standard"]);
+        let mut config = sample_config();
+
+        apply_env_cli_overrides(&mut config, &cli).expect("overrides");
+
+        assert_eq!(config.tool_call_policy.mode, ToolCallPolicyMode::Standard);
+        assert!(config.tool_call_policy.lsp_first);
+        assert!(config.tool_call_policy.quiet_commands);
+        assert!(config.tool_call_policy.write_payload_caps);
     }
 
     #[test]

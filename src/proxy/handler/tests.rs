@@ -7,7 +7,8 @@ use crate::clients::AnthropicClient;
 use crate::core::tool_spec::ToolSpec;
 use crate::{
     ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore, ToolCallClass,
-    ToolCallScore, ToolCallScorer,
+    ToolCallPolicyConfig, ToolCallScore, ToolCallScorer, ToolOutputCompressionConfig,
+    ToolOutputCompressionMode, ToolOutputCompressionState,
 };
 use anyllm_translate::anthropic::MessageCreateRequest;
 use indexmap::IndexMap;
@@ -752,6 +753,51 @@ fn search_tool_json() -> Value {
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}}
+            }
+        }
+    })
+}
+
+fn bash_tool_json() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"]
+            }
+        }
+    })
+}
+
+fn grep_tool_json() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Search files with grep",
+            "parameters": {
+                "type": "object",
+                "properties": {"pattern": {"type": "string"}},
+                "required": ["pattern"]
+            }
+        }
+    })
+}
+
+fn find_definition_tool_json() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "find_definition",
+            "description": "Find a symbol definition",
+            "parameters": {
+                "type": "object",
+                "properties": {"symbol": {"type": "string"}},
+                "required": ["symbol"]
             }
         }
     })
@@ -1628,6 +1674,436 @@ impl LLMClient for MockWorkflowContractClient {
     async fn get_context_length(&self) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
         Ok(Some(4096))
     }
+}
+
+#[tokio::test]
+async fn tool_output_compression_default_disabled_leaves_prior_tool_result_unchanged() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let raw_tool_output = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz";
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize previous search"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_search",
+                "name": "search",
+                "content": raw_tool_output
+            }
+        ],
+        "model": "test-model"
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_chat_completions(&body, &client, &ctx, 3, true)
+        .await
+        .expect("handler result");
+
+    let sent = client.sent_messages();
+    assert_eq!(sent[0][2]["content"], raw_tool_output);
+}
+
+#[tokio::test]
+async fn tool_output_compression_opt_in_compresses_prior_tool_result_and_preserves_ids() {
+    let mut response_args = IndexMap::new();
+    response_args.insert("query".into(), json!("next"));
+    let client = Arc::new(MockWorkflowContractClient::new(vec![
+        LLMResponse::ToolCalls(vec![ToolCall::new("search", response_args)]),
+    ]));
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "continue"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_search",
+                "name": "search",
+                "content": "\u{1b}[31mOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\u{1b}[0m"
+            }
+        ],
+        "model": "test-model",
+        "tools": [search_tool_json()],
+        "_forge": {
+            "tool_output_compression": {"mode": "safe"}
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let result = handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    assert_eq!(sent[0][2]["tool_call_id"], "call_search");
+    assert_eq!(sent[0][2]["name"], "search");
+    let content = sent[0][2]["content"].as_str().expect("tool content");
+    assert!(content.contains("[REDACTED_SECRET]"));
+    assert!(!content.contains("\u{1b}[31m"));
+
+    match result {
+        HandlerResult::Response(v) => {
+            assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+            assert_eq!(
+                v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                "search"
+            );
+        }
+        _ => panic!("expected Response"),
+    }
+}
+
+#[tokio::test]
+async fn tool_output_compression_opt_in_runs_for_no_tools_passthrough() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize previous output"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_shell",
+                    "type": "function",
+                    "function": {"name": "run_command", "arguments": "{\"command\":\"cargo test\"}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_shell",
+                "content": "\u{1b}[31merror: failed\u{1b}[0m\nnoise\n"
+            }
+        ],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": "standard"
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    let content = sent[0][2]["content"].as_str().expect("tool content");
+    assert_eq!(sent[0][2]["tool_call_id"], "call_shell");
+    assert!(content.contains("error: failed"));
+    assert!(!content.contains("\u{1b}[31m"));
+}
+
+#[tokio::test]
+async fn tool_output_compression_dedups_repeated_tool_results_by_session() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let repeated = (0..200)
+        .map(|idx| format!("large unique output line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize prior output"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_one",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            },
+            {"role": "tool", "tool_call_id": "call_one", "name": "search", "content": repeated},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_two",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            },
+            {"role": "tool", "tool_call_id": "call_two", "name": "search", "content": repeated}
+        ],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": {
+                "mode": "standard",
+                "session_id": "session-a",
+                "dedup": true
+            }
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Disabled),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    assert!(!sent[0][2]["content"]
+        .as_str()
+        .expect("first content")
+        .contains("Duplicate of call"));
+    assert!(sent[0][4]["content"]
+        .as_str()
+        .expect("second content")
+        .contains("Duplicate of call #"));
+}
+
+#[tokio::test]
+async fn anthropic_tool_output_compression_rebuilds_messages_when_content_changes() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let raw_for_parse = json!({
+        "model": "claude-3",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "summarize"},
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_search",
+                    "name": "search",
+                    "input": {"query": "x"}
+                }]
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_search",
+                    "content": "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz"
+                }]
+            }
+        ]
+    });
+    let mut raw_with_forge = raw_for_parse.clone();
+    raw_with_forge["_forge"] = json!({
+        "tool_output_compression": {"mode": "safe"}
+    });
+    let body: MessageCreateRequest = serde_json::from_value(raw_for_parse).expect("request");
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_anthropic_messages_with_scorers_and_tool_output_compression(
+        &body,
+        &raw_with_forge,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    let wire = serde_json::to_string(&sent[0]).expect("wire json");
+    assert!(wire.contains("[REDACTED_SECRET]"));
+    assert!(!wire.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[tokio::test]
+async fn tool_call_policy_lsp_nudge_fires_only_when_replacement_tool_exists() {
+    let mut grep_args = IndexMap::new();
+    grep_args.insert("pattern".into(), json!("UserService"));
+    let mut definition_args = IndexMap::new();
+    definition_args.insert("symbol".into(), json!("UserService"));
+    let client = Arc::new(MockWorkflowContractClient::new(vec![
+        LLMResponse::ToolCalls(vec![ToolCall::new("grep", grep_args.clone())]),
+        LLMResponse::ToolCalls(vec![ToolCall::new("find_definition", definition_args)]),
+    ]));
+    let body = json!({
+        "messages": [{"role": "user", "content": "find UserService"}],
+        "model": "test-model",
+        "tools": [grep_tool_json(), find_definition_tool_json()],
+        "_forge": {
+            "tool_call_policy": {"lsp_first": true}
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let result = handle_chat_completions_with_scorers_and_tool_controls(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        None,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+    .expect("handler result");
+
+    match result {
+        HandlerResult::Response(value) => {
+            assert_eq!(
+                value["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                "find_definition"
+            );
+        }
+        _ => panic!("expected Response"),
+    }
+    assert_eq!(*client.calls.lock().unwrap(), 2);
+    let sent = serde_json::to_string(&client.sent_messages()).expect("sent messages");
+    assert!(sent.contains("[ToolCallPolicyNudge]"));
+    assert!(sent.contains("find_definition"));
+
+    let client = Arc::new(MockWorkflowContractClient::new(vec![
+        LLMResponse::ToolCalls(vec![ToolCall::new("grep", grep_args)]),
+    ]));
+    let body = json!({
+        "messages": [{"role": "user", "content": "find UserService"}],
+        "model": "test-model",
+        "tools": [grep_tool_json()],
+        "_forge": {
+            "tool_call_policy": {"lsp_first": true}
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+    let result = handle_chat_completions_with_scorers_and_tool_controls(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        None,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+    .expect("handler result");
+
+    match result {
+        HandlerResult::Response(value) => {
+            assert_eq!(
+                value["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+                "grep"
+            );
+        }
+        _ => panic!("expected Response"),
+    }
+    assert_eq!(*client.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn tool_call_policy_quiet_command_never_mutates_and_nudges_once() {
+    let mut bash_args = IndexMap::new();
+    bash_args.insert("command".into(), json!("cargo test"));
+    let client = Arc::new(MockWorkflowContractClient::new(vec![
+        LLMResponse::ToolCalls(vec![ToolCall::new("bash", bash_args.clone())]),
+        LLMResponse::ToolCalls(vec![ToolCall::new("bash", bash_args)]),
+    ]));
+    let body = json!({
+        "messages": [{"role": "user", "content": "run tests"}],
+        "model": "test-model",
+        "tools": [bash_tool_json()],
+        "_forge": {
+            "tool_call_policy": {"quiet_commands": true}
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let result = handle_chat_completions_with_scorers_and_tool_controls(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        None,
+        ToolCallPolicyConfig::disabled(),
+    )
+    .await
+    .expect("handler result");
+
+    let response = match result {
+        HandlerResult::Response(value) => value,
+        _ => panic!("expected Response"),
+    };
+    let returned_args = response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .expect("arguments string");
+    let returned_args: Value = serde_json::from_str(returned_args).expect("arguments json");
+    assert_eq!(returned_args["command"], "cargo test");
+
+    assert_eq!(*client.calls.lock().unwrap(), 2);
+    let sent_messages = client.sent_messages();
+    let retry_wire = serde_json::to_string(&sent_messages[1]).expect("retry messages");
+    assert!(retry_wire.contains("[ToolCallPolicyNudge]"));
+    assert!(retry_wire.contains("cargo test --quiet"));
+    let assistant_arguments = sent_messages[1]
+        .iter()
+        .find_map(|message| message.get("tool_calls").and_then(Value::as_array))
+        .and_then(|calls| calls.first())
+        .and_then(|call| call.get("function"))
+        .and_then(|function| function.get("arguments"))
+        .and_then(Value::as_str)
+        .expect("assistant tool-call arguments");
+    let assistant_arguments: Value =
+        serde_json::from_str(assistant_arguments).expect("assistant arguments json");
+    assert_eq!(assistant_arguments["command"], "cargo test");
 }
 
 #[tokio::test]

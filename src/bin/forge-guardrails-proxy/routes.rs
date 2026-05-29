@@ -7,9 +7,10 @@ use axum::response::Response;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    handle_anthropic_messages_with_scorers, handle_chat_completions_with_scorers,
+    handle_anthropic_messages_with_scorers_and_tool_controls,
+    handle_chat_completions_with_scorers_and_tool_controls,
     init_proxy_classifier_log_sink_from_env, ContextManager, FinalResponseScorer, LLMClient,
-    NoCompact, ServerManager, ToolCallScorer,
+    NoCompact, ServerManager, ToolCallScorer, ToolOutputCompressionState,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
@@ -38,6 +39,7 @@ struct AppState {
     request_mutex: Arc<TokioMutex<()>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    tool_output_state: Arc<ToolOutputCompressionState>,
 }
 
 pub(crate) async fn serve(
@@ -75,6 +77,7 @@ async fn serve_inner(
         request_mutex: Arc::new(TokioMutex::new(())),
         scorer,
         final_response_scorer,
+        tool_output_state: Arc::new(ToolOutputCompressionState::new()),
     };
     init_proxy_classifier_log_sink_from_env();
 
@@ -87,12 +90,14 @@ async fn serve_inner(
     );
     if config.verbose {
         eprintln!(
-            "proxy config: model={}, context_tokens={}, max_retries={}, rescue_enabled={}, serialize_requests={}",
+            "proxy config: model={}, context_tokens={}, max_retries={}, rescue_enabled={}, serialize_requests={}, tool_output_compression={}, tool_call_policy={}",
             config.default_model,
             config.context_tokens,
             config.max_retries,
             config.rescue_enabled,
-            config.serialize_requests
+            config.serialize_requests,
+            config.tool_output_compression.mode,
+            config.tool_call_policy.mode
         );
     }
 
@@ -186,7 +191,7 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
     };
 
     match request_http::openai_handler_http_result(
-        handle_chat_completions_with_scorers(
+        handle_chat_completions_with_scorers_and_tool_controls(
             &parsed,
             &client,
             &context_manager,
@@ -194,6 +199,9 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
             state.config.rescue_enabled,
             state.scorer.clone(),
             state.final_response_scorer.clone(),
+            state.config.tool_output_compression.clone(),
+            Some(state.tool_output_state.clone()),
+            state.config.tool_call_policy.clone(),
         )
         .await,
     ) {
@@ -214,6 +222,7 @@ async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Respo
         state.request_mutex,
         state.scorer,
         state.final_response_scorer,
+        state.tool_output_state,
         client,
         request,
     )
@@ -231,7 +240,16 @@ async fn anthropic_messages_with_client<C: LLMClient + 'static>(
         Ok(request) => request,
         Err(response) => return build_http_response(response),
     };
-    anthropic_messages_with_request_client(config, request_mutex, None, None, client, request).await
+    anthropic_messages_with_request_client(
+        config,
+        request_mutex,
+        None,
+        None,
+        Arc::new(ToolOutputCompressionState::new()),
+        client,
+        request,
+    )
+    .await
 }
 
 async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
@@ -239,6 +257,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     request_mutex: Arc<TokioMutex<()>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    tool_output_state: Arc<ToolOutputCompressionState>,
     client: Arc<C>,
     request: request_http::ParsedAnthropicRequest,
 ) -> Response {
@@ -257,7 +276,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     };
 
     match request_http::anthropic_handler_http_result(
-        handle_anthropic_messages_with_scorers(
+        handle_anthropic_messages_with_scorers_and_tool_controls(
             &request.parsed,
             &request.raw,
             &client,
@@ -266,6 +285,9 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
             config.rescue_enabled,
             scorer,
             final_response_scorer,
+            config.tool_output_compression.clone(),
+            Some(tool_output_state),
+            config.tool_call_policy.clone(),
         )
         .await,
     ) {
@@ -319,7 +341,8 @@ mod tests {
     use forge_guardrails::{
         ApiFormat, BackendError, ChunkStream, ChunkType, ClassifierModelKind,
         ContextDiscoveryError, LLMRequestOptions, LLMResponse, SamplingParams, ScorerMode,
-        StreamChunk, StreamError, TextResponse, ToolSpec,
+        StreamChunk, StreamError, TextResponse, ToolCallPolicyConfig, ToolOutputCompressionConfig,
+        ToolSpec,
     };
     use futures_util::StreamExt;
 
@@ -342,6 +365,8 @@ mod tests {
             final_response_classifier_mode: ScorerMode::Shadow,
             final_response_classifier_model: ClassifierModelKind::Quantized,
             final_response_classifier_max_latency_ms: None,
+            tool_output_compression: ToolOutputCompressionConfig::disabled(),
+            tool_call_policy: ToolCallPolicyConfig::disabled(),
         })
     }
 
@@ -357,6 +382,7 @@ mod tests {
             request_mutex: Arc::new(TokioMutex::new(())),
             scorer: None,
             final_response_scorer: None,
+            tool_output_state: Arc::new(ToolOutputCompressionState::new()),
         }
     }
 
@@ -543,6 +569,7 @@ mod tests {
             request_mutex: Arc::new(TokioMutex::new(())),
             scorer: None,
             final_response_scorer: None,
+            tool_output_state: Arc::new(ToolOutputCompressionState::new()),
         };
         let body = Bytes::from(
             json!({
