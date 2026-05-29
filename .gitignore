@@ -62,3 +62,4 @@ notebook/generatetd/.env
 notebook/generatetd/*.egg-info/
 notebook/generatetd/out/
 notebook/generatetd/local_review*.jsonl
+forge

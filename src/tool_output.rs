@@ -388,7 +388,7 @@ fn command_tokens(command: &str) -> Vec<String> {
 
 fn basename(command: &str) -> String {
     command
-        .rsplit('/')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(command)
         .to_ascii_lowercase()
@@ -1137,5 +1137,67 @@ index 111..222 100644
             }
         }
         result
+    }
+
+    #[test]
+    fn test_looks_like_jsonl_strict() {
+        use super::postcall::looks_like_jsonl;
+
+        // Valid JSONL
+        assert!(looks_like_jsonl("{\"a\": 1}\n{\"b\": 2}"));
+        assert!(looks_like_jsonl("  {\"a\": 1}  \n  {\"b\": 2}  "));
+
+        // Single valid JSON object
+        assert!(looks_like_jsonl("{\n  \"a\": 1\n}"));
+
+        // Invalid: Starts with '{' but contains plain text / table data later
+        assert!(!looks_like_jsonl("{\n  \"a\": 1\n}\nplain text here"));
+        assert!(!looks_like_jsonl("{\n  \"a\": 1\n}\n| col1 | col2 |"));
+
+        // Invalid: Plain text
+        assert!(!looks_like_jsonl("plain text"));
+    }
+
+    #[test]
+    fn test_cargo_json_messages_with_mixed_lines() {
+        use super::families::cargo::filter_cargo_output;
+
+        // Mixed output: Compile status text + JSON compiler message
+        let raw = "\
+Compiling demo v0.1.0
+{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error[E0425]: missing value\\n\"}}
+Finished dev [unoptimized] target(s) in 0.1s
+";
+        let result = filter_cargo_output("cargo build", raw);
+        // If it successfully parses JSON, it should output:
+        // "Errors (1):\nerror[E0425]: missing value"
+        assert!(result.starts_with("Errors (1):"));
+        assert!(result.contains("error[E0425]"));
+    }
+
+    #[test]
+    fn test_windows_path_compatibility() {
+        use super::basename;
+        use super::filters::filter_glob_output;
+        use super::filters::is_noise_path;
+
+        // 1. is_noise_path matches Windows paths
+        assert!(is_noise_path("node_modules\\lodash\\index.js"));
+        assert!(is_noise_path("target\\debug\\build.log"));
+
+        // 2. basename extracts command names on Windows paths
+        assert_eq!(
+            basename("C:\\Users\\admin\\.cargo\\bin\\cargo.exe"),
+            "cargo.exe"
+        );
+
+        // 3. filter_glob_output groups Windows paths under directory
+        let mut lines = Vec::new();
+        for idx in 0..105 {
+            lines.push(format!("src\\file_{idx}.rs"));
+        }
+        let raw_glob = lines.join("\n");
+        let filtered = filter_glob_output(&raw_glob);
+        assert!(filtered.contains("src/: 105 files"));
     }
 }

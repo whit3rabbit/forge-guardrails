@@ -3,7 +3,7 @@ use serde_json::Value;
 
 const ERROR_PATTERNS: &[&str] = &["error[", "error:", "warning[", "failed", "panicked"];
 
-pub(super) fn filter_cargo_output(command: &str, output: &str) -> String {
+pub(in crate::tool_output) fn filter_cargo_output(command: &str, output: &str) -> String {
     if command.contains("test") {
         return filter_cargo_test(output);
     }
@@ -59,7 +59,9 @@ fn filter_cargo_json_messages(output: &str) -> Option<String> {
     let mut warnings = Vec::new();
 
     for line in output.lines() {
-        let parsed: Value = serde_json::from_str(line).ok()?;
+        let Ok(parsed) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         saw_json = true;
         if parsed.get("reason").and_then(Value::as_str) != Some("compiler-message") {
             continue;

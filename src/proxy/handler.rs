@@ -565,6 +565,10 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             let mut patched = body.as_ref().clone();
             if patch_anthropic_tool_results(&mut patched, &tool_output_updates) {
                 request_options.inbound_anthropic_body = Some(Arc::new(patched));
+            } else {
+                tracing::warn!(
+                    "failed to patch compressed tool outputs into Anthropic request body; falling back to rebuilt body which may discard custom metadata or cache_control flags"
+                );
             }
         }
     }

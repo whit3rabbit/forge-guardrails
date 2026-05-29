@@ -22,7 +22,7 @@ pub(in crate::tool_output) fn filter_glob_output(output: &str) -> String {
     let mut groups: IndexMap<String, Vec<&str>> = IndexMap::new();
     for path in paths {
         let top = path
-            .split('/')
+            .split(['/', '\\'])
             .next()
             .filter(|part| !part.is_empty())
             .unwrap_or(".");

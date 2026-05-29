@@ -37,27 +37,29 @@ pub(super) fn minimize_table_whitespace(output: &str) -> Option<String> {
     changed.then(|| preserve_trailing_newline(output, lines.join("\n")))
 }
 
-fn looks_like_jsonl(output: &str) -> bool {
-    let Some(first) = output.lines().map(str::trim).find(|line| !line.is_empty()) else {
-        return false;
-    };
-    if !(first.starts_with('{') || first.starts_with('[')) {
+pub(super) fn looks_like_jsonl(output: &str) -> bool {
+    let output = output.trim();
+    if output.is_empty() {
         return false;
     }
-
-    for line in output
+    if serde_json::from_str::<Value>(output).is_ok() {
+        return true;
+    }
+    let lines = output
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
+        .filter(|line| !line.is_empty());
+    let mut count = 0;
+    for line in lines {
         if !(line.starts_with('{') || line.starts_with('[')) {
-            return true;
+            return false;
         }
         if serde_json::from_str::<Value>(line).is_err() {
-            return true;
+            return false;
         }
+        count += 1;
     }
-    true
+    count > 0
 }
 
 pub(super) fn fold_repeated_lines(output: &str) -> Option<String> {

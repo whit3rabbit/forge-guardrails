@@ -531,6 +531,9 @@ src/
   lib.rs                     Public API re-exports
   error.rs                   ForgeError hierarchy
   server.rs                  setup_backend(), ServerManager, BudgetMode
+  classifier_download.rs     Classifier artifact download logic (--features classifier)
+  tool_output.rs             Tool-output compression pipeline (safe / standard / aggressive)
+  tool_policy.rs             Per-request allowed/blocked tool sets and prerequisite policy
   core/
     message.rs               Message, MessageRole, MessageType, MessageMeta, ToolCallInfo
     tool_spec.rs             ToolSpec, ToolDef, ParamModel — tool schema and callable defs
@@ -545,6 +548,12 @@ src/
     response_validator.rs    ResponseValidator, ValidationResult
     step_enforcer.rs         StepEnforcer, StepCheck, StepPrerequisite
     error_tracker.rs         ErrorTracker
+    scoring.rs               ScoringPipeline, ScoringExecutor — async classifier dispatch
+    scoring_context.rs       ScoringContext — serialized input for ONNX scorer
+    classifier_artifact.rs   Artifact loader, manifest validation, threshold policy
+    onnx_scorer.rs           OnnxToolCallScorer, OnnxFinalResponseScorer (--features classifier)
+    history.rs               Events timeline for validation results and violations
+    policy.rs                Allowed/blocked tool policy based on sequence prerequisites
   clients/
     base.rs                  LLMClient trait, ChunkType, StreamChunk, LLMCallInfo, TokenUsage
     sampling.rs              Model sampling defaults, MODEL_SAMPLING_DEFAULTS
@@ -558,7 +567,7 @@ src/
     hardware.rs              HardwareProfile, detect_hardware()
   prompts/
     mod.rs                   Tool prompt builders (prompt-injected path)
-    nudges.rs                Retry and step-enforcement nudge templates
+    nudges.rs                Retry, step-enforcement, and semantic classifier nudge templates
     parse_strategies.rs      Rescue parsing: Mistral, Qwen, fenced JSON
   tools/
     respond.rs               Synthetic respond tool (respond_tool(), respond_spec())
@@ -568,7 +577,11 @@ src/
     server.rs                HTTPServer — axum HTTP/SSE server
   bin/
     forge-guardrails-proxy.rs  CLI proxy entry point
+    download-classifier.rs     Standalone artifact downloader for eval / training paths
     forge-eval/                Native Rust eval smoke runner
+model/
+  README.md                  Artifact repository index and download commands
+  MODEL.md                   Full model card: training config, metrics, labels, thresholds
 tests/
   parity/                    Python-generated golden fixtures for Rust parity tests
   parity_tests.rs            Rust assertions against python_golden.json
@@ -604,11 +617,13 @@ use forge_guardrails::{
     ContextManager, NoCompact, SlidingWindowCompact, TieredCompact,
     // Guardrails
     Guardrails, StepEnforcer, ErrorTracker, ResponseValidator,
+    // Scoring pipeline (async classifier dispatch)
+    ScoringPipeline, ScoringExecutor, ScoringContext,
     // Step tracking
     StepTracker, SlotWorker,
-    // Prompts and nudges
+    // Prompts and nudges (including semantic classifier nudges)
     retry_nudge, step_nudge, prerequisite_nudge, unknown_tool_nudge,
-    rescue_tool_call, build_tool_prompt,
+    classifier_nudge, rescue_tool_call, build_tool_prompt,
     // Proxy / server
     handle_chat_completions, handle_anthropic_messages,
     HTTPServer, ServerManager, setup_backend,
@@ -631,7 +646,11 @@ Relevant pieces:
 - `ResponseValidator` / `ValidationResult`
 - `StepEnforcer` / `StepCheck` / `StepPrerequisite`
 - `ErrorTracker`
-- `retry_nudge`, `step_nudge`, `prerequisite_nudge`, `unknown_tool_nudge`
+- `retry_nudge`, `step_nudge`, `prerequisite_nudge`, `unknown_tool_nudge`, `classifier_nudge`
+- `ScoringPipeline` / `ScoringExecutor` — async classifier dispatch for shadow, advisory, and enforce modes
+- `ScoringContext` — serializes workflow state into the canonical `toolcall-verifier-input/v1` format for the ONNX scorer
+
+The ONNX tool-call verifier and final-response verifier are built with `--features classifier`. Both start in `shadow` mode and are promoted only after eval replay proves safety. See [model/README.md](model/README.md) for artifact contracts, labels, thresholds, and promotion criteria.
 
 ### 3. OpenAI-compatible proxy / server layer
 
@@ -675,9 +694,10 @@ Both clients expose provider observability through `LLMClient::last_call_info()`
 
 - 487+ passing tests across 16 test files
 - Deterministic parity suite against `tests/parity/fixtures/python_golden.json`
+- Classifier tests (`--test classifier_tests`) cover artifact loading, serializer parity, ONNX scorer output, and scoring pipeline routing
 - 0 contamination incidents in the clean-room run
 
-Keep tests deterministic where possible. Backend integration tests use mock servers (via `mockito`) unless they intentionally qualify a live backend.
+Keep tests deterministic where possible. Backend integration tests use mock servers (via `mockito`) unless they intentionally qualify a live backend. Classifier tests require `--features classifier` and the pinned ONNX artifact; they are gated separately from the core test suite.
 
 ## Known Review Areas Before Release
 
