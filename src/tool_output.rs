@@ -4,13 +4,24 @@
 //! names and arguments remain API contracts owned by the client and guardrails.
 
 use indexmap::IndexMap;
-use regex_lite::Regex;
 use serde_json::Value;
-use std::collections::{hash_map::DefaultHasher, VecDeque};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::str::FromStr;
-use std::sync::{LazyLock, Mutex};
+
+mod families;
+mod filters;
+mod postcall;
+mod safety;
+mod state;
+
+use families::{filter_bash_output, filter_generic_output};
+use filters::{filter_glob_output, filter_grep_output, filter_read_output};
+use postcall::{
+    fold_repeated_lines, json_array_to_table, minify_json, minimize_table_whitespace,
+    normalize_dynamic_log_noise, normalize_whitespace,
+};
+use safety::apply_safe_filters;
+pub use state::ToolOutputCompressionState;
 
 /// Default maximum tool-output bytes retained before safe capping.
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -154,95 +165,6 @@ pub struct ToolOutputCompressionResult {
     pub strategies: Vec<String>,
 }
 
-/// Bounded in-memory dedup state for compressed tool outputs.
-#[derive(Debug, Default)]
-pub struct ToolOutputCompressionState {
-    inner: Mutex<DedupState>,
-}
-
-#[derive(Debug, Default)]
-struct DedupState {
-    sessions: IndexMap<String, VecDeque<DedupRecord>>,
-    session_order: VecDeque<String>,
-    next_call_index: u64,
-}
-
-#[derive(Debug, Clone)]
-struct DedupRecord {
-    hash: u64,
-    tool_name: String,
-    call_index: u64,
-}
-
-impl ToolOutputCompressionState {
-    /// Create empty bounded compression state.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn deduplicate(
-        &self,
-        session_id: &str,
-        tool_name: &str,
-        output: &str,
-        max_sessions: usize,
-        max_entries_per_session: usize,
-    ) -> Option<String> {
-        if session_id.is_empty() || output.is_empty() {
-            return None;
-        }
-        let max_sessions = max_sessions.max(1);
-        let max_entries_per_session = max_entries_per_session.max(1);
-        let hash = hash_output(output);
-        let mut state = self.inner.lock().expect("tool output dedup lock");
-
-        if let Some(records) = state.sessions.get(session_id) {
-            if let Some(record) = records.iter().find(|record| record.hash == hash) {
-                return Some(format!(
-                    "[Duplicate of call #{} ({}) - see earlier result]",
-                    record.call_index, record.tool_name
-                ));
-            }
-        }
-
-        if !state.sessions.contains_key(session_id) {
-            state.session_order.push_back(session_id.to_string());
-            state
-                .sessions
-                .insert(session_id.to_string(), VecDeque::new());
-        }
-
-        state.next_call_index = state.next_call_index.saturating_add(1);
-        let call_index = state.next_call_index;
-        let records = state
-            .sessions
-            .get_mut(session_id)
-            .expect("session inserted above");
-        records.push_back(DedupRecord {
-            hash,
-            tool_name: tool_name.to_string(),
-            call_index,
-        });
-        while records.len() > max_entries_per_session {
-            records.pop_front();
-        }
-
-        while state.sessions.len() > max_sessions {
-            let Some(oldest) = state.session_order.pop_front() else {
-                break;
-            };
-            if oldest != session_id {
-                state.sessions.shift_remove(&oldest);
-            } else {
-                state.session_order.push_back(oldest);
-                break;
-            }
-        }
-
-        None
-    }
-}
-
 /// Compress one tool output using the requested mode and optional dedup state.
 pub fn compress_tool_output(
     tool_name: &str,
@@ -351,24 +273,84 @@ pub fn detect_family(canonical_tool: &str, command: &str) -> String {
     if canonical_tool != "bash" {
         return canonical_tool.to_string();
     }
-    let first = command
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches("env");
-    match first {
-        "git" => "git".to_string(),
-        "npm" | "pnpm" | "yarn" | "bun" => "npm".to_string(),
-        "cargo" | "rustc" => "cargo".to_string(),
-        "pytest" | "go" | "jest" | "vitest" => "test".to_string(),
-        "docker" | "podman" => "docker".to_string(),
-        "pip" | "pip3" | "uv" => "pip".to_string(),
-        "make" => "make".to_string(),
-        "ls" | "find" | "tree" | "du" => "fs".to_string(),
-        "grep" | "rg" | "ag" => "grep".to_string(),
-        "cat" | "sed" | "awk" => "read".to_string(),
-        _ => "generic".to_string(),
+    let tokens = command_tokens(command);
+    let Some(first) = tokens.first() else {
+        return "generic".to_string();
+    };
+    let cmd = basename(first);
+
+    if matches!(cmd.as_str(), "yarn" | "bun" | "pnpm") {
+        return "npm".to_string();
     }
+    if cmd == "npx" {
+        if let Some(inner) = wrapper_inner_command(&tokens[1..]) {
+            return family_for_command(&inner);
+        }
+    }
+    if matches!(cmd.as_str(), "poetry" | "uv") {
+        if let Some(run_idx) = tokens.iter().position(|token| token == "run") {
+            if let Some(inner) = tokens.get(run_idx + 1) {
+                return family_for_command(&basename(inner));
+            }
+        }
+        if cmd == "uv" && tokens.get(1).is_some_and(|token| token == "pip") {
+            return "pip".to_string();
+        }
+    }
+
+    family_for_command(&cmd)
+}
+
+fn command_tokens(command: &str) -> Vec<String> {
+    let mut tokens = command.split_whitespace();
+    let mut result = Vec::new();
+    while let Some(token) = tokens.next() {
+        if token == "env" {
+            continue;
+        }
+        if token.contains('=') && !token.starts_with('-') && result.is_empty() {
+            continue;
+        }
+        result.push(token.to_string());
+        result.extend(tokens.map(str::to_string));
+        break;
+    }
+    result
+}
+
+fn basename(command: &str) -> String {
+    command
+        .rsplit('/')
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase()
+}
+
+fn wrapper_inner_command(tokens: &[String]) -> Option<String> {
+    let first = tokens.first()?;
+    let inner = if matches!(first.as_str(), "run" | "exec") {
+        tokens.get(1)?
+    } else {
+        first
+    };
+    Some(basename(inner))
+}
+
+fn family_for_command(command: &str) -> String {
+    match command {
+        "git" => "git",
+        "npm" | "pnpm" | "yarn" | "bun" => "npm",
+        "cargo" | "rustc" | "rustup" => "cargo",
+        "pytest" | "py.test" | "jest" | "mocha" | "vitest" | "go" | "python" | "python3" => "test",
+        "docker" | "podman" => "docker",
+        "pip" | "pip3" | "pipx" => "pip",
+        "make" | "cmake" => "make",
+        "ls" | "find" | "tree" | "du" | "df" | "wc" | "sort" | "uniq" | "diff" => "fs",
+        "grep" | "rg" | "ag" | "ack" => "grep",
+        "cat" | "head" | "tail" | "sed" | "awk" => "read",
+        _ => "generic",
+    }
+    .to_string()
 }
 
 /// Estimate tokens with the same lightweight heuristic used for proxy metrics.
@@ -377,74 +359,6 @@ pub fn estimate_tokens(value: &str) -> i64 {
         0
     } else {
         value.chars().count().div_ceil(4) as i64
-    }
-}
-
-#[derive(Debug)]
-struct SafeFilterResult {
-    output: String,
-    redacted: bool,
-    capped: bool,
-    binary_suppressed: bool,
-    strategies: Vec<String>,
-}
-
-fn apply_safe_filters(raw_output: &str, config: &ToolOutputCompressionConfig) -> SafeFilterResult {
-    let mut output = raw_output.to_string();
-    let mut redacted = false;
-    let mut capped = false;
-    let mut binary_suppressed = false;
-    let mut strategies = Vec::new();
-
-    if config.redact_secrets {
-        let redacted_output = redact_secrets(&output);
-        if redacted_output != output {
-            output = redacted_output;
-            redacted = true;
-            strategies.push("redact_secrets".to_string());
-        }
-    }
-
-    if looks_binary(&output) {
-        let bytes = output.len();
-        output = format!("[Binary output suppressed: {bytes} bytes]");
-        capped = true;
-        binary_suppressed = true;
-        strategies.push("binary_suppression".to_string());
-        return SafeFilterResult {
-            output,
-            redacted,
-            capped,
-            binary_suppressed,
-            strategies,
-        };
-    }
-
-    let stripped = strip_ansi(&output);
-    if stripped != output {
-        output = stripped;
-        strategies.push("strip_ansi".to_string());
-    }
-
-    let stripped = strip_thinking_blocks(&output);
-    if stripped != output {
-        output = stripped;
-        strategies.push("strip_thinking".to_string());
-    }
-
-    let capped_output = cap_output(&output, config.max_output_bytes);
-    if capped_output != output {
-        output = capped_output;
-        capped = true;
-        strategies.push("cap_oversized".to_string());
-    }
-
-    SafeFilterResult {
-        output,
-        redacted,
-        capped,
-        binary_suppressed,
-        strategies,
     }
 }
 
@@ -459,13 +373,19 @@ fn apply_standard_filters(
     let mut current = output.to_string();
 
     current = apply_if_smaller(current, "json_minify", strategies, minify_json);
+    current = apply_if_smaller(
+        current,
+        "minimize_table_whitespace",
+        strategies,
+        minimize_table_whitespace,
+    );
 
     let routed = match canonical_tool {
         "bash" => filter_bash_output(family, command, &current, max_output_bytes),
         "read" => filter_read_output(command, &current),
         "grep" => filter_grep_output(&current),
         "glob" => filter_glob_output(&current),
-        _ => filter_generic_output(&current, max_output_bytes),
+        _ => filter_generic_output(&current),
     };
     current = apply_candidate_if_smaller(current, "tool_family_filter", strategies, routed);
 
@@ -576,487 +496,6 @@ fn command_from_args(args: Option<&IndexMap<String, Value>>) -> Option<String> {
     None
 }
 
-fn hash_output(output: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    output.hash(&mut hasher);
-    hasher.finish()
-}
-
-static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r#"sk-[A-Za-z0-9_-]{20,}"#,
-        r#"sk-ant-[A-Za-z0-9_-]{20,}"#,
-        r#"gh[pousr]_[A-Za-z0-9_]{20,}"#,
-        r#"AKIA[0-9A-Z]{16}"#,
-        r#"(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\s*[:=]\s*["']?[^"'\s]{8,}"#,
-        r#"(?i)(postgres|mysql|mongodb|redis)://[^ \n\r\t]+"#,
-    ]
-    .iter()
-    .map(|pattern| Regex::new(pattern).expect("valid secret regex"))
-    .collect()
-});
-
-static ANSI_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"\x1b\[[0-9;?]*[ -/]*[@-~]"#).expect("valid ansi regex"));
-
-static TIMESTAMP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\b\d{4}-\d{2}-\d{2}[T ][0-9:.]+Z?\b"#).expect("valid timestamp regex")
-});
-
-static HASH_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"\b[0-9a-f]{32,64}\b"#).expect("valid hash regex"));
-
-fn redact_secrets(output: &str) -> String {
-    let mut redacted = output.to_string();
-    for pattern in SECRET_PATTERNS.iter() {
-        redacted = pattern
-            .replace_all(&redacted, "[REDACTED_SECRET]")
-            .to_string();
-    }
-    redact_private_key_blocks(&redacted)
-}
-
-fn redact_private_key_blocks(output: &str) -> String {
-    let mut result = Vec::new();
-    let mut in_private_key = false;
-    for line in output.lines() {
-        if line.contains("-----BEGIN") && line.contains("PRIVATE KEY-----") {
-            if !in_private_key {
-                result.push("[REDACTED_PRIVATE_KEY]".to_string());
-            }
-            in_private_key = true;
-            continue;
-        }
-        if in_private_key {
-            if line.contains("-----END") && line.contains("PRIVATE KEY-----") {
-                in_private_key = false;
-            }
-            continue;
-        }
-        result.push(line.to_string());
-    }
-    preserve_trailing_newline(output, result.join("\n"))
-}
-
-fn looks_binary(output: &str) -> bool {
-    if output.contains('\0') {
-        return true;
-    }
-    let control = output
-        .chars()
-        .filter(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\x1b'))
-        .count();
-    let total = output.chars().count().max(1);
-    total > 32 && control * 100 / total > 5
-}
-
-fn strip_ansi(output: &str) -> String {
-    ANSI_RE.replace_all(output, "").to_string()
-}
-
-fn strip_thinking_blocks(output: &str) -> String {
-    let mut result = Vec::new();
-    let mut in_thinking = false;
-    for line in output.lines() {
-        let lower = line.trim().to_ascii_lowercase();
-        if lower.starts_with("<think") || lower.starts_with("<thinking") {
-            in_thinking = true;
-            continue;
-        }
-        if in_thinking {
-            if lower.contains("</think>") || lower.contains("</thinking>") {
-                in_thinking = false;
-            }
-            continue;
-        }
-        result.push(line.to_string());
-    }
-    preserve_trailing_newline(output, result.join("\n"))
-}
-
-fn cap_output(output: &str, max_bytes: usize) -> String {
-    if max_bytes == 0 || output.len() <= max_bytes {
-        return output.to_string();
-    }
-    let head_limit = max_bytes.saturating_mul(3) / 5;
-    let tail_limit = max_bytes.saturating_sub(head_limit);
-    let head = take_bytes_on_char_boundary(output, head_limit);
-    let tail = take_last_bytes_on_char_boundary(output, tail_limit);
-    let removed = output.len().saturating_sub(head.len() + tail.len());
-    format!("{head}\n[Tool output capped: {removed} bytes removed]\n{tail}")
-}
-
-fn take_bytes_on_char_boundary(value: &str, limit: usize) -> String {
-    let mut end = 0;
-    for (idx, ch) in value.char_indices() {
-        let next = idx + ch.len_utf8();
-        if next > limit {
-            break;
-        }
-        end = next;
-    }
-    value[..end].to_string()
-}
-
-fn take_last_bytes_on_char_boundary(value: &str, limit: usize) -> String {
-    if value.len() <= limit {
-        return value.to_string();
-    }
-    let target = value.len().saturating_sub(limit);
-    let mut start = value.len();
-    for (idx, _) in value.char_indices() {
-        if idx >= target {
-            start = idx;
-            break;
-        }
-    }
-    value[start..].to_string()
-}
-
-fn minify_json(output: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(output.trim()).ok()?;
-    serde_json::to_string(&parsed).ok()
-}
-
-fn fold_repeated_lines(output: &str) -> Option<String> {
-    let mut result = Vec::new();
-    let mut lines = output.lines().peekable();
-    let mut changed = false;
-    while let Some(line) = lines.next() {
-        let mut count = 1usize;
-        while lines.peek().is_some_and(|next| *next == line) {
-            lines.next();
-            count += 1;
-        }
-        result.push(line.to_string());
-        if count > 3 {
-            result.push(format!("[repeated {} more times]", count - 1));
-            changed = true;
-        } else {
-            for _ in 1..count {
-                result.push(line.to_string());
-            }
-        }
-    }
-    changed.then(|| preserve_trailing_newline(output, result.join("\n")))
-}
-
-fn normalize_whitespace(output: &str) -> Option<String> {
-    let mut result = Vec::new();
-    let mut blank_count = 0usize;
-    let mut changed = false;
-    for line in output.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.len() != line.len() {
-            changed = true;
-        }
-        if trimmed.is_empty() {
-            blank_count += 1;
-            if blank_count <= 2 {
-                result.push(String::new());
-            } else {
-                changed = true;
-            }
-        } else {
-            blank_count = 0;
-            result.push(trimmed.to_string());
-        }
-    }
-    changed.then(|| preserve_trailing_newline(output, result.join("\n")))
-}
-
-fn filter_bash_output(
-    family: &str,
-    command: &str,
-    output: &str,
-    max_output_bytes: usize,
-) -> String {
-    if command.contains("git diff") {
-        return filter_git_diff(output);
-    }
-    match family {
-        "git" => filter_signal_lines(
-            output,
-            &[
-                "modified:",
-                "new file:",
-                "deleted:",
-                "renamed:",
-                "fatal:",
-                "error:",
-                "warning:",
-            ],
-            240,
-        ),
-        "cargo" => filter_signal_lines(
-            output,
-            &[
-                "error",
-                "warning",
-                "failed",
-                "panicked",
-                "test result",
-                "running",
-            ],
-            260,
-        ),
-        "npm" | "test" => filter_signal_lines(
-            output,
-            &[
-                "error", "warning", "failed", "failure", "passed", "tests", "summary",
-            ],
-            260,
-        ),
-        "docker" | "pip" | "make" => filter_signal_lines(
-            output,
-            &[
-                "error",
-                "warning",
-                "failed",
-                "success",
-                "built",
-                "installed",
-            ],
-            220,
-        ),
-        "fs" | "glob" => filter_glob_output(output),
-        "grep" => filter_grep_output(output),
-        "read" => filter_read_output(command, output),
-        _ => filter_generic_output(output, max_output_bytes),
-    }
-}
-
-fn filter_git_diff(output: &str) -> String {
-    let mut kept = Vec::new();
-    for line in output.lines() {
-        if line.starts_with("diff --git")
-            || line.starts_with("@@")
-            || line.starts_with("+++")
-            || line.starts_with("---")
-            || (line.starts_with('+') && !line.starts_with("+++"))
-            || (line.starts_with('-') && !line.starts_with("---"))
-        {
-            kept.push(line.to_string());
-        }
-        if kept.len() >= 400 {
-            kept.push("[git diff output truncated]".to_string());
-            break;
-        }
-    }
-    if kept.is_empty() {
-        output.to_string()
-    } else {
-        preserve_trailing_newline(output, kept.join("\n"))
-    }
-}
-
-fn filter_signal_lines(output: &str, needles: &[&str], max_lines: usize) -> String {
-    let mut kept = Vec::new();
-    for line in output.lines() {
-        let lower = line.to_ascii_lowercase();
-        if needles.iter().any(|needle| lower.contains(needle)) {
-            kept.push(line.to_string());
-        }
-        if kept.len() >= max_lines {
-            kept.push("[output truncated to signal lines]".to_string());
-            break;
-        }
-    }
-    if kept.is_empty() {
-        output.to_string()
-    } else {
-        preserve_trailing_newline(output, kept.join("\n"))
-    }
-}
-
-fn filter_read_output(command: &str, output: &str) -> String {
-    if output.len() <= 4096 || looks_like_config_path(command) {
-        return output.to_string();
-    }
-    let mut kept = Vec::new();
-    for (idx, line) in output.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("use ")
-            || trimmed.starts_with("pub ")
-            || trimmed.starts_with("fn ")
-            || trimmed.starts_with("struct ")
-            || trimmed.starts_with("enum ")
-            || trimmed.starts_with("impl ")
-            || trimmed.starts_with("class ")
-            || trimmed.starts_with("def ")
-            || trimmed.starts_with("import ")
-            || trimmed.starts_with("export ")
-        {
-            kept.push(format!("{}: {}", idx + 1, trimmed));
-        }
-        if kept.len() >= 200 {
-            kept.push("[source outline truncated]".to_string());
-            break;
-        }
-    }
-    if kept.is_empty() {
-        output.to_string()
-    } else {
-        format!("[Source outline for {command}]\n{}", kept.join("\n"))
-    }
-}
-
-fn looks_like_config_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    [".json", ".toml", ".yaml", ".yml", ".lock", ".env"]
-        .iter()
-        .any(|suffix| lower.ends_with(suffix))
-}
-
-fn filter_grep_output(output: &str) -> String {
-    let mut by_file: IndexMap<String, Vec<String>> = IndexMap::new();
-    for line in output.lines() {
-        if is_noise_path(line) {
-            continue;
-        }
-        let mut parts = line.splitn(3, ':');
-        let Some(path) = parts.next() else {
-            continue;
-        };
-        let Some(line_no) = parts.next() else {
-            continue;
-        };
-        let Some(match_text) = parts.next() else {
-            continue;
-        };
-        if line_no.parse::<usize>().is_err() {
-            continue;
-        }
-        let entries = by_file.entry(path.to_string()).or_default();
-        if entries.len() < 5 {
-            entries.push(format!("{line_no}:{match_text}"));
-        }
-    }
-    if by_file.is_empty() {
-        return output.to_string();
-    }
-    let mut result = Vec::new();
-    for (path, matches) in by_file.iter().take(80) {
-        result.push(format!("{path}:"));
-        result.extend(matches.iter().map(|line| format!("  {line}")));
-    }
-    if by_file.len() > 80 {
-        result.push(format!("[{} more files omitted]", by_file.len() - 80));
-    }
-    result.join("\n")
-}
-
-fn filter_glob_output(output: &str) -> String {
-    let mut by_dir: IndexMap<String, usize> = IndexMap::new();
-    let mut kept = Vec::new();
-    for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        let path = line.trim();
-        if is_noise_path(path) {
-            continue;
-        }
-        if kept.len() < 200 {
-            kept.push(path.to_string());
-        }
-        let dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(".");
-        *by_dir.entry(dir.to_string()).or_insert(0) += 1;
-    }
-    if kept.is_empty() {
-        return output.to_string();
-    }
-    if kept.len() < output.lines().count() / 2 {
-        let mut result = kept;
-        result.push("[noise paths omitted]".to_string());
-        return result.join("\n");
-    }
-    if by_dir.len() > 12 {
-        let mut result = Vec::new();
-        for (dir, count) in by_dir.iter().take(80) {
-            result.push(format!("{dir}/ ({count} files)"));
-        }
-        if by_dir.len() > 80 {
-            result.push(format!("[{} more directories omitted]", by_dir.len() - 80));
-        }
-        return result.join("\n");
-    }
-    output.to_string()
-}
-
-fn filter_generic_output(output: &str, max_output_bytes: usize) -> String {
-    if output.len() <= max_output_bytes / 2 {
-        return output.to_string();
-    }
-    cap_output(output, max_output_bytes / 2)
-}
-
-fn is_noise_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    [
-        "/node_modules/",
-        "/.git/",
-        "/target/",
-        "/dist/",
-        "/build/",
-        "/.next/",
-        "/vendor/",
-    ]
-    .iter()
-    .any(|part| lower.contains(part))
-        || lower.starts_with("node_modules/")
-        || lower.starts_with("target/")
-        || lower.starts_with(".git/")
-}
-
-fn normalize_dynamic_log_noise(output: &str) -> Option<String> {
-    let timestamps = TIMESTAMP_RE.replace_all(output, "[timestamp]").to_string();
-    let hashes = HASH_RE.replace_all(&timestamps, "[hash]").to_string();
-    (hashes != output).then_some(hashes)
-}
-
-fn json_array_to_table(output: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(output.trim()).ok()?;
-    let Value::Array(items) = parsed else {
-        return None;
-    };
-    if items.len() < 2 {
-        return None;
-    }
-    let first = items.first()?.as_object()?;
-    let keys: Vec<&String> = first.keys().collect();
-    if keys.is_empty() {
-        return None;
-    }
-    let mut rows = Vec::new();
-    for item in &items {
-        let obj = item.as_object()?;
-        if obj.len() != keys.len() || !keys.iter().all(|key| obj.contains_key(*key)) {
-            return None;
-        }
-        let mut row = Vec::new();
-        for key in &keys {
-            let value = obj.get(*key)?;
-            if matches!(value, Value::Array(_) | Value::Object(_)) {
-                return None;
-            }
-            row.push(match value {
-                Value::String(value) => value.clone(),
-                _ => value.to_string(),
-            });
-        }
-        rows.push(row.join("\t"));
-    }
-    let header = keys
-        .iter()
-        .map(|key| key.as_str())
-        .collect::<Vec<_>>()
-        .join("\t");
-    Some(format!(
-        "[{} rows]\n{}\n{}",
-        items.len(),
-        header,
-        rows.join("\n")
-    ))
-}
-
 fn preserve_trailing_newline(original: &str, mut value: String) -> String {
     if original.ends_with('\n') && !value.ends_with('\n') {
         value.push('\n');
@@ -1068,7 +507,7 @@ fn preserve_trailing_newline(original: &str, mut value: String) -> String {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn safe_config() -> ToolOutputCompressionConfig {
         ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Safe)
@@ -1122,6 +561,24 @@ mod tests {
     }
 
     #[test]
+    fn safe_redaction_can_be_disabled() {
+        let config = ToolOutputCompressionConfig {
+            mode: ToolOutputCompressionMode::Safe,
+            redact_secrets: false,
+            ..ToolOutputCompressionConfig::default()
+        };
+        let result = compress_tool_output(
+            "bash",
+            None,
+            "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz",
+            &config,
+            None,
+        );
+        assert!(!result.redacted);
+        assert!(result.output.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
     fn safe_strips_ansi_sequences() {
         let result = compress_tool_output(
             "bash",
@@ -1132,6 +589,21 @@ mod tests {
         );
         assert_eq!(result.output, "error");
         assert!(result.strategies.contains(&"strip_ansi".to_string()));
+    }
+
+    #[test]
+    fn safe_strips_multiline_thinking_blocks() {
+        let result = compress_tool_output(
+            "bash",
+            None,
+            "visible before\n<thinking>\nprivate chain\n</thinking>\nvisible after\n",
+            &safe_config(),
+            None,
+        );
+        assert!(result.output.contains("visible before"));
+        assert!(result.output.contains("visible after"));
+        assert!(!result.output.contains("private chain"));
+        assert!(result.strategies.contains(&"strip_thinking".to_string()));
     }
 
     #[test]
@@ -1176,6 +648,40 @@ mod tests {
     }
 
     #[test]
+    fn standard_read_large_source_returns_outline() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let mut args = IndexMap::new();
+        args.insert("path".to_string(), json!("src/example.rs"));
+        let mut source = String::new();
+        source.push_str("use crate::thing;\n");
+        for idx in 0..300 {
+            source.push_str(&format!("let value_{idx} = {idx};\n"));
+        }
+        source.push_str("pub struct Widget {\n    id: String,\n}\n");
+        source.push_str("fn run_widget() {\n    println!(\"run\");\n}\n");
+
+        let result = compress_tool_output("read_file", Some(&args), &source, &config, None);
+
+        assert!(result.output.starts_with("// src/example.rs ("));
+        assert!(result.output.contains("L1: use crate"));
+        assert!(result.output.contains("pub struct Widget"));
+        assert!(result.output.contains("fn run_widget"));
+        assert!(!result.output.contains("let value_299"));
+    }
+
+    #[test]
+    fn standard_read_keeps_config_files_verbatim() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let mut args = IndexMap::new();
+        args.insert("path".to_string(), json!("Cargo.toml"));
+        let raw = "[package]\nname = \"forge\"\n\n[dependencies]\nserde = \"1\"\n";
+
+        let result = compress_tool_output("read_file", Some(&args), raw, &config, None);
+
+        assert_eq!(result.output, raw);
+    }
+
+    #[test]
     fn standard_detects_bash_family_from_command_args() {
         let mut args = IndexMap::new();
         args.insert("command".to_string(), json!("cargo test"));
@@ -1193,11 +699,114 @@ mod tests {
     }
 
     #[test]
+    fn standard_bash_git_diff_keeps_hunks_and_changed_lines() {
+        let mut args = IndexMap::new();
+        args.insert("command".to_string(), json!("git diff"));
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = "\
+diff --git a/src/lib.rs b/src/lib.rs
+index 111..222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+ context line
+-old value
++new value
+";
+
+        let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+        assert!(result.output.contains("Files changed: 1"));
+        assert!(result.output.contains("src/lib.rs"));
+        assert!(result.output.contains("@@ -1,3 +1,3 @@"));
+        assert!(result.output.contains("-old value"));
+        assert!(result.output.contains("+new value"));
+        assert!(!result.output.contains("diff --git"));
+        assert!(!result.output.contains("context line"));
+    }
+
+    #[test]
+    fn standard_glob_drops_noise_paths_when_useful() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let mut lines = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
+        for idx in 0..40 {
+            lines.push(format!("target/debug/deps/generated_artifact_{idx}.rs"));
+            lines.push(format!("node_modules/pkg_{idx}/index.js"));
+        }
+        let raw = lines.join("\n");
+
+        let result = compress_tool_output("glob", None, &raw, &config, None);
+
+        assert!(result.output.contains("src/main.rs"));
+        assert!(result.output.contains("src/lib.rs"));
+        assert!(!result.output.contains("node_modules"));
+        assert!(!result.output.contains("target/debug"));
+    }
+
+    #[test]
+    fn opentoken_filter_fixture_cases_match_expected_outputs() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/parity/fixtures/opentoken_tool_output_filters.json"
+        ))
+        .expect("valid OpenToken tool-output fixture");
+        let cases = fixture["cases"].as_array().expect("fixture cases");
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            let tool = case["tool"].as_str().expect("case tool");
+            let input = fixture_input(case);
+            let args = fixture_args(case);
+            let result = compress_tool_output(tool, args.as_ref(), &input, &config, None);
+            let expected = case["expected_output"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: missing expected_output"));
+            assert_eq!(
+                result.output, expected,
+                "{name}: OpenToken fixture mismatch"
+            );
+        }
+    }
+
+    #[test]
     fn standard_filter_does_not_grow_output() {
         let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
         let raw = "short";
         let result = compress_tool_output("bash", None, raw, &config, None);
         assert_eq!(result.output, raw);
+    }
+
+    #[test]
+    fn aggressive_normalizes_timestamps_and_hashes() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+        let raw = "2026-05-28T12:34:56Z completed artifact 0123456789abcdef0123456789abcdef\n";
+
+        let result = compress_tool_output("bash", None, raw, &config, None);
+
+        assert!(result.output.contains("[timestamp]"));
+        assert!(result.output.contains("[hash]"));
+        assert!(result
+            .strategies
+            .contains(&"normalize_dynamic_log_noise".to_string()));
+    }
+
+    #[test]
+    fn aggressive_converts_json_array_to_tabular_form_when_smaller() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+        let raw = r#"[
+  {"long_status_name":"passed","long_duration_ms":10,"long_file_path":"src/a.rs"},
+  {"long_status_name":"failed","long_duration_ms":20,"long_file_path":"src/b.rs"},
+  {"long_status_name":"passed","long_duration_ms":30,"long_file_path":"src/c.rs"}
+]"#;
+
+        let result = compress_tool_output("bash", None, raw, &config, None);
+
+        assert!(result.output.starts_with("[3 rows]\n"));
+        assert!(result
+            .output
+            .contains("long_status_name\tlong_duration_ms\tlong_file_path"));
+        assert!(result.output.contains("failed\t20\tsrc/b.rs"));
+        assert!(result.strategies.contains(&"toon_table".to_string()));
     }
 
     #[test]
@@ -1217,5 +826,37 @@ mod tests {
         assert!(!first.deduped);
         assert!(second.deduped);
         assert!(second.output.contains("Duplicate of call #"));
+    }
+
+    fn fixture_args(case: &Value) -> Option<IndexMap<String, Value>> {
+        let args = case.get("args")?.as_object()?;
+        Some(
+            args.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    }
+
+    fn fixture_input(case: &Value) -> String {
+        if let Some(input) = case.get("input").and_then(Value::as_str) {
+            return input.to_string();
+        }
+        let mut result = String::new();
+        for part in case["input_parts"]
+            .as_array()
+            .expect("input or input_parts")
+        {
+            let text = part["text"].as_str().expect("input part text");
+            let repeat = part
+                .get("repeat")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .try_into()
+                .expect("repeat fits usize");
+            for _ in 0..repeat {
+                result.push_str(text);
+            }
+        }
+        result
     }
 }

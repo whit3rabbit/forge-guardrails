@@ -9,6 +9,10 @@ submodule in `forge/`, not to test broad Rust implementation details.
 - `generate_fixtures.py` builds synthetic Python scenarios against the reference
   implementation.
 - `fixtures/python_golden.json` is the checked-in output consumed by Rust tests.
+- `generate_opentoken_tool_output_fixtures.py` checks out the pinned OpenToken
+  commit and generates tool-output filter fixtures from its TypeScript source.
+- `fixtures/opentoken_tool_output_filters.json` is the checked-in OpenToken
+  output consumed by Rust tool-output tests.
 - `../parity_tests.rs` builds equivalent Rust scenarios and compares against the
   golden JSON.
 
@@ -43,6 +47,14 @@ Then run the focused Rust parity suite:
 
 ```bash
 cargo test --test parity_tests
+```
+
+Regenerate OpenToken tool-output fixtures after intentional filter-parity
+changes:
+
+```bash
+python3 tests/parity/generate_opentoken_tool_output_fixtures.py
+cargo test opentoken_filter_fixture_cases_match_expected_outputs --lib
 ```
 
 For pre-commit verification, also run:

@@ -1,0 +1,271 @@
+{
+  "source": "MrGray17/opentoken",
+  "commit": "5998ffab786d12a0f1f635604a3f6eff8b359967",
+  "generator": "tests/parity/generate_opentoken_tool_output_fixtures.py",
+  "cases": [
+    {
+      "name": "git_diff",
+      "tool": "bash",
+      "opentoken_filter": "git",
+      "args": {
+        "command": "git diff"
+      },
+      "input": "diff --git a/src/lib.rs b/src/lib.rs\nindex 111..222 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n context line\n-old value\n+new value\n",
+      "expected_output": "Files changed: 1\n  src/lib.rs\n\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n-old value\n+new value",
+      "input_len": 145
+    },
+    {
+      "name": "git_status_porcelain",
+      "tool": "bash",
+      "opentoken_filter": "git",
+      "args": {
+        "command": "git status --short"
+      },
+      "input": " M src/lib.rs\nA  src/main.rs\n?? README.md\n",
+      "expected_output": "M src/lib.rs\nA  src/main.rs\n?? README.md",
+      "input_len": 42
+    },
+    {
+      "name": "git_log_merge",
+      "tool": "bash",
+      "opentoken_filter": "git",
+      "args": {
+        "command": "git log"
+      },
+      "input": "commit abcdef1234567890\nAuthor: Dev <dev@example.test>\nDate: Thu May 28 12:00:00 2026 -0500\n\n    initial commit\ncommit 123456abcdef7890\nMerge: 1111111 2222222\nAuthor: Dev <dev@example.test>\nDate: Thu May 28 13:00:00 2026 -0500\n\n    merge branch\n",
+      "expected_output": "commit abcde initial commit\ncommit 12345 (merge) merge branch",
+      "input_len": 245
+    },
+    {
+      "name": "cargo_build",
+      "tool": "bash",
+      "opentoken_filter": "cargo",
+      "args": {
+        "command": "cargo build"
+      },
+      "input_parts": [
+        {
+          "repeat": 30,
+          "text": "Compiling noisy_crate v0.1.0\n"
+        },
+        {
+          "text": "error[E0425]: cannot find value `missing` in this scope\n --> src/lib.rs:7:5\n  |\n7 |     missing\n  |     ^^^^^^^ not found in this scope\n\n"
+        }
+      ],
+      "expected_output": "Errors (1):\nerror[E0425]: cannot find value `missing` in this scope\n --> src/lib.rs:7:5\n  |\n7 |     missing\n  |     ^^^^^^^ not found in this scope\n\n",
+      "input_len": 1007
+    },
+    {
+      "name": "cargo_build_multi_diagnostic",
+      "tool": "bash",
+      "opentoken_filter": "cargo",
+      "args": {
+        "command": "cargo clippy"
+      },
+      "input_parts": [
+        {
+          "repeat": 30,
+          "text": "Checking noisy_crate v0.1.0\n"
+        },
+        {
+          "text": "warning[clippy::needless_return]: unneeded return statement\n --> src/lib.rs:3:5\n  |\n3 |     return value;\n  |     ^^^^^^^^^^^^\n\nerror[E0308]: mismatched types\n --> src/lib.rs:8:5\n  |\n8 |     \"wrong\"\n  |     ^^^^^^^ expected i32\n\nerror: could not compile `demo` due to previous error\n"
+        }
+      ],
+      "expected_output": "Errors (2):\nerror[E0308]: mismatched types\n --> src/lib.rs:8:5\n  |\n8 |     \"wrong\"\n  |     ^^^^^^^ expected i32\n\n\nerror: could not compile `demo` due to previous error\nWarnings (1):\nwarning[clippy::needless_return]: unneeded return statement\n --> src/lib.rs:3:5\n  |\n3 |     return value;\n  |     ^^^^^^^^^^^^\n\n",
+      "input_len": 1123
+    },
+    {
+      "name": "cargo_test_failure",
+      "tool": "bash",
+      "opentoken_filter": "cargo",
+      "args": {
+        "command": "cargo test"
+      },
+      "input": "running 2 tests\ntest alpha ... ok\ntest beta ... FAILED\n\nfailures:\n    beta\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; finished in 0.01s\n",
+      "expected_output": "FAILURES (1):\ntest beta ... FAILED\nrunning 2 tests\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; finished in 0.01s",
+      "input_len": 146
+    },
+    {
+      "name": "npm_install",
+      "tool": "bash",
+      "opentoken_filter": "npm",
+      "args": {
+        "command": "npm install"
+      },
+      "input": "added 312 packages, and audited 313 packages in 6s\nnpm warn deprecated old-lib@1.0.0: unsupported\nfound 0 vulnerabilities\n",
+      "expected_output": "Added: 1 packages\nWarnings:\nnpm warn deprecated old-lib@1.0.0: unsupported\n",
+      "input_len": 122
+    },
+    {
+      "name": "npm_lint",
+      "tool": "bash",
+      "opentoken_filter": "npm",
+      "args": {
+        "command": "npm run lint"
+      },
+      "input": "src/a.ts\nsrc/a.ts:1:1 error no-console\nsrc/a.ts:2:1 Warning missing semicolon\n2 problems\n",
+      "expected_output": "src/a.ts:1:1 error no-console",
+      "input_len": 89
+    },
+    {
+      "name": "pnpm_test_failure",
+      "tool": "bash",
+      "opentoken_filter": "npm",
+      "args": {
+        "command": "pnpm test"
+      },
+      "input": "FAIL src/foo.test.ts\nError: boom\n    at Object.<anonymous> (src/foo.test.ts:1:1)\n\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 1 total\n",
+      "expected_output": "Error: boom\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 1 total",
+      "input_len": 138
+    },
+    {
+      "name": "docker_build",
+      "tool": "bash",
+      "opentoken_filter": "docker",
+      "args": {
+        "command": "docker build ."
+      },
+      "input": "#1 [internal] load build definition\n#2 [1/4] FROM alpine\nDownloading layer\nExtracting layer\nSuccessfully built abcdef123456\n",
+      "expected_output": "Successfully built abcdef123456",
+      "input_len": 124
+    },
+    {
+      "name": "pip_install",
+      "tool": "bash",
+      "opentoken_filter": "pip",
+      "args": {
+        "command": "pip install -r requirements.txt"
+      },
+      "input": "Collecting flask\n  Downloading flask.whl\nRequirement already satisfied: click in .venv/lib/python3.12/site-packages\nRequirement already satisfied: itsdangerous in .venv/lib/python3.12/site-packages\nSuccessfully installed flask-3.0.0\n",
+      "expected_output": "  ... 2 requirements already satisfied ...\nSuccessfully installed flask-3.0.0",
+      "input_len": 233
+    },
+    {
+      "name": "make_progress",
+      "tool": "bash",
+      "opentoken_filter": "make",
+      "args": {
+        "command": "make"
+      },
+      "input": "[ 10%] Building C object a.o\nwarning: generated header is stale\n[ 50%] Building C object b.o\n[100%] Built target app\n",
+      "expected_output": "[ 10%] Building C object a.o\nwarning: generated header is stale\n[ 50%] Building C object b.o\n",
+      "input_len": 117
+    },
+    {
+      "name": "find_grouping",
+      "tool": "bash",
+      "opentoken_filter": "fs",
+      "args": {
+        "command": "find . -type f"
+      },
+      "input_parts": [
+        {
+          "repeat": 110,
+          "text": "src/generated/file.rs\n"
+        },
+        {
+          "repeat": 20,
+          "text": "target/debug/noise.o\n"
+        }
+      ],
+      "expected_output": "110 files:\n  src/: 110\n",
+      "input_len": 2840
+    },
+    {
+      "name": "tree_summary",
+      "tool": "bash",
+      "opentoken_filter": "fs",
+      "args": {
+        "command": "tree"
+      },
+      "input": ".\n\u251c\u2500\u2500 src\n\u2502   \u251c\u2500\u2500 lib.rs\n\u2502   \u2514\u2500\u2500 main.rs\n\u2514\u2500\u2500 target\n    \u2514\u2500\u2500 debug\n        \u251c\u2500\u2500 artifact_0.o\n        \u251c\u2500\u2500 artifact_1.o\n        \u251c\u2500\u2500 artifact_2.o\n        \u251c\u2500\u2500 artifact_3.o\n        \u251c\u2500\u2500 artifact_4.o\n        \u251c\u2500\u2500 artifact_5.o\n        \u251c\u2500\u2500 artifact_6.o\n        \u251c\u2500\u2500 artifact_7.o\n        \u251c\u2500\u2500 artifact_8.o\n        \u251c\u2500\u2500 artifact_9.o\n        \u251c\u2500\u2500 artifact_10.o\n        \u251c\u2500\u2500 artifact_11.o\n        \u251c\u2500\u2500 artifact_12.o\n        \u251c\u2500\u2500 artifact_13.o\n        \u251c\u2500\u2500 artifact_14.o\n        \u251c\u2500\u2500 artifact_15.o\n        \u251c\u2500\u2500 artifact_16.o\n        \u251c\u2500\u2500 artifact_17.o\n        \u251c\u2500\u2500 artifact_18.o\n        \u251c\u2500\u2500 artifact_19.o\n",
+      "expected_output": ".\n\u251c\u2500\u2500 src\n\u2502   \u251c\u2500\u2500 lib.rs\n\u2502   \u2514\u2500\u2500 main.rs\n\u2514\u2500\u2500 target\n    \u2514\u2500\u2500 debug",
+      "input_len": 576
+    },
+    {
+      "name": "generic_stack_trace",
+      "tool": "bash",
+      "opentoken_filter": "generic",
+      "args": {
+        "command": "custom-runner"
+      },
+      "input": "Error: boom\n    at first (src/a.js:1:1)\n    at second (src/a.js:2:1)\n    at third (src/a.js:3:1)\n    at fourth (src/a.js:4:1)\n    at fifth (src/a.js:5:1)\n    at sixth (src/a.js:6:1)\n    at seventh (src/a.js:7:1)\n",
+      "expected_output": "Error: boom\n    at first (src/a.js:1:1)\n  ... 5 stack frames omitted ...\n    at seventh (src/a.js:7:1)\n",
+      "input_len": 212
+    },
+    {
+      "name": "pytest_failure_block",
+      "tool": "bash",
+      "opentoken_filter": "test",
+      "args": {
+        "command": "pytest"
+      },
+      "input": "___ test_adds_numbers ___\n\n    assert add(1, 1) == 3\nE   assert 2 == 3\n\nFAILED tests/test_math.py::test_adds_numbers - AssertionError\n1 failed, 2 passed in 0.03s\n",
+      "expected_output": "FAILURES (1):\n\n___ test_adds_numbers ___\n\n\nFAILED tests/test_math.py::test_adds_numbers - AssertionError\n1 failed, 2 passed in 0.03s",
+      "input_len": 162
+    },
+    {
+      "name": "read_source_outline",
+      "tool": "read_file",
+      "opentoken_filter": "read",
+      "args": {
+        "path": "src/example.rs"
+      },
+      "input_parts": [
+        {
+          "text": "use crate::thing;\n"
+        },
+        {
+          "repeat": 90,
+          "text": "let noise = 1;\n"
+        },
+        {
+          "text": "pub struct Widget {\n    id: String,\n}\nfn run_widget() {}\n"
+        }
+      ],
+      "expected_output": "// src/example.rs (96 lines, 3 symbols)\n  L1: use crate\n  L92: pub struct Widget\n  L95: fn run_widget\n\n// Use read with line range to see specific sections",
+      "input_len": 1425
+    },
+    {
+      "name": "grep_rg_json",
+      "tool": "grep",
+      "opentoken_filter": "grep",
+      "args": {
+        "query": "Widget"
+      },
+      "input": "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":10,\"lines\":{\"text\":\"pub struct Widget;\\n\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":20,\"lines\":{\"text\":\"impl Widget {}\\n\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"build/generated/noise.rs\"},\"line_number\":1,\"lines\":{\"text\":\"noise\\n\"}}}\n",
+      "expected_output": "1 files, 2 matches:\n\nsrc/lib.rs:\n  10: pub struct Widget;\n  20: impl Widget {}",
+      "input_len": 332
+    },
+    {
+      "name": "grep_vimgrep",
+      "tool": "grep",
+      "opentoken_filter": "grep",
+      "args": {
+        "query": "fn"
+      },
+      "input": "src/lib.rs:10:5:fn main() {}\nsrc/lib.rs:20:1:fn helper() {}\nbuild/generated.rs:1:1:fn noise() {}\n",
+      "expected_output": "1 files, 2 matches:\n\nsrc/lib.rs:\n  10: fn main() {}\n  20: fn helper() {}",
+      "input_len": 97
+    },
+    {
+      "name": "grep_per_file_cap",
+      "tool": "grep",
+      "opentoken_filter": "grep",
+      "args": {
+        "query": "match"
+      },
+      "input": "src/lib.rs:1:match 1\nsrc/lib.rs:2:match 2\nsrc/lib.rs:3:match 3\nsrc/lib.rs:4:match 4\nsrc/lib.rs:5:match 5\nsrc/lib.rs:6:match 6\nsrc/lib.rs:7:match 7\nsrc/lib.rs:8:match 8\nsrc/lib.rs:9:match 9\nsrc/lib.rs:10:match 10\nsrc/lib.rs:11:match 11\nsrc/lib.rs:12:match 12\n",
+      "expected_output": "1 files, 10 matches:\n\nsrc/lib.rs:\n  1: match 1\n  2: match 2\n  3: match 3\n  4: match 4\n  5: match 5\n  6: match 6\n  7: match 7\n  8: match 8\n  9: match 9\n  10: match 10\n  ... more matches",
+      "input_len": 258
+    },
+    {
+      "name": "glob_grouping",
+      "tool": "glob",
+      "opentoken_filter": "glob",
+      "input": "src/generated/item_0.rs\nsrc/generated/item_1.rs\nsrc/generated/item_2.rs\nsrc/generated/item_3.rs\nsrc/generated/item_4.rs\nsrc/generated/item_5.rs\nsrc/generated/item_6.rs\nsrc/generated/item_7.rs\nsrc/generated/item_8.rs\nsrc/generated/item_9.rs\nsrc/generated/item_10.rs\nsrc/generated/item_11.rs\nsrc/generated/item_12.rs\nsrc/generated/item_13.rs\nsrc/generated/item_14.rs\nsrc/generated/item_15.rs\nsrc/generated/item_16.rs\nsrc/generated/item_17.rs\nsrc/generated/item_18.rs\nsrc/generated/item_19.rs\nsrc/generated/item_20.rs\nsrc/generated/item_21.rs\nsrc/generated/item_22.rs\nsrc/generated/item_23.rs\nsrc/generated/item_24.rs\nsrc/generated/item_25.rs\nsrc/generated/item_26.rs\nsrc/generated/item_27.rs\nsrc/generated/item_28.rs\nsrc/generated/item_29.rs\nsrc/generated/item_30.rs\nsrc/generated/item_31.rs\nsrc/generated/item_32.rs\nsrc/generated/item_33.rs\nsrc/generated/item_34.rs\nsrc/generated/item_35.rs\nsrc/generated/item_36.rs\nsrc/generated/item_37.rs\nsrc/generated/item_38.rs\nsrc/generated/item_39.rs\nsrc/generated/item_40.rs\nsrc/generated/item_41.rs\nsrc/generated/item_42.rs\nsrc/generated/item_43.rs\nsrc/generated/item_44.rs\nsrc/generated/item_45.rs\nsrc/generated/item_46.rs\nsrc/generated/item_47.rs\nsrc/generated/item_48.rs\nsrc/generated/item_49.rs\nsrc/generated/item_50.rs\nsrc/generated/item_51.rs\nsrc/generated/item_52.rs\nsrc/generated/item_53.rs\nsrc/generated/item_54.rs\nsrc/generated/item_55.rs\nsrc/generated/item_56.rs\nsrc/generated/item_57.rs\nsrc/generated/item_58.rs\nsrc/generated/item_59.rs\nsrc/generated/item_60.rs\nsrc/generated/item_61.rs\nsrc/generated/item_62.rs\nsrc/generated/item_63.rs\nsrc/generated/item_64.rs\nsrc/generated/item_65.rs\nsrc/generated/item_66.rs\nsrc/generated/item_67.rs\nsrc/generated/item_68.rs\nsrc/generated/item_69.rs\nsrc/generated/item_70.rs\nsrc/generated/item_71.rs\nsrc/generated/item_72.rs\nsrc/generated/item_73.rs\nsrc/generated/item_74.rs\nsrc/generated/item_75.rs\nsrc/generated/item_76.rs\nsrc/generated/item_77.rs\nsrc/generated/item_78.rs\nsrc/generated/item_79.rs\nsrc/generated/item_80.rs\nsrc/generated/item_81.rs\nsrc/generated/item_82.rs\nsrc/generated/item_83.rs\nsrc/generated/item_84.rs\nsrc/generated/item_85.rs\nsrc/generated/item_86.rs\nsrc/generated/item_87.rs\nsrc/generated/item_88.rs\nsrc/generated/item_89.rs\nsrc/generated/item_90.rs\nsrc/generated/item_91.rs\nsrc/generated/item_92.rs\nsrc/generated/item_93.rs\nsrc/generated/item_94.rs\nsrc/generated/item_95.rs\nsrc/generated/item_96.rs\nsrc/generated/item_97.rs\nsrc/generated/item_98.rs\nsrc/generated/item_99.rs\nsrc/generated/item_100.rs\nsrc/generated/item_101.rs\nsrc/generated/item_102.rs\nsrc/generated/item_103.rs\nsrc/generated/item_104.rs\nnode_modules/pkg_0/index.js\nnode_modules/pkg_1/index.js\nnode_modules/pkg_2/index.js\nnode_modules/pkg_3/index.js\nnode_modules/pkg_4/index.js\nnode_modules/pkg_5/index.js\nnode_modules/pkg_6/index.js\nnode_modules/pkg_7/index.js\nnode_modules/pkg_8/index.js\nnode_modules/pkg_9/index.js\n",
+      "expected_output": "105 files:\n  src/: 105 files\n    src/generated/item_0.rs\n    src/generated/item_1.rs\n    src/generated/item_2.rs\n    ... and 102 more\n",
+      "input_len": 2900
+    }
+  ]
+}

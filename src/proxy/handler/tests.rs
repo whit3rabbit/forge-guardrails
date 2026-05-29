@@ -1714,6 +1714,111 @@ async fn tool_output_compression_default_disabled_leaves_prior_tool_result_uncha
 }
 
 #[tokio::test]
+async fn tool_output_compression_request_disabled_overrides_process_default() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let raw_tool_output = "\u{1b}[31mOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\u{1b}[0m";
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize previous search"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_search",
+                "name": "search",
+                "content": raw_tool_output
+            }
+        ],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": "disabled"
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    assert_eq!(sent[0][2]["content"], raw_tool_output);
+}
+
+#[tokio::test]
+async fn tool_output_compression_request_can_disable_secret_redaction_only() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize previous search"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_search",
+                "name": "search",
+                "content": "\u{1b}[31mOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\u{1b}[0m"
+            }
+        ],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": {
+                "mode": "safe",
+                "redact_secrets": false
+            }
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    let content = sent[0][2]["content"].as_str().expect("tool content");
+    assert!(content.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    assert!(!content.contains("[REDACTED_SECRET]"));
+    assert!(!content.contains("\u{1b}[31m"));
+}
+
+#[tokio::test]
 async fn tool_output_compression_opt_in_compresses_prior_tool_result_and_preserves_ids() {
     let mut response_args = IndexMap::new();
     response_args.insert("query".into(), json!("next"));
@@ -1849,20 +1954,20 @@ async fn tool_output_compression_dedups_repeated_tool_results_by_session() {
                 "tool_calls": [{
                     "id": "call_one",
                     "type": "function",
-                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                    "function": {"name": "bash", "arguments": "{\"command\":\"custom-tool\"}"}
                 }]
             },
-            {"role": "tool", "tool_call_id": "call_one", "name": "search", "content": repeated},
+            {"role": "tool", "tool_call_id": "call_one", "name": "bash", "content": repeated},
             {
                 "role": "assistant",
                 "content": null,
                 "tool_calls": [{
                     "id": "call_two",
                     "type": "function",
-                    "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}
+                    "function": {"name": "bash", "arguments": "{\"command\":\"custom-tool\"}"}
                 }]
             },
-            {"role": "tool", "tool_call_id": "call_two", "name": "search", "content": repeated}
+            {"role": "tool", "tool_call_id": "call_two", "name": "bash", "content": repeated}
         ],
         "model": "test-model",
         "_forge": {
