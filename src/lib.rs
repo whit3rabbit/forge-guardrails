@@ -113,9 +113,9 @@ pub use proxy::{
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tool_output::{
     canonical_tool_name, compress_tool_output, detect_family, estimate_tokens,
-    ToolOutputCompressionConfig, ToolOutputCompressionMode, ToolOutputCompressionResult,
-    ToolOutputCompressionState, DEFAULT_MAX_DEDUP_ENTRIES_PER_SESSION, DEFAULT_MAX_DEDUP_SESSIONS,
-    DEFAULT_MAX_OUTPUT_BYTES,
+    ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
+    ToolOutputCompressionResult, ToolOutputCompressionState, DEFAULT_MAX_DEDUP_ENTRIES_PER_SESSION,
+    DEFAULT_MAX_DEDUP_SESSIONS, DEFAULT_MAX_OUTPUT_BYTES,
 };
 pub use tool_policy::{
     evaluate_tool_call_policy, ToolCallPolicyConfig, ToolCallPolicyMode, ToolCallPolicyNudge,

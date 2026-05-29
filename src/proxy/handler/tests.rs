@@ -1937,6 +1937,98 @@ async fn tool_output_compression_opt_in_runs_for_no_tools_passthrough() {
 }
 
 #[tokio::test]
+async fn tool_output_compression_request_method_overrides_process_default() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let repeated = (0..30)
+        .map(|idx| {
+            format!(
+                "error: repeated dependency resolution failure in workspace crate alpha at module_{idx}\n"
+            )
+        })
+        .collect::<String>();
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize previous output"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_custom",
+                    "type": "function",
+                    "function": {"name": "custom_tool", "arguments": "{}"}
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_custom",
+                "name": "custom_tool",
+                "content": repeated
+            }
+        ],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": {"method": "repair"}
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect("handler result");
+
+    let sent = client.sent_messages();
+    let content = sent[0][2]["content"].as_str().expect("tool content");
+    assert!(content.starts_with("[Forge RePair Dictionary]"));
+    assert!(!content.starts_with("[Forge LZW Dictionary]"));
+}
+
+#[tokio::test]
+async fn tool_output_compression_request_rejects_invalid_method() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let body = json!({
+        "messages": [{"role": "user", "content": "summarize previous output"}],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": {"method": "gzip"}
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let err = handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect_err("invalid method");
+
+    assert!(matches!(err, HandlerError::BadRequest(_)));
+    assert!(err
+        .message()
+        .contains("method must be lzw, repair, or auto"));
+}
+
+#[tokio::test]
 async fn tool_output_compression_dedups_repeated_tool_results_by_session() {
     let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
         TextResponse::new("ok"),

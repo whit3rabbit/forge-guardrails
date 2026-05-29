@@ -10,16 +10,20 @@ use std::str::FromStr;
 
 mod families;
 mod filters;
+mod lzw;
 mod postcall;
+mod repair;
 mod safety;
 mod state;
 
 use families::{filter_bash_output, filter_generic_output};
 use filters::{filter_glob_output, filter_grep_output, filter_read_output};
+use lzw::compress_lzw_dictionary;
 use postcall::{
     fold_repeated_lines, json_array_to_table, minify_json, minimize_table_whitespace,
     normalize_dynamic_log_noise, normalize_whitespace,
 };
+use repair::compress_repair_dictionary;
 use safety::apply_safe_filters;
 pub use state::ToolOutputCompressionState;
 
@@ -29,6 +33,23 @@ pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_DEDUP_ENTRIES_PER_SESSION: usize = 128;
 /// Default maximum sessions kept in dedup memory.
 pub const DEFAULT_MAX_DEDUP_SESSIONS: usize = 64;
+
+const LZW_DICTIONARY_HEADER: &str = "[Forge LZW Dictionary]";
+const REPAIR_DICTIONARY_HEADER: &str = "[Forge RePair Dictionary]";
+const DICTIONARY_MAX_DICT_SIZE: usize = 20;
+const DICTIONARY_MAX_INPUT_BYTES: usize = 50_000;
+const DICTIONARY_MIN_OCCURRENCES: usize = 3;
+const DICTIONARY_MIN_NET_SAVINGS_BYTES: usize = 32;
+const DICTIONARY_MIN_NET_SAVINGS_PERCENT: usize = 3;
+
+fn is_dictionary_compressed_output(output: &str) -> bool {
+    output.starts_with(LZW_DICTIONARY_HEADER) || output.starts_with(REPAIR_DICTIONARY_HEADER)
+}
+
+fn dictionary_has_meaningful_savings(original_len: usize, savings: usize) -> bool {
+    savings >= DICTIONARY_MIN_NET_SAVINGS_BYTES
+        && savings.saturating_mul(100) / original_len.max(1) >= DICTIONARY_MIN_NET_SAVINGS_PERCENT
+}
 
 /// Opt-in compression level for tool outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -83,11 +104,57 @@ impl FromStr for ToolOutputCompressionMode {
     }
 }
 
+/// Dictionary algorithm used by aggressive tool-output compression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolOutputCompressionMethod {
+    /// LZW-style repeated substring dictionary compression.
+    #[default]
+    Lzw,
+    /// RePair-style repeated adjacent token-pair grammar compression.
+    Repair,
+    /// Run bounded dictionary methods and keep the smallest valid result.
+    Auto,
+}
+
+impl ToolOutputCompressionMethod {
+    /// Return the stable lowercase method name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lzw => "lzw",
+            Self::Repair => "repair",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+impl fmt::Display for ToolOutputCompressionMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ToolOutputCompressionMethod {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "lzw" => Ok(Self::Lzw),
+            "repair" | "re-pair" => Ok(Self::Repair),
+            "auto" => Ok(Self::Auto),
+            other => Err(format!(
+                "tool output compression method must be lzw, repair, or auto, got '{other}'"
+            )),
+        }
+    }
+}
+
 /// Configuration for one tool-output compression pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutputCompressionConfig {
     /// Compression mode.
     pub mode: ToolOutputCompressionMode,
+    /// Dictionary method used by aggressive compression.
+    pub method: ToolOutputCompressionMethod,
     /// Whether secret-looking values are redacted before other transforms.
     pub redact_secrets: bool,
     /// Whether repeated compressed outputs are replaced with bounded references.
@@ -106,6 +173,7 @@ impl Default for ToolOutputCompressionConfig {
     fn default() -> Self {
         Self {
             mode: ToolOutputCompressionMode::Disabled,
+            method: ToolOutputCompressionMethod::Lzw,
             redact_secrets: true,
             enable_dedup: true,
             session_id: None,
@@ -218,7 +286,7 @@ pub fn compress_tool_output(
     }
 
     if config.mode >= ToolOutputCompressionMode::Aggressive && !safe.binary_suppressed {
-        output = apply_aggressive_filters(&output, &mut strategies);
+        output = apply_aggressive_filters(&output, config.method, &mut strategies);
     }
 
     if config.enable_dedup {
@@ -403,14 +471,57 @@ fn apply_standard_filters(
     )
 }
 
-fn apply_aggressive_filters(output: &str, strategies: &mut Vec<String>) -> String {
+fn apply_aggressive_filters(
+    output: &str,
+    method: ToolOutputCompressionMethod,
+    strategies: &mut Vec<String>,
+) -> String {
     let current = apply_if_smaller(
         output.to_string(),
         "normalize_dynamic_log_noise",
         strategies,
         normalize_dynamic_log_noise,
     );
-    apply_if_smaller(current, "toon_table", strategies, json_array_to_table)
+    let current = apply_if_smaller(current, "toon_table", strategies, json_array_to_table);
+    apply_dictionary_filter(current, method, strategies)
+}
+
+fn apply_dictionary_filter(
+    current: String,
+    method: ToolOutputCompressionMethod,
+    strategies: &mut Vec<String>,
+) -> String {
+    match method {
+        ToolOutputCompressionMethod::Lzw => apply_if_smaller(
+            current,
+            "lzw_dictionary",
+            strategies,
+            compress_lzw_dictionary,
+        ),
+        ToolOutputCompressionMethod::Repair => apply_if_smaller(
+            current,
+            "repair_dictionary",
+            strategies,
+            compress_repair_dictionary,
+        ),
+        ToolOutputCompressionMethod::Auto => {
+            let lzw = compress_lzw_dictionary(&current);
+            let repair = compress_repair_dictionary(&current);
+            let best = [lzw, repair]
+                .into_iter()
+                .flatten()
+                .filter(|candidate| candidate.len() < current.len())
+                .min_by_key(String::len);
+
+            match best {
+                Some(candidate) => {
+                    strategies.push("auto_dictionary".to_string());
+                    candidate
+                }
+                None => current,
+            }
+        }
+    }
 }
 
 fn apply_if_smaller<F>(
@@ -531,6 +642,23 @@ mod tests {
             "aggressive".parse::<ToolOutputCompressionMode>().unwrap(),
             ToolOutputCompressionMode::Aggressive
         );
+    }
+
+    #[test]
+    fn method_parse_accepts_expected_values() {
+        assert_eq!(
+            "lzw".parse::<ToolOutputCompressionMethod>().unwrap(),
+            ToolOutputCompressionMethod::Lzw
+        );
+        assert_eq!(
+            "repair".parse::<ToolOutputCompressionMethod>().unwrap(),
+            ToolOutputCompressionMethod::Repair
+        );
+        assert_eq!(
+            "auto".parse::<ToolOutputCompressionMethod>().unwrap(),
+            ToolOutputCompressionMethod::Auto
+        );
+        assert!("gzip".parse::<ToolOutputCompressionMethod>().is_err());
     }
 
     #[test]
@@ -810,6 +938,76 @@ index 111..222 100644
     }
 
     #[test]
+    fn standard_does_not_apply_lzw() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = repeated_lzw_output();
+
+        let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.strategies.contains(&"lzw_dictionary".to_string()));
+    }
+
+    #[test]
+    fn standard_ignores_dictionary_method() {
+        let config = ToolOutputCompressionConfig {
+            mode: ToolOutputCompressionMode::Standard,
+            method: ToolOutputCompressionMethod::Repair,
+            ..ToolOutputCompressionConfig::default()
+        };
+        let raw = repeated_lzw_output();
+
+        let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.output.starts_with("[Forge RePair Dictionary]"));
+        assert!(!result.strategies.contains(&"repair_dictionary".to_string()));
+    }
+
+    #[test]
+    fn aggressive_lzw_records_strategy() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+        let raw = repeated_lzw_output();
+
+        let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+        assert!(result.output.starts_with("[Forge LZW Dictionary]"));
+        assert!(result.strategies.contains(&"lzw_dictionary".to_string()));
+    }
+
+    #[test]
+    fn aggressive_repair_records_strategy() {
+        let config = ToolOutputCompressionConfig {
+            mode: ToolOutputCompressionMode::Aggressive,
+            method: ToolOutputCompressionMethod::Repair,
+            ..ToolOutputCompressionConfig::default()
+        };
+        let raw = repeated_lzw_output();
+
+        let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+        assert!(result.output.starts_with("[Forge RePair Dictionary]"));
+        assert!(result.strategies.contains(&"repair_dictionary".to_string()));
+    }
+
+    #[test]
+    fn aggressive_auto_uses_smaller_dictionary_output() {
+        let config = ToolOutputCompressionConfig {
+            mode: ToolOutputCompressionMode::Aggressive,
+            method: ToolOutputCompressionMethod::Auto,
+            ..ToolOutputCompressionConfig::default()
+        };
+        let raw = repeated_lzw_output();
+        let lzw = compress_lzw_dictionary(&raw).expect("lzw output");
+        let repair = compress_repair_dictionary(&raw).expect("repair output");
+
+        let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+        assert_eq!(result.output.len(), lzw.len().min(repair.len()));
+        assert!(result.strategies.contains(&"auto_dictionary".to_string()));
+    }
+
+    #[test]
     fn dedup_returns_bounded_marker_for_repeated_output() {
         let state = ToolOutputCompressionState::new();
         let config = ToolOutputCompressionConfig {
@@ -826,6 +1024,16 @@ index 111..222 100644
         assert!(!first.deduped);
         assert!(second.deduped);
         assert!(second.output.contains("Duplicate of call #"));
+    }
+
+    fn repeated_lzw_output() -> String {
+        (0..24)
+            .map(|idx| {
+                format!(
+                    "error: repeated dependency resolution failure in workspace crate alpha at module_{idx}\n"
+                )
+            })
+            .collect::<String>()
     }
 
     fn fixture_args(case: &Value) -> Option<IndexMap<String, Value>> {

@@ -192,6 +192,27 @@ prints the artifact directory during startup. By default it uses
 `$HOME/.cache/forge-guardrails/classifiers`. Use `--classifier-dir` to provide
 an explicit artifact directory.
 
+Tool-output compression is also opt-in. It mutates only prior tool-result
+content before forwarding a request upstream; tool calls, tool IDs, arguments,
+and final responses are left unchanged. Start conservatively with `safe` or
+`standard`; dictionary compression requires explicit `aggressive` mode.
+
+```bash
+cargo run --bin forge-guardrails-proxy -- \
+  --backend-url http://localhost:8080 \
+  --tool-output-compression standard \
+  --port 8081
+
+cargo run --bin forge-guardrails-proxy -- \
+  --backend-url http://localhost:8080 \
+  --tool-output-compression aggressive \
+  --tool-output-compression-method auto \
+  --port 8081
+```
+
+See [Tool Output Compression](docs/COMPRESSION.md) for modes, request-level
+`_forge` overrides, and method details.
+
 Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`.
 
 **Backend compatibility:**
@@ -217,7 +238,7 @@ On every `POST /v1/chat/completions`, forge applies (in order):
 Proxy mode is single-shot per request; some forge features need multi-turn workflow state that the OpenAI chat-completions schema doesn't carry:
 
 - **Prerequisite enforcement and step-ordering** — these need a workflow definition spanning turns. Available in `WorkflowRunner`.
-- **Context compaction and session memory** — proxy mode forwards the inbound message list as-is; managing the rolling window is the client's job.
+- **Context window management** — proxy mode does not choose or maintain the client's rolling message window. Opt-in tool-output compression can rewrite prior tool-result content, and dedup can use an explicit `session_id`, but the client still owns conversation memory.
 - **VRAM-aware budget detection** — opt in with `--budget-mode forge-full` or `--budget-mode forge-fast`; otherwise proxy uses the backend's reported budget. Env-routed mode can also use `FORGE_CONTEXT_TOKENS`.
 
 ### Useful flags
@@ -234,6 +255,8 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `--max-retries N` | `3` | Retry budget per validation failure |
 | `--classify` | off | Enable the quantized tool-call ONNX classifier in advisory mode |
 | `--classify-download` | off | Download the quantized tool-call ONNX classifier and exit |
+| `--tool-output-compression {disabled,safe,standard,aggressive}` | `disabled` | Compress prior tool-result content before upstream forwarding |
+| `--tool-output-compression-method {lzw,repair,auto}` | `lzw` | Aggressive dictionary method |
 | `--no-rescue` | rescue on | Disable rescue parsing |
 | `--budget-mode {backend,manual,forge-full,forge-fast}` | `backend` | Context budget source |
 | `--budget-tokens N` | — | Manual token budget |
@@ -255,6 +278,8 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `FORGE_CLASSIFIER_DIR` | — | Local ONNX tool-call classifier artifact directory |
 | `FORGE_CLASSIFIER_MODE` | `shadow` | `disabled`, `shadow`, `advisory`, or `enforce` |
 | `FORGE_CLASSIFIER_MODEL` | `quantized` | `quantized` or `full` classifier ONNX file |
+| `FORGE_TOOL_OUTPUT_COMPRESSION` | `disabled` | `disabled`, `safe`, `standard`, or `aggressive` |
+| `FORGE_TOOL_OUTPUT_COMPRESSION_METHOD` | `lzw` | `lzw`, `repair`, or `auto`; used only by aggressive mode |
 | `FORGE_START_SIDECAR` | Docker: auto | Start the internal anyllm sidecar in Docker |
 | `ANYLLM_LISTEN_PORT` | Docker: `3000` | Internal anyllm sidecar port; do not publish it |
 | `FORGE_SIDECAR_API_KEY` / `PROXY_API_KEYS` | generated | Shared Forge-to-sidecar key in Docker |
@@ -559,6 +584,7 @@ docs/
   PARITY.md                  Parity contract and subsystem alignment status
   EVAL_GUIDE.md              Eval harness CLI reference
   BACKEND_SETUP.md           Backend installation and server setup
+  COMPRESSION.md             Tool-output compression modes and request overrides
 ```
 
 ## Public API Surface

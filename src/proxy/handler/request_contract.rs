@@ -1,7 +1,9 @@
 use super::HandlerError;
 use crate::clients::base::LLMRequestOptions;
 use crate::core::tool_spec::ToolSpec;
-use crate::tool_output::{ToolOutputCompressionConfig, ToolOutputCompressionMode};
+use crate::tool_output::{
+    ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
+};
 use crate::tool_policy::{ToolCallPolicyConfig, ToolCallPolicyMode};
 use crate::tools::respond::{respond_spec, RESPOND_TOOL_NAME};
 use indexmap::IndexSet;
@@ -216,6 +218,15 @@ fn parse_tool_output_compression_value(
                 };
                 config.mode =
                     ToolOutputCompressionMode::from_str(mode).map_err(HandlerError::BadRequest)?;
+            }
+            if let Some(method) = obj.get("method") {
+                let Some(method) = method.as_str() else {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.method must be a string"
+                    )));
+                };
+                config.method = ToolOutputCompressionMethod::from_str(method)
+                    .map_err(HandlerError::BadRequest)?;
             }
             if let Some(session_id) = obj.get("session_id") {
                 let Some(session_id) = session_id.as_str() else {

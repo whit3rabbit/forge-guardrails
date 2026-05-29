@@ -6,7 +6,7 @@ use crate::cli::Cli;
 use forge_guardrails::default_tool_call_classifier_artifact_dir;
 use forge_guardrails::{
     ClassifierModelKind, ScorerMode, ToolCallPolicyConfig, ToolCallPolicyMode,
-    ToolOutputCompressionConfig, ToolOutputCompressionMode,
+    ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
 };
 
 pub(crate) const DEFAULT_PROXY_PORT: u16 = 8081;
@@ -145,10 +145,21 @@ pub(crate) fn tool_output_compression_from_env_cli(
     cli: &Cli,
 ) -> Result<ToolOutputCompressionConfig, String> {
     let mut config = env_tool_output_compression()?;
-    if let Some(mode) = cli.tool_output_compression.as_deref() {
-        config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::from_str(mode)?);
-    }
+    apply_tool_output_compression_cli_overrides(&mut config, cli)?;
     Ok(config)
+}
+
+fn apply_tool_output_compression_cli_overrides(
+    config: &mut ToolOutputCompressionConfig,
+    cli: &Cli,
+) -> Result<(), String> {
+    if let Some(mode) = cli.tool_output_compression.as_deref() {
+        config.mode = ToolOutputCompressionMode::from_str(mode)?;
+    }
+    if let Some(method) = cli.tool_output_compression_method.as_deref() {
+        config.method = ToolOutputCompressionMethod::from_str(method)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn tool_call_policy_from_env_cli(cli: &Cli) -> Result<ToolCallPolicyConfig, String> {
@@ -353,12 +364,26 @@ fn env_string(keys: &[&str], default: &str) -> String {
 }
 
 fn env_tool_output_compression() -> Result<ToolOutputCompressionConfig, String> {
-    match env_optional_string("FORGE_TOOL_OUTPUT_COMPRESSION") {
-        Some(mode) => Ok(ToolOutputCompressionConfig::from_mode(
-            ToolOutputCompressionMode::from_str(&mode)?,
-        )),
-        None => Ok(ToolOutputCompressionConfig::disabled()),
+    tool_output_compression_from_env_values(
+        env_optional_string("FORGE_TOOL_OUTPUT_COMPRESSION"),
+        env_optional_string("FORGE_TOOL_OUTPUT_COMPRESSION_METHOD"),
+    )
+}
+
+fn tool_output_compression_from_env_values(
+    mode: Option<String>,
+    method: Option<String>,
+) -> Result<ToolOutputCompressionConfig, String> {
+    let mut config = match mode {
+        Some(mode) => {
+            ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::from_str(&mode)?)
+        }
+        None => ToolOutputCompressionConfig::disabled(),
+    };
+    if let Some(method) = method {
+        config.method = ToolOutputCompressionMethod::from_str(&method)?;
     }
+    Ok(config)
 }
 
 fn env_tool_call_policy() -> Result<ToolCallPolicyConfig, String> {
@@ -608,6 +633,64 @@ mod tests {
             config.tool_output_compression.mode,
             ToolOutputCompressionMode::Standard
         );
+    }
+
+    #[test]
+    fn tool_output_compression_cli_override_sets_method() {
+        let cli = parse(&[
+            "--tool-output-compression",
+            "aggressive",
+            "--tool-output-compression-method",
+            "repair",
+        ]);
+        let mut config = sample_config();
+
+        apply_env_cli_overrides(&mut config, &cli).expect("overrides");
+
+        assert_eq!(
+            config.tool_output_compression.mode,
+            ToolOutputCompressionMode::Aggressive
+        );
+        assert_eq!(
+            config.tool_output_compression.method,
+            ToolOutputCompressionMethod::Repair
+        );
+    }
+
+    #[test]
+    fn tool_output_compression_cli_rejects_invalid_method() {
+        let cli = parse(&["--tool-output-compression-method", "gzip"]);
+        let mut config = sample_config();
+
+        let err = apply_env_cli_overrides(&mut config, &cli).expect_err("invalid method");
+
+        assert!(err.contains("method must be lzw, repair, or auto"));
+    }
+
+    #[test]
+    fn tool_output_compression_env_and_cli_method_precedence() {
+        let cli = parse(&["--tool-output-compression-method", "auto"]);
+        let mut config = tool_output_compression_from_env_values(
+            Some("aggressive".to_string()),
+            Some("repair".to_string()),
+        )
+        .expect("env config");
+
+        apply_tool_output_compression_cli_overrides(&mut config, &cli).expect("cli override");
+
+        assert_eq!(config.mode, ToolOutputCompressionMode::Aggressive);
+        assert_eq!(config.method, ToolOutputCompressionMethod::Auto);
+    }
+
+    #[test]
+    fn tool_output_compression_env_rejects_invalid_method() {
+        let err = tool_output_compression_from_env_values(
+            Some("aggressive".to_string()),
+            Some("gzip".to_string()),
+        )
+        .expect_err("invalid method");
+
+        assert!(err.contains("method must be lzw, repair, or auto"));
     }
 
     #[test]

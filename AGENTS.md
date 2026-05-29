@@ -76,6 +76,7 @@ The reference Python implementation is available in the [forge](file:///Users/wh
   - `CLEANROOM.md`: Summary of clean-room implementation history
   - `BACKEND_SETUP.md`: Setup configurations for local and remote providers
   - `EVAL_GUIDE.md`: Guide to setting up, running, and analyzing evaluation benchmarks
+  - `COMPRESSION.md`: Tool-output compression modes, request overrides, and safety notes
 - `Dockerfile`: Single-port deployment configuration for normal proxy use
 - `Dockerfile.classifier`: Single-port proxy image that builds with
   `--features classifier` and preloads the quantized tool-call ONNX classifier
@@ -179,6 +180,35 @@ reuse an existing proxy binary from `FORGE_PROXY_BIN`, `PATH`,
 When changing `scripts/start_llamaserver_proxy.sh`, preserve Ctrl+C behavior:
 the launcher must forward SIGINT/SIGTERM/SIGHUP to the proxy process and wait
 for it to exit so the proxy can stop the managed `llama-server` backend.
+
+Proxy tool-output compression:
+
+```bash
+forge-guardrails-proxy \
+  --backend-url http://localhost:8080 \
+  --tool-output-compression standard
+
+forge-guardrails-proxy \
+  --backend-url http://localhost:8080 \
+  --tool-output-compression aggressive \
+  --tool-output-compression-method auto
+```
+
+- `--tool-output-compression` accepts `disabled`, `safe`, `standard`, or
+  `aggressive`. Default is `disabled`.
+- `--tool-output-compression-method` accepts `lzw`, `repair`, or `auto`.
+  Default is `lzw` and the method is used only by `aggressive`.
+- Environment equivalents are `FORGE_TOOL_OUTPUT_COMPRESSION` and
+  `FORGE_TOOL_OUTPUT_COMPRESSION_METHOD`.
+- Request override lives under `_forge.tool_output_compression`; object form
+  supports `mode`, `method`, `session_id`, `dedup`, `redact_secrets`, and
+  `max_output_bytes`.
+- Compression must remain opt-in and must mutate only prior tool-result
+  content. Do not compress tool calls, tool IDs, tool names, tool arguments, or
+  final responses. Preserve tool-call/tool-result pairing.
+- Do not add runtime dependencies for compression without an explicit need.
+  Current runtime compression is Rust/std plus existing dependencies.
+- See `docs/COMPRESSION.md` for the full contract and examples.
 
 Docker image and publish flow:
 

@@ -146,6 +146,10 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "disabled|safe|standard|aggressive")]
     pub(crate) tool_output_compression: Option<String>,
 
+    /// Aggressive tool-output dictionary compression method.
+    #[arg(long, value_name = "lzw|repair|auto")]
+    pub(crate) tool_output_compression_method: Option<String>,
+
     /// Tool-call policy nudge mode.
     #[arg(long, value_name = "disabled|standard")]
     pub(crate) tool_call_policy: Option<String>,
