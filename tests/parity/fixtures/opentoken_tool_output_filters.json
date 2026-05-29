@@ -26,6 +26,28 @@
       "input_len": 42
     },
     {
+      "name": "git_status_conflict_and_rename",
+      "tool": "bash",
+      "opentoken_filter": "git",
+      "args": {
+        "command": "git status --short"
+      },
+      "input": "UU src/conflict.rs\nR  src/old.rs -> src/new.rs\n?? notes.txt\n",
+      "expected_output": "UU src/conflict.rs\nR  src/old.rs -> src/new.rs\n?? notes.txt\n",
+      "input_len": 60
+    },
+    {
+      "name": "git_diff_rename",
+      "tool": "bash",
+      "opentoken_filter": "git",
+      "args": {
+        "command": "git diff --find-renames"
+      },
+      "input": "diff --git a/src/old.rs b/src/new.rs\nsimilarity index 100%\nrename from src/old.rs\nrename to src/new.rs\n",
+      "expected_output": "Files changed: 1\n  src/old.rs",
+      "input_len": 103
+    },
+    {
       "name": "git_log_merge",
       "tool": "bash",
       "opentoken_filter": "git",
@@ -86,6 +108,28 @@
       "input_len": 146
     },
     {
+      "name": "cargo_json_diagnostic",
+      "tool": "bash",
+      "opentoken_filter": "cargo",
+      "args": {
+        "command": "cargo check --message-format=json"
+      },
+      "input": "{\"reason\":\"compiler-artifact\",\"package_id\":\"demo 0.1.0\",\"target\":{\"name\":\"demo\"}}\n{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"message\":\"cannot find value `missing` in this scope\",\"code\":{\"code\":\"E0425\"},\"spans\":[{\"file_name\":\"src/lib.rs\",\"line_start\":7,\"column_start\":5,\"line_end\":7,\"column_end\":12,\"text\":[{\"text\":\"    missing\",\"highlight_start\":5,\"highlight_end\":12}]}],\"rendered\":\"error[E0425]: cannot find value `missing` in this scope\\n --> src/lib.rs:7:5\\n  |\\n7 |     missing\\n  |     ^^^^^^^ not found in this scope\\n\"}}}\n{\"reason\":\"build-finished\",\"success\":false}\n",
+      "expected_output": "(compiled successfully)",
+      "input_len": 587
+    },
+    {
+      "name": "rustc_diagnostic",
+      "tool": "bash",
+      "opentoken_filter": "cargo",
+      "args": {
+        "command": "rustc src/lib.rs"
+      },
+      "input": "error[E0308]: mismatched types\n --> src/lib.rs:2:5\n  |\n2 |     \"wrong\"\n  |     ^^^^^^^ expected i32, found &str\n\nerror: aborting due to previous error\n",
+      "expected_output": "error[E0308]: mismatched types\n --> src/lib.rs:2:5\n  |\n2 |     \"wrong\"\n  |     ^^^^^^^ expected i32, found &str\n\nerror: aborting due to previous error\n",
+      "input_len": 151
+    },
+    {
       "name": "npm_install",
       "tool": "bash",
       "opentoken_filter": "npm",
@@ -117,6 +161,28 @@
       "input": "FAIL src/foo.test.ts\nError: boom\n    at Object.<anonymous> (src/foo.test.ts:1:1)\n\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 1 total\n",
       "expected_output": "Error: boom\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 1 total",
       "input_len": 138
+    },
+    {
+      "name": "yarn_test_failure",
+      "tool": "bash",
+      "opentoken_filter": "npm",
+      "args": {
+        "command": "yarn test"
+      },
+      "input": "yarn run v1.22.22\n$ vitest run\nFAIL src/foo.test.ts\nError: expected true to be false\n\nTest Files 1 failed (1)\nTests 1 failed (1)\nerror Command failed with exit code 1.\n",
+      "expected_output": "Error: expected true to be false\nTest Files 1 failed (1)\nTests 1 failed (1)\nerror Command failed with exit code 1.",
+      "input_len": 168
+    },
+    {
+      "name": "bun_test_failure",
+      "tool": "bash",
+      "opentoken_filter": "npm",
+      "args": {
+        "command": "bun test"
+      },
+      "input": "bun test v1.1.0\nsrc/foo.test.ts:\n(fail) adds numbers [0.12ms]\n  expect(received).toBe(expected)\n\n1 fail\n2 pass\nerror: script \"test\" exited with code 1\n",
+      "expected_output": "error: script \"test\" exited with code 1",
+      "input_len": 151
     },
     {
       "name": "docker_build",
@@ -205,6 +271,17 @@
       "input_len": 162
     },
     {
+      "name": "pytest_param_failure",
+      "tool": "bash",
+      "opentoken_filter": "test",
+      "args": {
+        "command": "pytest -q"
+      },
+      "input": "___ test_adds_numbers[1-2-4] ___\n\nleft = 1, right = 2, expected = 4\n\n    assert add(left, right) == expected\nE   assert 3 == 4\n\nFAILED tests/test_math.py::test_adds_numbers[1-2-4] - AssertionError\n1 failed, 8 passed in 0.04s\n",
+      "expected_output": "FAILURES (1):\n\n___ test_adds_numbers[1-2-4] ___\n\n\nFAILED tests/test_math.py::test_adds_numbers[1-2-4] - AssertionError\n1 failed, 8 passed in 0.04s",
+      "input_len": 225
+    },
+    {
       "name": "read_source_outline",
       "tool": "read_file",
       "opentoken_filter": "read",
@@ -238,6 +315,17 @@
       "input_len": 332
     },
     {
+      "name": "grep_rg_json_context_events",
+      "tool": "grep",
+      "opentoken_filter": "grep",
+      "args": {
+        "query": "Widget"
+      },
+      "input": "{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":9,\"lines\":{\"text\":\"#[derive(Debug)]\\n\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":10,\"lines\":{\"text\":\"pub struct Widget;\\n\"}}}\n{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":11,\"lines\":{\"text\":\"impl Widget {\\n\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/ui.rs\"},\"line_number\":42,\"submatches\":[{\"match\":{\"text\":\"Widget\"},\"start\":7,\"end\":13}]}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.01s\"}}}\n",
+      "expected_output": "(no matches)",
+      "input_len": 527
+    },
+    {
       "name": "grep_vimgrep",
       "tool": "grep",
       "opentoken_filter": "grep",
@@ -266,6 +354,14 @@
       "input": "src/generated/item_0.rs\nsrc/generated/item_1.rs\nsrc/generated/item_2.rs\nsrc/generated/item_3.rs\nsrc/generated/item_4.rs\nsrc/generated/item_5.rs\nsrc/generated/item_6.rs\nsrc/generated/item_7.rs\nsrc/generated/item_8.rs\nsrc/generated/item_9.rs\nsrc/generated/item_10.rs\nsrc/generated/item_11.rs\nsrc/generated/item_12.rs\nsrc/generated/item_13.rs\nsrc/generated/item_14.rs\nsrc/generated/item_15.rs\nsrc/generated/item_16.rs\nsrc/generated/item_17.rs\nsrc/generated/item_18.rs\nsrc/generated/item_19.rs\nsrc/generated/item_20.rs\nsrc/generated/item_21.rs\nsrc/generated/item_22.rs\nsrc/generated/item_23.rs\nsrc/generated/item_24.rs\nsrc/generated/item_25.rs\nsrc/generated/item_26.rs\nsrc/generated/item_27.rs\nsrc/generated/item_28.rs\nsrc/generated/item_29.rs\nsrc/generated/item_30.rs\nsrc/generated/item_31.rs\nsrc/generated/item_32.rs\nsrc/generated/item_33.rs\nsrc/generated/item_34.rs\nsrc/generated/item_35.rs\nsrc/generated/item_36.rs\nsrc/generated/item_37.rs\nsrc/generated/item_38.rs\nsrc/generated/item_39.rs\nsrc/generated/item_40.rs\nsrc/generated/item_41.rs\nsrc/generated/item_42.rs\nsrc/generated/item_43.rs\nsrc/generated/item_44.rs\nsrc/generated/item_45.rs\nsrc/generated/item_46.rs\nsrc/generated/item_47.rs\nsrc/generated/item_48.rs\nsrc/generated/item_49.rs\nsrc/generated/item_50.rs\nsrc/generated/item_51.rs\nsrc/generated/item_52.rs\nsrc/generated/item_53.rs\nsrc/generated/item_54.rs\nsrc/generated/item_55.rs\nsrc/generated/item_56.rs\nsrc/generated/item_57.rs\nsrc/generated/item_58.rs\nsrc/generated/item_59.rs\nsrc/generated/item_60.rs\nsrc/generated/item_61.rs\nsrc/generated/item_62.rs\nsrc/generated/item_63.rs\nsrc/generated/item_64.rs\nsrc/generated/item_65.rs\nsrc/generated/item_66.rs\nsrc/generated/item_67.rs\nsrc/generated/item_68.rs\nsrc/generated/item_69.rs\nsrc/generated/item_70.rs\nsrc/generated/item_71.rs\nsrc/generated/item_72.rs\nsrc/generated/item_73.rs\nsrc/generated/item_74.rs\nsrc/generated/item_75.rs\nsrc/generated/item_76.rs\nsrc/generated/item_77.rs\nsrc/generated/item_78.rs\nsrc/generated/item_79.rs\nsrc/generated/item_80.rs\nsrc/generated/item_81.rs\nsrc/generated/item_82.rs\nsrc/generated/item_83.rs\nsrc/generated/item_84.rs\nsrc/generated/item_85.rs\nsrc/generated/item_86.rs\nsrc/generated/item_87.rs\nsrc/generated/item_88.rs\nsrc/generated/item_89.rs\nsrc/generated/item_90.rs\nsrc/generated/item_91.rs\nsrc/generated/item_92.rs\nsrc/generated/item_93.rs\nsrc/generated/item_94.rs\nsrc/generated/item_95.rs\nsrc/generated/item_96.rs\nsrc/generated/item_97.rs\nsrc/generated/item_98.rs\nsrc/generated/item_99.rs\nsrc/generated/item_100.rs\nsrc/generated/item_101.rs\nsrc/generated/item_102.rs\nsrc/generated/item_103.rs\nsrc/generated/item_104.rs\nnode_modules/pkg_0/index.js\nnode_modules/pkg_1/index.js\nnode_modules/pkg_2/index.js\nnode_modules/pkg_3/index.js\nnode_modules/pkg_4/index.js\nnode_modules/pkg_5/index.js\nnode_modules/pkg_6/index.js\nnode_modules/pkg_7/index.js\nnode_modules/pkg_8/index.js\nnode_modules/pkg_9/index.js\n",
       "expected_output": "105 files:\n  src/: 105 files\n    src/generated/item_0.rs\n    src/generated/item_1.rs\n    src/generated/item_2.rs\n    ... and 102 more\n",
       "input_len": 2900
+    },
+    {
+      "name": "glob_hidden_noisy_paths",
+      "tool": "glob",
+      "opentoken_filter": "glob",
+      "input": "src/lib.rs\n.git/config\n.cache/tool/tmp.json\n.env\n.DS_Store\ntarget/debug/build.log\nnode_modules/pkg/index.js\nsrc/.hidden.rs\n",
+      "expected_output": "src/lib.rs\n.env\n.DS_Store\nsrc/.hidden.rs",
+      "input_len": 123
     }
   ]
 }

@@ -38,6 +38,20 @@ CASES = [
         "input": " M src/lib.rs\nA  src/main.rs\n?? README.md\n",
     },
     {
+        "name": "git_status_conflict_and_rename",
+        "tool": "bash",
+        "opentoken_filter": "git",
+        "args": {"command": "git status --short"},
+        "input": "UU src/conflict.rs\nR  src/old.rs -> src/new.rs\n?? notes.txt\n",
+    },
+    {
+        "name": "git_diff_rename",
+        "tool": "bash",
+        "opentoken_filter": "git",
+        "args": {"command": "git diff --find-renames"},
+        "input": "diff --git a/src/old.rs b/src/new.rs\nsimilarity index 100%\nrename from src/old.rs\nrename to src/new.rs\n",
+    },
+    {
         "name": "git_log_merge",
         "tool": "bash",
         "opentoken_filter": "git",
@@ -76,6 +90,22 @@ CASES = [
         "input": "running 2 tests\ntest alpha ... ok\ntest beta ... FAILED\n\nfailures:\n    beta\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; finished in 0.01s\n",
     },
     {
+        "name": "cargo_json_diagnostic",
+        "tool": "bash",
+        "opentoken_filter": "cargo",
+        "args": {"command": "cargo check --message-format=json"},
+        "input": '{"reason":"compiler-artifact","package_id":"demo 0.1.0","target":{"name":"demo"}}\n'
+        '{"reason":"compiler-message","message":{"level":"error","message":"cannot find value `missing` in this scope","code":{"code":"E0425"},"spans":[{"file_name":"src/lib.rs","line_start":7,"column_start":5,"line_end":7,"column_end":12,"text":[{"text":"    missing","highlight_start":5,"highlight_end":12}]}],"rendered":"error[E0425]: cannot find value `missing` in this scope\\n --> src/lib.rs:7:5\\n  |\\n7 |     missing\\n  |     ^^^^^^^ not found in this scope\\n"}}}\n'
+        '{"reason":"build-finished","success":false}\n',
+    },
+    {
+        "name": "rustc_diagnostic",
+        "tool": "bash",
+        "opentoken_filter": "cargo",
+        "args": {"command": "rustc src/lib.rs"},
+        "input": "error[E0308]: mismatched types\n --> src/lib.rs:2:5\n  |\n2 |     \"wrong\"\n  |     ^^^^^^^ expected i32, found &str\n\nerror: aborting due to previous error\n",
+    },
+    {
         "name": "npm_install",
         "tool": "bash",
         "opentoken_filter": "npm",
@@ -95,6 +125,20 @@ CASES = [
         "opentoken_filter": "npm",
         "args": {"command": "pnpm test"},
         "input": "FAIL src/foo.test.ts\nError: boom\n    at Object.<anonymous> (src/foo.test.ts:1:1)\n\nTest Suites: 1 failed, 1 total\nTests: 1 failed, 1 total\n",
+    },
+    {
+        "name": "yarn_test_failure",
+        "tool": "bash",
+        "opentoken_filter": "npm",
+        "args": {"command": "yarn test"},
+        "input": "yarn run v1.22.22\n$ vitest run\nFAIL src/foo.test.ts\nError: expected true to be false\n\nTest Files 1 failed (1)\nTests 1 failed (1)\nerror Command failed with exit code 1.\n",
+    },
+    {
+        "name": "bun_test_failure",
+        "tool": "bash",
+        "opentoken_filter": "npm",
+        "args": {"command": "bun test"},
+        "input": "bun test v1.1.0\nsrc/foo.test.ts:\n(fail) adds numbers [0.12ms]\n  expect(received).toBe(expected)\n\n1 fail\n2 pass\nerror: script \"test\" exited with code 1\n",
     },
     {
         "name": "docker_build",
@@ -150,6 +194,13 @@ CASES = [
         "input": "___ test_adds_numbers ___\n\n    assert add(1, 1) == 3\nE   assert 2 == 3\n\nFAILED tests/test_math.py::test_adds_numbers - AssertionError\n1 failed, 2 passed in 0.03s\n",
     },
     {
+        "name": "pytest_param_failure",
+        "tool": "bash",
+        "opentoken_filter": "test",
+        "args": {"command": "pytest -q"},
+        "input": "___ test_adds_numbers[1-2-4] ___\n\nleft = 1, right = 2, expected = 4\n\n    assert add(left, right) == expected\nE   assert 3 == 4\n\nFAILED tests/test_math.py::test_adds_numbers[1-2-4] - AssertionError\n1 failed, 8 passed in 0.04s\n",
+    },
+    {
         "name": "read_source_outline",
         "tool": "read_file",
         "opentoken_filter": "read",
@@ -166,6 +217,13 @@ CASES = [
         "opentoken_filter": "grep",
         "args": {"query": "Widget"},
         "input": '{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":10,"lines":{"text":"pub struct Widget;\\n"}}}\n{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":20,"lines":{"text":"impl Widget {}\\n"}}}\n{"type":"match","data":{"path":{"text":"build/generated/noise.rs"},"line_number":1,"lines":{"text":"noise\\n"}}}\n',
+    },
+    {
+        "name": "grep_rg_json_context_events",
+        "tool": "grep",
+        "opentoken_filter": "grep",
+        "args": {"query": "Widget"},
+        "input": '{"type":"context","data":{"path":{"text":"src/lib.rs"},"line_number":9,"lines":{"text":"#[derive(Debug)]\\n"}}}\n{"type":"match","data":{"path":{"text":"src/lib.rs"},"line_number":10,"lines":{"text":"pub struct Widget;\\n"}}}\n{"type":"context","data":{"path":{"text":"src/lib.rs"},"line_number":11,"lines":{"text":"impl Widget {\\n"}}}\n{"type":"match","data":{"path":{"text":"src/ui.rs"},"line_number":42,"submatches":[{"match":{"text":"Widget"},"start":7,"end":13}]}}\n{"type":"summary","data":{"elapsed_total":{"human":"0.01s"}}}\n',
     },
     {
         "name": "grep_vimgrep",
@@ -187,6 +245,12 @@ CASES = [
         "opentoken_filter": "glob",
         "input": "".join(f"src/generated/item_{idx}.rs\n" for idx in range(105))
         + "".join(f"node_modules/pkg_{idx}/index.js\n" for idx in range(10)),
+    },
+    {
+        "name": "glob_hidden_noisy_paths",
+        "tool": "glob",
+        "opentoken_filter": "glob",
+        "input": "src/lib.rs\n.git/config\n.cache/tool/tmp.json\n.env\n.DS_Store\ntarget/debug/build.log\nnode_modules/pkg/index.js\nsrc/.hidden.rs\n",
     },
 ]
 
