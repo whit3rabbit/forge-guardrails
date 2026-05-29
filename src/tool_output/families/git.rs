@@ -127,7 +127,7 @@ fn filter_git_diff(output: &str) -> String {
     }
 
     if files.is_empty() {
-        return "(no changes)".to_string();
+        return output.to_string();
     }
 
     let mut result = format!("Files changed: {}\n", files.len());

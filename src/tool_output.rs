@@ -720,18 +720,11 @@ mod tests {
     }
 
     #[test]
-    fn safe_strips_multiline_thinking_blocks() {
-        let result = compress_tool_output(
-            "bash",
-            None,
-            "visible before\n<thinking>\nprivate chain\n</thinking>\nvisible after\n",
-            &safe_config(),
-            None,
-        );
-        assert!(result.output.contains("visible before"));
-        assert!(result.output.contains("visible after"));
-        assert!(!result.output.contains("private chain"));
-        assert!(result.strategies.contains(&"strip_thinking".to_string()));
+    fn safe_preserves_thinking_blocks_from_tool_output() {
+        let raw = "visible before\n<thinking>\nprivate chain\n</thinking>\nvisible after\n";
+        let result = compress_tool_output("bash", None, raw, &safe_config(), None);
+        assert_eq!(result.output, raw);
+        assert!(!result.strategies.contains(&"strip_thinking".to_string()));
     }
 
     #[test]
@@ -773,6 +766,70 @@ mod tests {
         );
         assert!(result.output.contains("src/a.rs:"));
         assert!(!result.output.contains("target/x.rs"));
+    }
+
+    #[test]
+    fn standard_grep_unknown_output_is_preserved() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = "rg: regex parse error:\n    (?:\n    ^\nerror: unclosed group\n";
+
+        let result = compress_tool_output("grep", None, raw, &config, None);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.output.contains("(no matches)"));
+    }
+
+    #[test]
+    fn standard_glob_all_noise_paths_are_preserved() {
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = "target/debug/build.log\nnode_modules/pkg/index.js\n";
+
+        let result = compress_tool_output("glob", None, raw, &config, None);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.output.contains("(no matches)"));
+    }
+
+    #[test]
+    fn standard_cargo_unknown_success_output_is_preserved() {
+        let mut args = IndexMap::new();
+        args.insert("command".to_string(), json!("cargo build"));
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = "Compiling demo v0.1.0\nFinished dev [unoptimized] target(s) in 0.1s\n";
+
+        let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.output.contains("compiled successfully"));
+    }
+
+    #[test]
+    fn standard_cargo_json_diagnostics_are_summarized() {
+        let mut args = IndexMap::new();
+        args.insert(
+            "command".to_string(),
+            json!("cargo check --message-format=json"),
+        );
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error[E0425]: missing value\\n --> src/lib.rs:1:1\\n\"}}\n{\"reason\":\"build-finished\",\"success\":false}\n";
+
+        let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+        assert!(result.output.starts_with("Errors (1):\nerror[E0425]"));
+        assert!(!result.output.contains("\"reason\""));
+    }
+
+    #[test]
+    fn standard_test_unknown_success_output_is_preserved() {
+        let mut args = IndexMap::new();
+        args.insert("command".to_string(), json!("python custom_harness.py"));
+        let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+        let raw = "custom harness completed without standard summary\n";
+
+        let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+        assert_eq!(result.output, raw);
+        assert!(!result.output.contains("all tests passed"));
     }
 
     #[test]

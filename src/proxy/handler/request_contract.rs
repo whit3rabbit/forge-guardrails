@@ -18,6 +18,7 @@ pub(super) const FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD: &str =
     "return_raw_on_guardrail_failure";
 pub(super) const FORGE_TOOL_CALL_POLICY_FIELD: &str = "tool_call_policy";
 pub(super) const FORGE_TOOL_OUTPUT_COMPRESSION_FIELD: &str = "tool_output_compression";
+const MAX_REQUEST_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProxyStepContract {
@@ -171,6 +172,13 @@ fn forge_object(body: &Value) -> Result<Option<&serde_json::Map<String, Value>>,
     })
 }
 
+pub(super) fn strip_forge_extension_from_body(mut body: Value) -> Value {
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove(FORGE_EXTENSION_FIELD);
+    }
+    body
+}
+
 pub(super) fn extract_forge_bool_field(body: &Value, field: &str) -> Result<bool, HandlerError> {
     let Some(forge_obj) = forge_object(body)? else {
         return Ok(false);
@@ -255,10 +263,16 @@ fn parse_tool_output_compression_value(
                 })?;
             }
             if let Some(max_output_bytes) = obj.get("max_output_bytes") {
-                config.max_output_bytes = parse_positive_usize(
+                let max_output_bytes = parse_positive_usize(
                     max_output_bytes,
                     "max_output_bytes",
                 )?;
+                if max_output_bytes > MAX_REQUEST_TOOL_OUTPUT_BYTES {
+                    return Err(HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.max_output_bytes must be <= {MAX_REQUEST_TOOL_OUTPUT_BYTES}"
+                    )));
+                }
+                config.max_output_bytes = max_output_bytes;
             }
             Ok(config)
         }
@@ -416,6 +430,7 @@ pub(super) fn sanitize_guarded_anthropic_body(
         return Ok(None);
     };
     if let Some(obj) = Arc::make_mut(&mut body).as_object_mut() {
+        obj.remove(FORGE_EXTENSION_FIELD);
         obj.remove("response_format");
         if let Some(tool_choice) = obj.get("tool_choice") {
             validate_guarded_anthropic_tool_choice(tool_choice, has_required_steps)?;

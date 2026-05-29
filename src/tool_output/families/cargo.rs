@@ -1,3 +1,6 @@
+use super::preserve_unknown_or_empty_summary;
+use serde_json::Value;
+
 const ERROR_PATTERNS: &[&str] = &["error[", "error:", "warning[", "failed", "panicked"];
 
 pub(super) fn filter_cargo_output(command: &str, output: &str) -> String {
@@ -14,6 +17,10 @@ pub(super) fn filter_cargo_output(command: &str, output: &str) -> String {
 }
 
 fn filter_cargo_build(output: &str) -> String {
+    if let Some(filtered) = filter_cargo_json_messages(output) {
+        return filtered;
+    }
+
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut in_block = false;
@@ -38,6 +45,57 @@ fn filter_cargo_build(output: &str) -> String {
     }
     push_block(&mut errors, &mut warnings, &mut block);
 
+    let result = format_cargo_diagnostics(&errors, &warnings);
+    if result.is_empty() {
+        preserve_unknown_or_empty_summary(output, "(compiled successfully)")
+    } else {
+        result
+    }
+}
+
+fn filter_cargo_json_messages(output: &str) -> Option<String> {
+    let mut saw_json = false;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for line in output.lines() {
+        let parsed: Value = serde_json::from_str(line).ok()?;
+        saw_json = true;
+        if parsed.get("reason").and_then(Value::as_str) != Some("compiler-message") {
+            continue;
+        }
+        let Some(message) = parsed.get("message") else {
+            continue;
+        };
+        let level = message
+            .get("level")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let rendered = message
+            .get("rendered")
+            .and_then(Value::as_str)
+            .or_else(|| message.get("message").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
+        if rendered.trim().is_empty() {
+            continue;
+        }
+        if level == "error" {
+            errors.push(rendered);
+        } else {
+            warnings.push(rendered);
+        }
+    }
+
+    let result = format_cargo_diagnostics(&errors, &warnings);
+    if saw_json && !result.is_empty() {
+        Some(result)
+    } else {
+        None
+    }
+}
+
+fn format_cargo_diagnostics(errors: &[String], warnings: &[String]) -> String {
     let mut result = String::new();
     if !errors.is_empty() {
         result.push_str(&format!(
@@ -64,14 +122,10 @@ fn filter_cargo_build(output: &str) -> String {
         result.push_str(&format!("Warnings: {} (truncated)\n", warnings.len()));
     }
 
-    if result.is_empty() {
-        "(compiled successfully)".to_string()
-    } else {
-        if !result.ends_with("\n\n") {
-            result.push('\n');
-        }
-        result
+    if !result.is_empty() && !result.ends_with("\n\n") {
+        result.push('\n');
     }
+    result
 }
 
 fn push_block(errors: &mut Vec<String>, warnings: &mut Vec<String>, block: &mut Vec<String>) {
@@ -103,7 +157,7 @@ fn filter_cargo_test(output: &str) -> String {
 
     if failures.is_empty() {
         return if summary.is_empty() {
-            "(all tests passed)".to_string()
+            preserve_unknown_or_empty_summary(output, "(all tests passed)")
         } else {
             summary.join("\n")
         };

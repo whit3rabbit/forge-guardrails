@@ -1,3 +1,5 @@
+use super::preserve_unknown_or_empty_summary;
+
 pub(super) fn filter_make_output(output: &str) -> String {
     let lines = output.lines().collect::<Vec<_>>();
     let mut result = Vec::new();
@@ -23,7 +25,10 @@ pub(super) fn filter_make_output(output: &str) -> String {
     }
 
     let mut output_value = if result.is_empty() {
-        "(build output compressed - no warnings or errors)".to_string()
+        preserve_unknown_or_empty_summary(
+            output,
+            "(build output compressed - no warnings or errors)",
+        )
     } else {
         result.join("\n")
     };

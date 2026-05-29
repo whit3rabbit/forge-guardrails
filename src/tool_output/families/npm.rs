@@ -1,3 +1,5 @@
+use super::preserve_unknown_or_empty_summary;
+
 const ERROR_PATTERNS: &[&str] = &[
     "error",
     "err!",
@@ -122,7 +124,7 @@ fn filter_npm_test(output: &str) -> String {
 
     if failures.is_empty() {
         return if summary.is_empty() {
-            "(all tests passed)".to_string()
+            preserve_unknown_or_empty_summary(output, "(all tests passed)")
         } else {
             summary.join("\n")
         };
@@ -185,7 +187,7 @@ fn filter_npm_lint(output: &str) -> String {
     }
 
     if result.is_empty() {
-        "(clean)".to_string()
+        preserve_unknown_or_empty_summary(output, "(clean)")
     } else {
         result
     }

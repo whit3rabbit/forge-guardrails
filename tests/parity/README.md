@@ -10,7 +10,9 @@ submodule in `forge/`, not to test broad Rust implementation details.
   implementation.
 - `fixtures/python_golden.json` is the checked-in output consumed by Rust tests.
 - `generate_opentoken_tool_output_fixtures.py` checks out the pinned OpenToken
-  commit and generates tool-output filter fixtures from its TypeScript source.
+  commit, generates tool-output filter fixtures from its TypeScript source, and
+  applies local safety overrides where Forge intentionally avoids upstream false
+  summaries.
 - `fixtures/opentoken_tool_output_filters.json` is the checked-in OpenToken
   output consumed by Rust tool-output tests.
 - `../parity_tests.rs` builds equivalent Rust scenarios and compares against the

@@ -1,4 +1,5 @@
 use super::super::filters::is_noise_path;
+use super::preserve_unknown_or_empty_summary;
 use indexmap::IndexMap;
 
 pub(super) fn filter_fs_output(command: &str, output: &str) -> String {
@@ -66,7 +67,7 @@ fn filter_ls(output: &str) -> String {
         }
     }
     if result.is_empty() {
-        "(empty)".to_string()
+        preserve_unknown_or_empty_summary(output, "(empty)")
     } else {
         result
     }
@@ -81,7 +82,7 @@ fn filter_find(output: &str) -> String {
 
     if filtered.len() <= 100 {
         return if filtered.is_empty() {
-            "(empty)".to_string()
+            preserve_unknown_or_empty_summary(output, "(empty)")
         } else {
             filtered.join("\n")
         };

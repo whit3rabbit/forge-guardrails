@@ -1,3 +1,5 @@
+use super::preserve_unknown_or_empty_summary;
+
 const ERROR_PATTERNS: &[&str] = &[
     "failed",
     "error",
@@ -31,7 +33,7 @@ pub(super) fn filter_test_output(command: &str, output: &str) -> String {
 
     if error_lines.is_empty() {
         if summary_lines.is_empty() {
-            "(all tests passed)".to_string()
+            preserve_unknown_or_empty_summary(output, "(all tests passed)")
         } else {
             summary_lines.join("\n")
         }
@@ -80,7 +82,7 @@ fn filter_pytest(output: &str) -> String {
 
     if failures.is_empty() {
         if summary.is_empty() {
-            "(all tests passed)".to_string()
+            preserve_unknown_or_empty_summary(output, "(all tests passed)")
         } else {
             summary.join("\n")
         }
@@ -118,7 +120,7 @@ fn filter_go_test(output: &str) -> String {
 
     if failures.is_empty() {
         if summary.is_empty() {
-            "(all tests passed)".to_string()
+            preserve_unknown_or_empty_summary(output, "(all tests passed)")
         } else {
             summary.join("\n")
         }

@@ -14,35 +14,28 @@ struct GrepMatch {
 pub(in crate::tool_output) fn filter_grep_output(output: &str) -> String {
     let lines = output.lines().collect::<Vec<_>>();
     let mut matches: IndexMap<String, Vec<String>> = IndexMap::new();
-    let is_rg_json = lines
-        .first()
-        .and_then(|line| parse_rg_json_line(line))
-        .is_some();
 
-    if is_rg_json {
-        for line in lines {
-            let Some(parsed) = parse_rg_json_line(line) else {
-                continue;
-            };
+    for line in lines {
+        if let Some(parsed) = parse_rg_json_line(line) {
             if is_noise_path(&parsed.file) {
                 continue;
             }
             push_match(&mut matches, parsed.file, parsed.line_num, parsed.content);
+            continue;
         }
-    } else {
-        for line in lines {
-            if is_noise_path(line) {
-                continue;
-            }
-            let Some(parsed) = parse_grep_line(line) else {
-                continue;
-            };
+        if is_rg_json_event(line) {
+            continue;
+        }
+        if is_noise_path(line) {
+            continue;
+        }
+        if let Some(parsed) = parse_grep_line(line) {
             push_match(&mut matches, parsed.file, parsed.line_num, parsed.content);
         }
     }
 
     if matches.is_empty() {
-        return "(no matches)".to_string();
+        return output.to_string();
     }
 
     let match_count = matches.values().map(Vec::len).sum::<usize>();
@@ -58,6 +51,13 @@ pub(in crate::tool_output) fn filter_grep_output(output: &str) -> String {
         result.push('\n');
     }
     result.trim_end().to_string()
+}
+
+fn is_rg_json_event(line: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|parsed| parsed.get("type").and_then(Value::as_str).map(|_| ()))
+        .is_some()
 }
 
 fn push_match(

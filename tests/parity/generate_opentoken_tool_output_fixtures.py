@@ -2,8 +2,9 @@
 """Generate OpenToken tool-output filter fixtures from the upstream source.
 
 This script checks out the exact OpenToken commit used by Forge's parity
-fixtures, invokes the TypeScript filter functions through tsx, and rewrites the
-checked-in JSON fixture with upstream `expected_output` values.
+fixtures, invokes the TypeScript filter functions through tsx, applies local
+Forge safety overrides for known false summaries, and rewrites the checked-in
+JSON fixture with `expected_output` values.
 """
 
 from __future__ import annotations
@@ -341,6 +342,27 @@ def expand_input(case: dict) -> str:
     )
 
 
+FORGE_SAFETY_PRESERVE_INPUTS = {"cargo_json_diagnostic"}
+
+FORGE_SAFETY_EXPECTED_OUTPUTS = {
+    "grep_rg_json_context_events": "2 files, 2 matches:\n\n"
+    "src/lib.rs:\n"
+    "  10: pub struct Widget;\n\n"
+    "src/ui.rs:\n"
+    "  42: Widget",
+}
+
+
+def apply_forge_safety_overrides(cases: list[dict]) -> None:
+    for case in cases:
+        if case["name"] in FORGE_SAFETY_PRESERVE_INPUTS:
+            case["expected_output"] = expand_input(case)
+            continue
+        override = FORGE_SAFETY_EXPECTED_OUTPUTS.get(case["name"])
+        if override is not None:
+            case["expected_output"] = override
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="forge-opentoken-") as temp:
         temp_path = Path(temp)
@@ -359,6 +381,7 @@ def main() -> None:
             input_text=json.dumps(CASES),
         )
         cases = json.loads(generated)
+        apply_forge_safety_overrides(cases)
 
     fixture = {
         "source": "MrGray17/opentoken",

@@ -1,3 +1,5 @@
+use super::preserve_unknown_or_empty_summary;
+
 pub(super) fn filter_pip_output(command: &str, output: &str) -> String {
     let trimmed = command.trim_start();
     if !(trimmed.starts_with("pip install") || trimmed.starts_with("pip3 install")) {
@@ -27,7 +29,10 @@ pub(super) fn filter_pip_output(command: &str, output: &str) -> String {
     flush_satisfied(&mut result, &mut satisfied_count);
 
     if result.is_empty() {
-        "(pip install output compressed - all requirements already satisfied)".to_string()
+        preserve_unknown_or_empty_summary(
+            output,
+            "(pip install output compressed - all requirements already satisfied)",
+        )
     } else {
         result.join("\n")
     }

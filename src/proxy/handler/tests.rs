@@ -1339,6 +1339,36 @@ async fn anthropic_messages_translates_nonzero_usage() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_strips_forge_extension_before_upstream_forwarding() {
+    let raw = json!({
+        "model": "claude-3",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "_forge": {"tool_output_compression": "disabled"}
+    });
+    let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+    let client = Arc::new(MockOptionsClient::new(Some(TokenUsage::new(13, 7, 20))));
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true)
+        .await
+        .expect("handler result");
+
+    let options = client
+        .last_options
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("options recorded");
+    let forwarded = options
+        .inbound_anthropic_body
+        .as_deref()
+        .expect("raw anthropic body");
+    assert!(forwarded.get("_forge").is_none());
+    assert_eq!(forwarded["model"], "claude-3");
+}
+
+#[tokio::test]
 async fn anthropic_messages_includes_cache_usage_details() {
     let raw = json!({
         "model": "claude-3",
@@ -2026,6 +2056,41 @@ async fn tool_output_compression_request_rejects_invalid_method() {
     assert!(err
         .message()
         .contains("method must be lzw, repair, or auto"));
+}
+
+#[tokio::test]
+async fn tool_output_compression_request_rejects_unbounded_max_output_bytes() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
+        TextResponse::new("ok"),
+    )]));
+    let body = json!({
+        "messages": [{"role": "user", "content": "summarize previous output"}],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": {
+                "mode": "safe",
+                "max_output_bytes": 1048577
+            }
+        }
+    });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+
+    let err = handle_chat_completions_with_scorers_and_tool_output_compression(
+        &body,
+        &client,
+        &ctx,
+        3,
+        true,
+        None,
+        None,
+        ToolOutputCompressionConfig::disabled(),
+        Some(Arc::new(ToolOutputCompressionState::new())),
+    )
+    .await
+    .expect_err("oversized max_output_bytes");
+
+    assert!(matches!(err, HandlerError::BadRequest(_)));
+    assert!(err.message().contains("max_output_bytes must be <="));
 }
 
 #[tokio::test]

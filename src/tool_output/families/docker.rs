@@ -1,3 +1,5 @@
+use super::preserve_unknown_or_empty_summary;
+
 pub(super) fn filter_docker_output(command: &str, output: &str) -> String {
     let trimmed = command.trim_start();
     if !(trimmed.starts_with("docker build")
@@ -25,7 +27,10 @@ pub(super) fn filter_docker_output(command: &str, output: &str) -> String {
     }
 
     if result.is_empty() {
-        "(docker output compressed - all layers cached, no errors)".to_string()
+        preserve_unknown_or_empty_summary(
+            output,
+            "(docker output compressed - all layers cached, no errors)",
+        )
     } else {
         result.join("\n")
     }

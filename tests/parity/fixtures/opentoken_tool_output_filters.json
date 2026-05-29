@@ -115,7 +115,7 @@
         "command": "cargo check --message-format=json"
       },
       "input": "{\"reason\":\"compiler-artifact\",\"package_id\":\"demo 0.1.0\",\"target\":{\"name\":\"demo\"}}\n{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"message\":\"cannot find value `missing` in this scope\",\"code\":{\"code\":\"E0425\"},\"spans\":[{\"file_name\":\"src/lib.rs\",\"line_start\":7,\"column_start\":5,\"line_end\":7,\"column_end\":12,\"text\":[{\"text\":\"    missing\",\"highlight_start\":5,\"highlight_end\":12}]}],\"rendered\":\"error[E0425]: cannot find value `missing` in this scope\\n --> src/lib.rs:7:5\\n  |\\n7 |     missing\\n  |     ^^^^^^^ not found in this scope\\n\"}}}\n{\"reason\":\"build-finished\",\"success\":false}\n",
-      "expected_output": "(compiled successfully)",
+      "expected_output": "{\"reason\":\"compiler-artifact\",\"package_id\":\"demo 0.1.0\",\"target\":{\"name\":\"demo\"}}\n{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"message\":\"cannot find value `missing` in this scope\",\"code\":{\"code\":\"E0425\"},\"spans\":[{\"file_name\":\"src/lib.rs\",\"line_start\":7,\"column_start\":5,\"line_end\":7,\"column_end\":12,\"text\":[{\"text\":\"    missing\",\"highlight_start\":5,\"highlight_end\":12}]}],\"rendered\":\"error[E0425]: cannot find value `missing` in this scope\\n --> src/lib.rs:7:5\\n  |\\n7 |     missing\\n  |     ^^^^^^^ not found in this scope\\n\"}}}\n{\"reason\":\"build-finished\",\"success\":false}\n",
       "input_len": 587
     },
     {
@@ -322,7 +322,7 @@
         "query": "Widget"
       },
       "input": "{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":9,\"lines\":{\"text\":\"#[derive(Debug)]\\n\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":10,\"lines\":{\"text\":\"pub struct Widget;\\n\"}}}\n{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"src/lib.rs\"},\"line_number\":11,\"lines\":{\"text\":\"impl Widget {\\n\"}}}\n{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"src/ui.rs\"},\"line_number\":42,\"submatches\":[{\"match\":{\"text\":\"Widget\"},\"start\":7,\"end\":13}]}}\n{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"human\":\"0.01s\"}}}\n",
-      "expected_output": "(no matches)",
+      "expected_output": "2 files, 2 matches:\n\nsrc/lib.rs:\n  10: pub struct Widget;\n\nsrc/ui.rs:\n  42: Widget",
       "input_len": 527
     },
     {

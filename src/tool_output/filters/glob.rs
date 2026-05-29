@@ -12,7 +12,7 @@ pub(in crate::tool_output) fn filter_glob_output(output: &str) -> String {
         .collect::<Vec<_>>();
 
     if paths.is_empty() {
-        return "(no matches)".to_string();
+        return output.to_string();
     }
 
     if paths.len() <= MAX_RESULTS {

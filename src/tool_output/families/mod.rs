@@ -12,6 +12,14 @@ use super::filters::{filter_glob_output, filter_grep_output, filter_read_output}
 
 pub(super) use generic::filter_generic_output;
 
+pub(super) fn preserve_unknown_or_empty_summary(output: &str, empty_summary: &str) -> String {
+    if output.trim().is_empty() {
+        empty_summary.to_string()
+    } else {
+        output.to_string()
+    }
+}
+
 pub(super) fn filter_bash_output(
     family: &str,
     command: &str,

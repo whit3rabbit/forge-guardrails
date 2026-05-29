@@ -48,8 +48,8 @@ use request_contract::{
     add_proxy_respond_tool_if_needed, extract_forge_bool_field, extract_proxy_step_contract,
     extract_stream_include_usage, extract_tool_call_policy_config,
     extract_tool_output_compression_config, sanitize_guarded_request_options,
-    validate_proxy_step_contract, FORGE_EXTENSION_FIELD, FORGE_REQUIRED_STEPS_FIELD,
-    FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
+    strip_forge_extension_from_body, validate_proxy_step_contract, FORGE_EXTENSION_FIELD,
+    FORGE_REQUIRED_STEPS_FIELD, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
 };
 use response_shape::{
     anthropic_events_stream, text_content_result, text_response_result, tool_calls_result,
@@ -547,7 +547,9 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     let mut request_options = LLMRequestOptions {
         sampling,
         passthrough,
-        inbound_anthropic_body: inbound_anthropic_body.map(Arc::new),
+        inbound_anthropic_body: inbound_anthropic_body
+            .map(strip_forge_extension_from_body)
+            .map(Arc::new),
         initial_openai_messages: None,
     };
 

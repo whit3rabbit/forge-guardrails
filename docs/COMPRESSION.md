@@ -49,7 +49,7 @@ default for that request.
 | Mode | Default | Behavior |
 |---|---:|---|
 | `disabled` | yes | No mutation. |
-| `safe` | no | Redact secrets, strip ANSI, strip thinking blocks, suppress binary output, cap oversized output. |
+| `safe` | no | Redact secrets, strip ANSI, suppress binary output, cap oversized output. |
 | `standard` | no | `safe` plus JSON/table cleanup, tool-family filters, repeated-line folding, whitespace cleanup. |
 | `aggressive` | no | `standard` plus lossy log normalization, JSON-array tabular conversion, and dictionary compression. |
 
@@ -129,7 +129,7 @@ Fields:
 | `session_id` | string | Enables repeated-output dedup across requests for that session. |
 | `dedup` | boolean | Enables or disables dedup. Requires `session_id` to take effect. |
 | `redact_secrets` | boolean | Defaults to true. Redaction runs before other transforms. |
-| `max_output_bytes` | positive integer | Caps retained safe output before standard/aggressive filters. |
+| `max_output_bytes` | positive integer | Caps retained safe output before standard/aggressive filters. Request overrides are capped at 1,048,576 bytes. |
 
 Invalid mode, method, or field types return `400 Bad Request`.
 
@@ -138,8 +138,8 @@ Invalid mode, method, or field types return `400 Bad Request`.
 When enabled, Forge applies transforms in this order:
 
 1. Safe filters:
-   redact secrets, strip ANSI, strip thinking blocks, suppress binary output,
-   and cap oversized output.
+   redact secrets, strip ANSI, suppress binary output, and cap oversized
+   output.
 2. Standard filters:
    minify JSON, minimize table whitespace, route through tool-family filters,
    fold repeated lines, and normalize trailing whitespace.

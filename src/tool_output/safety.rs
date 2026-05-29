@@ -51,12 +51,6 @@ pub(super) fn apply_safe_filters(
         strategies.push("strip_ansi".to_string());
     }
 
-    let stripped = strip_thinking_blocks(&output);
-    if stripped != output {
-        output = stripped;
-        strategies.push("strip_thinking".to_string());
-    }
-
     let capped_output = cap_output(&output, config.max_output_bytes);
     if capped_output != output {
         output = capped_output;
@@ -136,36 +130,6 @@ fn looks_binary(output: &str) -> bool {
 
 fn strip_ansi(output: &str) -> String {
     ANSI_RE.replace_all(output, "").to_string()
-}
-
-fn strip_thinking_blocks(output: &str) -> String {
-    let mut result = Vec::new();
-    let mut in_thinking = false;
-    for line in output.lines() {
-        let lower = line.trim().to_ascii_lowercase();
-        if lower.starts_with("<think")
-            || lower.starts_with("<thinking")
-            || lower.starts_with("<reasoning")
-            || lower.starts_with("<scratchpad")
-            || lower.starts_with("<inner_monologue")
-        {
-            in_thinking = true;
-            continue;
-        }
-        if in_thinking {
-            if lower.contains("</think>")
-                || lower.contains("</thinking>")
-                || lower.contains("</reasoning>")
-                || lower.contains("</scratchpad>")
-                || lower.contains("</inner_monologue>")
-            {
-                in_thinking = false;
-            }
-            continue;
-        }
-        result.push(line.to_string());
-    }
-    preserve_trailing_newline(output, result.join("\n"))
 }
 
 fn cap_output(output: &str, max_bytes: usize) -> String {

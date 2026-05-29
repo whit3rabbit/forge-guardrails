@@ -16,6 +16,10 @@ pub(super) fn minify_json(output: &str) -> Option<String> {
 }
 
 pub(super) fn minimize_table_whitespace(output: &str) -> Option<String> {
+    if looks_like_jsonl(output) {
+        return None;
+    }
+
     let mut changed = false;
     let lines = output
         .lines()
@@ -31,6 +35,29 @@ pub(super) fn minimize_table_whitespace(output: &str) -> Option<String> {
         })
         .collect::<Vec<_>>();
     changed.then(|| preserve_trailing_newline(output, lines.join("\n")))
+}
+
+fn looks_like_jsonl(output: &str) -> bool {
+    let Some(first) = output.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return false;
+    };
+    if !(first.starts_with('{') || first.starts_with('[')) {
+        return false;
+    }
+
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if !(line.starts_with('{') || line.starts_with('[')) {
+            return true;
+        }
+        if serde_json::from_str::<Value>(line).is_err() {
+            return true;
+        }
+    }
+    true
 }
 
 pub(super) fn fold_repeated_lines(output: &str) -> Option<String> {
