@@ -6,18 +6,27 @@ Do not commit downloaded ONNX weights, model snapshots, Hugging Face caches, or
 `target/classifier-artifacts` / `target/final-response-classifier-artifacts`
 outputs. Keep eval model binaries under `target/`.
 
-Latest checked Hub state: 2026-05-27.
+Latest checked Hub state: 2026-05-29.
+Latest local eval review: 2026-05-30, documented in
+[`local_eval_findings_2026-05-30.md`](local_eval_findings_2026-05-30.md).
 
 ## Artifact Repositories
 
 | Artifact | Hugging Face repo | Latest checked revision | Runtime status |
 |---|---|---|---|
-| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `1c87eceea15ec42f755deafb0ac4166bd0bd51b0` | Runnable by Rust ONNX scorer |
-| Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `69d1a75d0fad25e3cf1333c7ea9c7cf0584614a4` | Runnable by Rust ONNX scorer |
+| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `b35b9734b6a3195e335ceb0a11b49d6782fec3b4` | Runnable by Rust ONNX scorer; promoted default eval pin |
+| Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `80593d1e8a11c3fbfb27ee33d4431b839b7aacfc` | Runnable by Rust ONNX scorer; experimental/shadow-only |
 
 Both artifacts are DeBERTa-v3-small text classifiers exported as FP32 ONNX and
 quantized ONNX. Both should start in `shadow` mode. Deterministic Forge
 validation remains authoritative.
+
+Current deployment recommendation: keep both artifact families shadow-only.
+For local active-mode policy, set every non-valid label's advisory and enforce
+thresholds to `1.01` until release replay proves the label is safe. This is
+stricter than the current downloaded threshold metadata for
+`wrong_arguments_semantic`, `tool_not_needed`, `needs_clarification`, and all
+final-response non-valid labels.
 
 ## Download
 
@@ -108,11 +117,11 @@ Latest checked test metrics:
 
 | Metric | Value |
 |---|---:|
-| Accuracy | `0.9729105322763307` |
-| Macro precision | `0.9801958127901861` |
-| Macro recall | `0.9793045374079483` |
-| Macro F1 | `0.9796981345691861` |
-| Test rows | `22075` |
+| Accuracy | `0.9770491803278688` |
+| Macro precision | `0.9832233976323463` |
+| Macro recall | `0.9828910846156007` |
+| Macro F1 | `0.9830369261812494` |
+| Test rows | `22265` |
 
 Important deployment risks:
 
@@ -122,6 +131,11 @@ Important deployment risks:
 - `wrong_tool_semantic` remains conservative because previous Forge telemetry
   showed high-confidence false positives on valid terminal/summarize calls.
 - `needs_clarification` has tiny held-out support and should not be enforced.
+- The promoted default revision changes which artifact eval downloads, not the
+  conservative runtime mode. Keep first replay runs in `shadow`.
+- The 2026-05-30 enforce replay regressed `error_recovery*` because valid
+  zero-padded numeric recovery calls were blocked as `wrong_arguments_semantic`.
+  Keep that label action-disabled until numeric-string semantics are fixed.
 - Valid-call false objections matter more than aggregate F1 for promotion.
 
 ## Final-Response Verifier
@@ -155,15 +169,19 @@ Latest checked test metrics:
 
 | Metric | Value |
 |---|---:|
-| Accuracy | `0.2` |
-| Macro precision | `0.04` |
+| Accuracy | `0.14285714285714285` |
+| Macro precision | `0.02857142857142857` |
 | Macro recall | `0.2` |
-| Macro F1 | `0.06666666666666667` |
-| Test rows | `10` |
+| Macro F1 | `0.05` |
+| Test rows | `14` |
 
 The current published final-response ONNX directory includes
 `onnx/tokenizer.json`, so the Rust `OnnxFinalResponseScorer` can load the local
 artifact directly.
+
+The 2026-05-30 release replay labeled every final response as
+`failed_to_acknowledge_data_gap` at roughly `0.23` confidence. This is not
+useful enough for advisory or enforcement.
 
 ## Eval Usage
 
@@ -221,6 +239,8 @@ Track:
 - `argument_transformation*` recovery
 - `grounded_synthesis*` and data-gap recovery once final-response scoring is available
 - p95/p99 classifier latency
+- proxy RSS and CPU impact for each artifact family
+- zero-padded numeric-string semantics, especially `0010` versus `10`
 
 ## Runtime Invariant
 

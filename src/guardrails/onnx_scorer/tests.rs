@@ -2,11 +2,14 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use super::cache::ScoreCache;
+use super::final_response::OnnxFinalResponseScorer;
 use super::softmax;
 use super::tool_call::OnnxToolCallScorer;
 use crate::clients::base::ToolCall;
-use crate::guardrails::scoring::{ScorerMode, ToolCallScorer};
-use crate::guardrails::scoring_context::ScoringContext;
+use crate::guardrails::scoring::{
+    FinalResponseContext, FinalResponseScorer, FinalResponseToolResult, ScorerMode, ToolCallScorer,
+};
+use crate::guardrails::scoring_context::{ScoringContext, WorkflowStateForScoring};
 
 #[test]
 fn softmax_sums_to_one() {
@@ -55,6 +58,38 @@ fn onnx_fixture_scores_without_panic_when_test_dir_is_set() {
     let candidate = candidate_from_fixture(&fixture);
     let expected_logits = scorer.labels.len();
     let score = scorer.score(&ctx, &candidate).expect("score");
+
+    assert_eq!(score.logits.len(), expected_logits);
+}
+
+#[test]
+fn final_response_onnx_fixture_scores_without_panic_when_test_dir_is_set() {
+    let Ok(dir) = std::env::var("FORGE_FINAL_RESPONSE_CLASSIFIER_TEST_DIR") else {
+        return;
+    };
+    let scorer = OnnxFinalResponseScorer::from_dir(dir.as_str(), Some(ScorerMode::Shadow))
+        .expect("final-response scorer");
+    let ctx = FinalResponseContext {
+        schema_version: "final-response-verifier-input/v1".to_string(),
+        user_request: "Summarize the lookup result.".to_string(),
+        workflow_state: WorkflowStateForScoring {
+            required_steps: vec!["lookup".to_string()],
+            completed_steps: vec!["lookup".to_string()],
+            pending_steps: Vec::new(),
+            terminal_tools: vec!["respond".to_string()],
+            recent_errors: Vec::new(),
+        },
+        required_facts: vec!["Paris is the capital of France.".to_string()],
+        tool_trace: vec!["lookup".to_string()],
+        tool_results: vec![FinalResponseToolResult {
+            tool_name: "lookup".to_string(),
+            content: "Paris is the capital of France.".to_string(),
+        }],
+        candidate_final_response: "Paris is the capital of France.".to_string(),
+        metadata: None,
+    };
+    let expected_logits = scorer.labels.len();
+    let score = scorer.score(&ctx).expect("final-response score");
 
     assert_eq!(score.logits.len(), expected_logits);
 }

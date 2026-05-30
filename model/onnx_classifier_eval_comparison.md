@@ -4,6 +4,12 @@
 
 This note compares two local Forge release evaluations for `Ministral-3-8B-Instruct-2512-Q8_0`: a baseline run without the ONNX classifier and a run with the ONNX classifier enabled in shadow mode. The observed score increased from `83.8%` to `84.2%`, a net gain of one correct row out of `260`. This is not sufficient evidence that ONNX improved behavior. The classifier was configured as `shadow`, so its predictions were telemetry and did not enforce, block, or alter tool calls. The most defensible interpretation is that the small score change reflects stochastic generation variance, while the classifier added latency and exposed false-positive risk.
 
+Follow-up review: [`local_eval_findings_2026-05-30.md`](local_eval_findings_2026-05-30.md)
+compares the later `release-onnx-enforce` and `release-onnx-final-shadow`
+runs. It confirms that tool-call enforcement made `error_recovery*` worse and
+that the final-response verifier remained shadow-only telemetry with material
+proxy memory cost.
+
 ## Materials and Method
 
 Artifacts reviewed:

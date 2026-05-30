@@ -5,7 +5,12 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
+use serde::Serialize;
+
 use crate::clients::base::ToolCall;
+use crate::guardrails::classifier_artifact::{
+    EXPECTED_LABELS, FINAL_RESPONSE_EXPECTED_LABELS, LEGACY_EXPECTED_LABELS,
+};
 use crate::guardrails::scoring_context::{
     ScoringContext, ScoringMetadata, WorkflowStateForScoring,
 };
@@ -93,6 +98,81 @@ impl ToolCallClass {
             Self::Unknown(label) => Cow::Borrowed(label.as_str()),
         }
     }
+}
+
+/// One classifier label probability entry for telemetry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClassifierTopKEntry {
+    /// Label name in the classifier artifact.
+    pub label: String,
+    /// Softmax probability for this label.
+    pub confidence: f32,
+    /// Raw logit for this label.
+    pub logit: f32,
+}
+
+/// Return sorted top-k label probabilities for tool-call logits.
+///
+/// Unknown label orders return an empty vector rather than emitting misleading
+/// telemetry.
+pub fn tool_call_top_k_from_logits(logits: &[f32]) -> Vec<ClassifierTopKEntry> {
+    if logits.len() == EXPECTED_LABELS.len() {
+        top_k_from_logits(&EXPECTED_LABELS, logits)
+    } else if logits.len() == LEGACY_EXPECTED_LABELS.len() {
+        top_k_from_logits(&LEGACY_EXPECTED_LABELS, logits)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Return sorted top-k label probabilities for final-response logits.
+///
+/// Unknown label orders return an empty vector rather than emitting misleading
+/// telemetry.
+pub fn final_response_top_k_from_logits(logits: &[f32]) -> Vec<ClassifierTopKEntry> {
+    if logits.len() == FINAL_RESPONSE_EXPECTED_LABELS.len() {
+        top_k_from_logits(&FINAL_RESPONSE_EXPECTED_LABELS, logits)
+    } else {
+        Vec::new()
+    }
+}
+
+fn top_k_from_logits(labels: &[&str], logits: &[f32]) -> Vec<ClassifierTopKEntry> {
+    let probs = softmax_for_telemetry(logits);
+    let mut entries = labels
+        .iter()
+        .zip(logits.iter())
+        .zip(probs.iter())
+        .map(|((label, logit), confidence)| ClassifierTopKEntry {
+            label: (*label).to_string(),
+            confidence: *confidence,
+            logit: *logit,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    entries.truncate(entries.len().min(8));
+    entries
+}
+
+fn softmax_for_telemetry(logits: &[f32]) -> Vec<f32> {
+    if logits.is_empty() {
+        return Vec::new();
+    }
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exps = logits
+        .iter()
+        .map(|logit| (*logit - max).exp())
+        .collect::<Vec<_>>();
+    let sum: f32 = exps.iter().sum();
+    if sum == 0.0 || !sum.is_finite() {
+        return vec![0.0; logits.len()];
+    }
+    exps.into_iter().map(|value| value / sum).collect()
 }
 
 /// Classifier recommendation after thresholds and mode are applied.

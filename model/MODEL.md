@@ -32,16 +32,16 @@ model-index:
         metrics:
           - name: Accuracy
             type: accuracy
-            value: 0.9729105322763307
+            value: 0.9770491803278688
           - name: Macro F1
             type: f1
-            value: 0.9796981345691861
+            value: 0.9830369261812494
           - name: Macro Precision
             type: precision
-            value: 0.9801958127901861
+            value: 0.9832233976323463
           - name: Macro Recall
             type: recall
-            value: 0.9793045374079483
+            value: 0.9828910846156007
 ---
 
 # Tool-call Verifier Classifier Production
@@ -63,9 +63,10 @@ The intended deployment pattern is conservative: deterministic guardrails remain
 | Deployment default | `shadow` |
 | Primary artifact | `model.onnx` |
 | Quantized artifact | `model_quantized.onnx` |
-| Required tokenizer files | `tokenizer_config.json`, `special_tokens_map.json`, `spm.model` |
+| Required tokenizer files | `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, `added_tokens.json`, `spm.model` |
 | Threshold file | `thresholds.json` |
 | Manifest file | `artifact_manifest.json` |
+| Promoted default/eval revision | `b35b9734b6a3195e335ceb0a11b49d6782fec3b4` |
 
 ## Intended use
 
@@ -133,21 +134,22 @@ Split sizes:
 
 | Split | Rows |
 |---|---:|
-| Train | 176,705 |
-| Validation | 10,819 |
-| Test | 22,075 |
+| Train | 178,545 |
+| Calibration | 11,075 |
+| Validation | 11,082 |
+| Test | 22,265 |
 
 Best validation checkpoint:
 
 | Metric | Value |
 |---|---:|
-| Best checkpoint | `/content/toolcall-verifier/model/checkpoint-15505` |
+| Best checkpoint | `/content/toolcall-verifier/model/checkpoint-15665` |
 | Selection metric | `macro_f1` |
-| Validation loss | 0.07549399137496948 |
-| Validation accuracy | 0.973380164525372 |
-| Validation macro precision | 0.980623200539544 |
-| Validation macro recall | 0.9800955285359482 |
-| Validation macro F1 | 0.9803291996618319 |
+| Validation loss | 0.07397261261940002 |
+| Validation accuracy | 0.9762678216928352 |
+| Validation macro precision | 0.9824560833904975 |
+| Validation macro recall | 0.9820312268109691 |
+| Validation macro F1 | 0.9822315582439032 |
 
 ## Test metrics
 
@@ -155,46 +157,48 @@ Held-out test set metrics:
 
 | Metric | Value |
 |---|---:|
-| Test loss | 0.0744357779622078 |
-| Accuracy | 0.9729105322763307 |
-| Macro precision | 0.9801958127901861 |
-| Macro recall | 0.9793045374079483 |
-| Macro F1 | 0.9796981345691861 |
-| Samples/sec | 686.863 |
-| Steps/sec | 5.383 |
+| Test loss | 0.061976924538612366 |
+| Accuracy | 0.9770491803278688 |
+| Macro precision | 0.9832233976323463 |
+| Macro recall | 0.9828910846156007 |
+| Macro F1 | 0.9830369261812494 |
+| Samples/sec | 682.714 |
+| Steps/sec | 5.335 |
 
 Per-label test report:
 
 | Label | Precision | Recall | F1 | Support |
 |---|---:|---:|---:|---:|
-| `valid` | 0.94 | 0.97 | 0.95 | 4,955 |
-| `wrong_tool_semantic` | 0.97 | 0.96 | 0.96 | 4,960 |
-| `wrong_arguments_semantic` | 0.98 | 0.98 | 0.98 | 5,005 |
-| `tool_not_needed` | 1.00 | 0.99 | 1.00 | 2,029 |
-| `needs_clarification` | 1.00 | 1.00 | 1.00 | 10 |
-| `deterministic_invalid` | 0.99 | 0.98 | 0.99 | 5,116 |
-| **Macro avg** | **0.98** | **0.98** | **0.98** | **22,075** |
-| **Weighted avg** | **0.97** | **0.97** | **0.97** | **22,075** |
+| `valid` | 0.95 | 0.97 | 0.96 | 5,042 |
+| `wrong_tool_semantic` | 0.98 | 0.96 | 0.97 | 5,106 |
+| `wrong_arguments_semantic` | 0.98 | 0.98 | 0.98 | 5,033 |
+| `tool_not_needed` | 1.00 | 1.00 | 1.00 | 2,049 |
+| `needs_clarification` | 1.00 | 1.00 | 1.00 | 8 |
+| `deterministic_invalid` | 0.99 | 0.99 | 0.99 | 5,027 |
+| **Macro avg** | **0.98** | **0.98** | **0.98** | **22,265** |
+| **Weighted avg** | **0.98** | **0.98** | **0.98** | **22,265** |
 
 Per-source test accuracy:
 
 | Source | Rows | Accuracy | Avg confidence |
 |---|---:|---:|---:|
-| `Salesforce/xlam-function-calling-60k` | 14,234 | 0.973444 | 0.983573 |
-| `glaiveai/glaive-function-calling-v2` | 5,449 | 0.971738 | 0.981286 |
-| `Team-ACE/ToolACE` | 2,380 | 0.973109 | 0.982948 |
-| `forge_augmented` | 12 | 1.000000 | 0.999698 |
+| `Salesforce/xlam-function-calling-60k` | 14,710 | 0.978110 | 0.986481 |
+| `glaiveai/glaive-function-calling-v2` | 4,941 | 0.977130 | 0.985937 |
+| `Team-ACE/ToolACE` | 2,299 | 0.970857 | 0.983688 |
+| `agent_training_hf` | 274 | 0.978102 | 0.989761 |
+| `forge_trace` | 30 | 0.933333 | 0.971542 |
+| `forge_augmented` | 11 | 0.909091 | 0.971169 |
 
 Per-label test accuracy:
 
 | True label | Rows | Accuracy | Avg confidence |
 |---|---:|---:|---:|
-| `deterministic_invalid` | 5,116 | 0.980258 | 0.992830 |
-| `wrong_arguments_semantic` | 5,005 | 0.980819 | 0.989488 |
-| `wrong_tool_semantic` | 4,960 | 0.956855 | 0.971546 |
-| `valid` | 4,955 | 0.965691 | 0.972742 |
-| `tool_not_needed` | 2,029 | 0.992607 | 0.994770 |
-| `needs_clarification` | 10 | 1.000000 | 0.971681 |
+| `wrong_tool_semantic` | 5,106 | 0.961614 | 0.976973 |
+| `valid` | 5,042 | 0.965093 | 0.976443 |
+| `wrong_arguments_semantic` | 5,033 | 0.983310 | 0.991983 |
+| `deterministic_invalid` | 5,027 | 0.990253 | 0.994170 |
+| `tool_not_needed` | 2,049 | 0.997072 | 0.998249 |
+| `needs_clarification` | 8 | 1.000000 | 0.972783 |
 
 ## Confusion matrix
 
@@ -202,28 +206,39 @@ Rows are true labels. Columns are predicted labels.
 
 | True \\ Predicted | `valid` | `wrong_tool_semantic` | `wrong_arguments_semantic` | `tool_not_needed` | `needs_clarification` | `deterministic_invalid` |
 |---|---:|---:|---:|---:|---:|---:|
-| `valid` | 4,785 | 76 | 74 | 0 | 0 | 20 |
-| `wrong_tool_semantic` | 195 | 4,746 | 8 | 0 | 0 | 11 |
-| `wrong_arguments_semantic` | 75 | 18 | 4,909 | 0 | 0 | 3 |
-| `tool_not_needed` | 1 | 13 | 0 | 2,014 | 0 | 1 |
-| `needs_clarification` | 0 | 0 | 0 | 0 | 10 | 0 |
-| `deterministic_invalid` | 49 | 50 | 2 | 0 | 0 | 5,015 |
+| `valid` | 4,866 | 72 | 87 | 0 | 0 | 17 |
+| `wrong_tool_semantic` | 167 | 4,910 | 13 | 0 | 0 | 16 |
+| `wrong_arguments_semantic` | 65 | 13 | 4,949 | 0 | 0 | 6 |
+| `tool_not_needed` | 1 | 4 | 0 | 2,043 | 0 | 1 |
+| `needs_clarification` | 0 | 0 | 0 | 0 | 8 | 0 |
+| `deterministic_invalid` | 18 | 31 | 0 | 0 | 0 | 4,978 |
 
 ## Threshold policy
 
-The exported default mode is `shadow`, with default action `allow`. These thresholds should be treated as deployment policy metadata, not as proof that enforcement is safe in a new environment.
+The exported default mode is `shadow`, with default action `allow`. Thresholds
+are deployment policy metadata, not proof that enforcement is safe.
+
+The 2026-05-30 local release replay showed that the downloaded
+`wrong_arguments_semantic` active thresholds are unsafe for Forge: valid
+zero-padded numeric recovery calls such as `{"count":"0010"}` were blocked,
+while invalid unpadded calls such as `{"count":"10"}` were allowed as valid.
+The recommended local active-mode policy is therefore stricter than the
+downloaded threshold file: keep every non-valid ML label action-disabled until
+targeted replay proves the label safe.
 
 ```json
 {
   "schema_version": "toolcall-verifier-thresholds/v1",
   "mode": "shadow",
   "default_action": "allow",
-  "temperature": 1.1155287027359009,
+  "temperature": 1.1033822298049927,
   "notes": [
     "Deterministic guardrails remain authoritative.",
     "Use ML in shadow mode first, then advisory nudges, then high-confidence enforcement only after eval proof.",
-    "deterministic_invalid is never enforced by ML in this default config.",
-    "wrong_tool_semantic stays conservative because current Forge telemetry showed high-confidence false positives on valid terminal/summarize calls."
+    "All non-valid labels remain action-disabled for the current Forge deployment recommendation.",
+    "wrong_arguments_semantic is action-disabled because the 2026-05-30 replay produced high-confidence false blocks on zero-padded numeric strings.",
+    "wrong_tool_semantic stays action-disabled because Forge telemetry showed high-confidence false positives on valid terminal/summarize calls.",
+    "deterministic_invalid is never enforced by ML."
   ],
   "labels": {
     "valid": {
@@ -232,24 +247,24 @@ The exported default mode is `shadow`, with default action `allow`. These thresh
       "enforce_min_confidence": 1.01
     },
     "wrong_tool_semantic": {
-      "action": "advisory_then_enforce_after_eval",
+      "action": "shadow_only_until_eval_proven",
       "advisory_min_confidence": 1.01,
       "enforce_min_confidence": 1.01
     },
     "wrong_arguments_semantic": {
-      "action": "advisory_then_enforce_after_eval",
-      "advisory_min_confidence": 0.9,
-      "enforce_min_confidence": 0.995
+      "action": "shadow_only_until_numeric_semantics_fixed",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
     },
     "tool_not_needed": {
-      "action": "advisory_then_enforce_after_eval",
-      "advisory_min_confidence": 0.8,
-      "enforce_min_confidence": 0.95
+      "action": "shadow_only_until_eval_proven",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
     },
     "needs_clarification": {
-      "action": "advisory_then_enforce_after_eval",
-      "advisory_min_confidence": 0.8,
-      "enforce_min_confidence": 0.95
+      "action": "shadow_only_until_eval_proven",
+      "advisory_min_confidence": 1.01,
+      "enforce_min_confidence": 1.01
     },
     "deterministic_invalid": {
       "action": "deterministic_only",
@@ -292,7 +307,7 @@ CANDIDATE_CALL:
 {"arguments": {"summary": "Done."}, "name": "report"}
 ```
 
-For this fixture, both PyTorch and ONNX selected `deterministic_invalid`, with a reported max absolute logit difference of `6.67572021484375e-06`.
+For the exported parity report, PyTorch and FP32 ONNX agreed on the top label for every sampled row, with a reported max absolute logit difference of `9.655952453613281e-06`. Quantized ONNX was less exact on that sample: top-label agreement was `0.9299610894941635`, with `18` disagreements across `257` rows and a max absolute difference of `7.591222286224365`.
 
 ## Inference
 
@@ -335,7 +350,12 @@ input_schema.json
 serializer_fixture.json
 tokenizer_config.json
 special_tokens_map.json
+added_tokens.json
 spm.model
+config.json
+test_metrics.json
+training_metrics.json
+training_run_summary.json
 ```
 
 Runtime integrations should byte-compare their serializer output against `serializer_fixture.json` before trusting model scores. This catches train/inference drift.
@@ -387,8 +407,12 @@ Loading failures should fail closed for strict deployment modes. Scoring failure
 - Keep the model in `shadow` mode until eval replay confirms behavior on your real traffic and workflow families.
 - Do not use `deterministic_invalid` predictions to enforce blocks. Deterministic Rust guardrails own those decisions.
 - `wrong_tool_semantic` is intentionally disabled by threshold values above `1.0` because the current telemetry showed high-confidence false positives on otherwise valid terminal/summarize calls.
+- `wrong_arguments_semantic` should also stay disabled for active action. The 2026-05-30 replay produced high-confidence false blocks on valid zero-padded numeric strings and high-confidence false allows on invalid unpadded numeric strings.
 - High-confidence mistakes were observed, including valid calls predicted as deterministic or wrong-argument failures. Use per-family replay, not only aggregate F1, before promotion.
-- The `needs_clarification` test support is small (`10` rows), so treat that label as under-validated despite the perfect held-out score.
+- Valid-call false block rates from the latest run were `70/5042 = 0.0139` at confidence `0.80`, `57/5042 = 0.0113` at `0.90`, `43/5042 = 0.0085` at `0.95`, `28/5042 = 0.0056` at `0.98`, and `16/5042 = 0.0032` at `0.99`.
+- The `needs_clarification` test support is small (`8` rows), so treat that label as under-validated despite the perfect held-out score.
+- For fixed-width numeric strings, train and evaluate both representation and value. A four-digit count field has a structural range of `0000` through `9999`, but a request for `10` records is semantically correct only as `0010` for that tool.
+- The latest local eval/resource review is documented in [`local_eval_findings_2026-05-30.md`](local_eval_findings_2026-05-30.md).
 - Validate public dataset licenses and any Forge-derived traces before publishing derived artifacts broadly.
 
 ## Tokenizer notes
@@ -397,24 +421,33 @@ The training run emitted tokenizer warnings around slow-to-fast conversion and r
 
 If your Transformers version emits a Mistral regex warning for the local artifact, load with the appropriate `fix_mistral_regex=True` setting where supported. For Rust deployment, verify whether `tokenizer.json` is present and equivalent. If tokenizer parity is uncertain, use a sidecar scorer process until the tokenizer path is proven.
 
-## ONNX parity and latency smoke check
+## ONNX parity check
 
-A smoke test from the latest run reported:
+The latest downloaded `onnx_parity_report.json` reported:
 
 | Check | Value |
 |---|---:|
-| Example latency | 126.49 ms |
-| PyTorch top label | `deterministic_invalid` |
-| ONNX top label | `deterministic_invalid` |
-| Max absolute difference | `6.67572021484375e-06` |
+| Rows | 257 |
+| PyTorch/FP32 ONNX top-label agreement | 1.0 |
+| PyTorch/FP32 ONNX max absolute difference | `9.655952453613281e-06` |
+| Quantized artifact present | true |
+| FP32/quantized top-label agreement | 0.9299610894941635 |
+| FP32/quantized disagreements | 18 |
+| FP32/quantized max absolute difference | `7.591222286224365` |
 
-This is a single-fixture smoke check, not a full deployment benchmark. Run larger parity checks on the exported `onnx_parity_report.json` and real replay traces before using quantized artifacts in advisory or enforcement mode.
+This is an artifact parity report, not a full deployment benchmark. The quantized disagreement rate is a concrete reason to keep quantized deployments in `shadow` until replay traces prove the thresholds are safe.
 
 ## Related final-response verifier
 
 The notebook can also train a separate final-response verifier with labels such as `valid_final_response`, `missing_tool_fact`, `contradicts_tool_result`, `unsupported_claim`, and `failed_to_acknowledge_data_gap`. That verifier is a separate artifact family and should be documented, evaluated, and deployed independently from this tool-call verifier.
 
-The latest final-response run was small: `90` total rows split into `70` train, `10` validation, and `10` test rows. Its validation macro F1 remained low in the shown run, so it should stay experimental/shadow-only until the dataset is materially expanded.
+The latest final-response run was small: `128` total rows split into `97` train, `17` validation, and `14` test rows. Its held-out macro F1 was `0.05`, so it should stay experimental/shadow-only until the dataset is materially expanded.
+
+The 2026-05-30 release replay also showed poor runtime separation: `302/302`
+final responses were labeled `failed_to_acknowledge_data_gap` at roughly `0.23`
+confidence. Keep all final-response non-valid labels action-disabled with
+`advisory_min_confidence=1.01` and `enforce_min_confidence=1.01` until top-k
+telemetry and expanded eval data show useful separation.
 
 ## Limitations
 
@@ -422,8 +455,9 @@ The latest final-response run was small: `90` total rows split into `70` train, 
 - It assumes deterministic validation has already run.
 - It is sensitive to serializer drift, tokenizer drift, and tool-list truncation.
 - Aggregate metrics are strong, but valid-call false positives are more important than headline macro F1 for enforcement.
-- The `forge_augmented` test slice shown in the run contains only `12` rows, so it is useful as a smoke signal, not as sufficient Forge coverage.
+- The Forge-specific test slices are still small: `forge_trace` has `30` rows and `forge_augmented` has `11` rows. They are useful smoke signals, not sufficient Forge coverage.
 - The final-response verifier path in the notebook is not mature enough for enforcement based on the shown data.
+- Resource cost is not free: the local final-response shadow run raised proxy mean RSS from `416.82 MiB` in the tool-call-only enforce run to `906.51 MiB`, with proxy p95 RSS rising from `603.73 MiB` to `1276.23 MiB`.
 
 ## Recommended eval replay before promotion
 
@@ -444,5 +478,6 @@ Promotion criteria should include:
 - no regression in summarize/report workflows,
 - improved targeted scenario-family scores,
 - acceptable p95/p99 latency,
+- acceptable proxy RSS and CPU budgets with resource sampling enabled,
 - PyTorch/ONNX/quantized parity on replay traces,
 - stable behavior across real tool schemas, not only public function-calling datasets.

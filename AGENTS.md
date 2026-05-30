@@ -89,14 +89,15 @@ Makefile shortcuts:
 
 ```bash
 make build
+make build-release
 make fmt-check
 make clippy
 make test
 ```
 
-`make build`, `make check`, `make test`, and `make clippy` use
-`FEATURES=classifier` by default. Override with `FEATURES=""` when a no-feature
-build is intentional.
+`make build`, `make build-release`, `make check`, `make test`, and
+`make clippy` use `FEATURES=classifier` by default. Override with
+`FEATURES=""` when a no-feature build is intentional.
 
 Focused eval/parity checks:
 
@@ -110,6 +111,8 @@ cargo test --bin forge-eval
 python scripts/eval_openai_proxy.py --help
 scripts/run_local_eval.sh --suite smoke --runs 1
 make eval-smoke
+make eval-smoke-classify
+make eval-smoke-final-response
 ```
 
 Verifier model training:
@@ -305,6 +308,19 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 make eval-release-classify
 ```
 
+Final-response verifier shadow benchmark, downloading verifier artifacts if
+missing:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
+  --classifier-mode shadow \
+  --verify-final-response \
+  --final-response-classifier-mode shadow \
+  --output-dir target/local-eval/release-onnx-final-shadow
+make eval-release-final-response-shadow
+```
+
 ONNX classifier mode comparison:
 
 ```bash
@@ -324,15 +340,21 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 make eval-release OUTPUT_DIR=target/local-eval/release-baseline
 make eval-release-classify OUTPUT_DIR=target/local-eval/release-onnx-shadow
 make eval-release-classify CLASSIFIER_MODE=enforce OUTPUT_DIR=target/local-eval/release-onnx-enforce
+make eval-release-classify-shadow OUTPUT_DIR=target/local-eval/release-onnx-shadow
+make eval-release-classify-advisory OUTPUT_DIR=target/local-eval/release-onnx-advisory
+make eval-release-classify-enforce OUTPUT_DIR=target/local-eval/release-onnx-enforce
 ```
 
 The Makefile eval targets enable `--resource-baseline` by default. Use
-`RESOURCE_INTERVAL=...`, `RUNS=...`, `OUTPUT_DIR=...`, and `EVAL_ARGS="..."`
-to pass common overrides without editing the launcher.
+`RESOURCE_INTERVAL=...`, `RUNS=...`, `OUTPUT_DIR=...`,
+`CLASSIFIER_MODE=...`, `FINAL_RESPONSE_CLASSIFIER_MODE=...`, and
+`EVAL_ARGS="..."` to pass common overrides without editing the launcher.
 
-When evaluating a final-response verifier, include the matching
-`--final-response-classifier-dir`, `--final-response-classifier-mode`, and
-`--final-response-classifier-model` flags.
+Use `make eval-release-final-response` for release evals with both the
+tool-call classifier and final-response verifier enabled. It uses
+`CLASSIFIER_MODE=shadow` and `FINAL_RESPONSE_CLASSIFIER_MODE=shadow` by
+default. Use `make eval-release-final-response-shadow` for the standard shadow
+output directory `target/local-eval/release-onnx-final-shadow`.
 
 For eval convenience, `scripts/run_local_eval.sh --classify` uses the same
 user-facing cache as `forge-guardrails-proxy --classify-download`,

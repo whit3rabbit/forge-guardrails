@@ -69,6 +69,7 @@ DOWNLOAD_CLASSIFIER=0
 FINAL_RESPONSE_CLASSIFIER_DIR="${FORGE_FINAL_RESPONSE_CLASSIFIER_DIR:-}"
 FINAL_RESPONSE_CLASSIFIER_MODE="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODE:-shadow}"
 FINAL_RESPONSE_CLASSIFIER_MODEL="${FORGE_FINAL_RESPONSE_CLASSIFIER_MODEL:-quantized}"
+VERIFY_FINAL_RESPONSE=0
 DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=0
 if [[ "${FORGE_RESOURCE_BASELINE:-}" =~ ^(1|true|yes|on)$ ]]; then
   RESOURCE_BASELINE=1
@@ -122,6 +123,7 @@ Options:
                             disabled|shadow|advisory|enforce (default: $FINAL_RESPONSE_CLASSIFIER_MODE)
   --final-response-classifier-model MODEL
                             quantized|full (default: $FINAL_RESPONSE_CLASSIFIER_MODEL)
+  --verify-final-response   Enable final-response verifier shortcut; download if missing
   --download-final-response-classifier
                             Download final-response classifier artifacts before running
   --resource-baseline       Capture proxy/backend CPU and RSS stats during eval windows
@@ -134,6 +136,7 @@ Examples:
   $PROGRAM_NAME --suite release --runs 10
   $PROGRAM_NAME --suite release --runs 10 --classify
   $PROGRAM_NAME --suite release --runs 10 --classify --classifier-mode shadow
+  $PROGRAM_NAME --suite release --runs 10 --classify --classifier-mode shadow --verify-final-response
   $PROGRAM_NAME --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
   $PROGRAM_NAME --suite release --runs 10 --download-classifier
 EOF
@@ -802,6 +805,7 @@ classifier_dir=$CLASSIFIER_DIR
 classifier_mode=$CLASSIFIER_MODE
 classifier_model=$CLASSIFIER_MODEL
 final_response_classifier_enabled=$final_response_classifier_enabled_value
+verify_final_response_shortcut=$VERIFY_FINAL_RESPONSE
 final_response_classifier_dir=$FINAL_RESPONSE_CLASSIFIER_DIR
 final_response_classifier_mode=$FINAL_RESPONSE_CLASSIFIER_MODE
 final_response_classifier_model=$FINAL_RESPONSE_CLASSIFIER_MODEL
@@ -914,6 +918,11 @@ while [[ $# -gt 0 ]]; do
       FINAL_RESPONSE_CLASSIFIER_MODEL="$(next_arg "$1" "${2:-}")"
       shift 2
       ;;
+    --verify-final-response)
+      VERIFY_FINAL_RESPONSE=1
+      DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=1
+      shift
+      ;;
     --download-final-response-classifier)
       DOWNLOAD_FINAL_RESPONSE_CLASSIFIER=1
       shift
@@ -998,6 +1007,9 @@ case "$FINAL_RESPONSE_CLASSIFIER_MODEL" in
     die "--final-response-classifier-model must be quantized or full"
     ;;
 esac
+if [[ "$VERIFY_FINAL_RESPONSE" == "1" && "$FINAL_RESPONSE_CLASSIFIER_MODE" == "disabled" ]]; then
+  die "--verify-final-response cannot be used with --final-response-classifier-mode disabled"
+fi
 valid_positive_int "$RUNS" || die "--runs must be a positive integer"
 valid_positive_int "$PROXY_PORT" || die "--proxy-port must be a positive integer"
 valid_positive_int "$BACKEND_PORT" || die "--backend-port must be a positive integer"

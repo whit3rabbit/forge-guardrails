@@ -12,13 +12,13 @@ use crate::guardrails::scoring::{FinalResponseClass, ToolCallClass};
 /// Default Hugging Face model repository for the tool-call verifier.
 pub const DEFAULT_CLASSIFIER_REPO: &str = "cowWhySo/toolcall-verifier-classifier-production";
 /// Pinned Hugging Face revision used by the downloader unless overridden.
-pub const DEFAULT_CLASSIFIER_REVISION: &str = "1c87eceea15ec42f755deafb0ac4166bd0bd51b0";
+pub const DEFAULT_CLASSIFIER_REVISION: &str = "b35b9734b6a3195e335ceb0a11b49d6782fec3b4";
 /// Default Hugging Face model repository for the final-response verifier.
 pub const DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO: &str =
     "cowWhySo/final-response-verifier-classifier-production";
 /// Pinned Hugging Face revision used by the final-response downloader unless overridden.
 pub const DEFAULT_FINAL_RESPONSE_CLASSIFIER_REVISION: &str =
-    "69d1a75d0fad25e3cf1333c7ea9c7cf0584614a4";
+    "80593d1e8a11c3fbfb27ee33d4431b839b7aacfc";
 /// Expected classifier artifact schema version.
 pub const EXPECTED_ARTIFACT_SCHEMA_VERSION: &str = "toolcall-verifier-artifact/v1";
 /// Expected classifier input schema version.
