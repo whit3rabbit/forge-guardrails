@@ -40,6 +40,30 @@ Supports Ollama, llama-server (llama.cpp), Llamafile, Anthropic, and anyllm-rout
 
 ## Install
 
+Install the proxy binary:
+
+```bash
+# macOS, using the Homebrew cask
+brew install --cask whit3rabbit/tap/forge-guardrails-proxy
+
+# macOS or Linux, from crates.io
+cargo install forge-guardrails --locked --bin forge-guardrails-proxy
+```
+
+Use it with an existing OpenAI-compatible local backend:
+
+```bash
+forge-guardrails-proxy \
+  --backend-url http://localhost:8080 \
+  --port 8081
+```
+
+Then point OpenAI-compatible clients at `http://localhost:8081/v1`.
+Requests should include their own `model` field. The proxy does not pick a
+default upstream model unless you explicitly set `--model`, `FORGE_MODEL`, or
+`SMALL_MODEL`; managed `ollama` still requires `--model`, and managed
+`llamaserver` / `llamafile` use `--gguf`.
+
 Add to your `Cargo.toml`:
 
 ```toml
@@ -71,6 +95,26 @@ The `forge/` submodule contains the Python reference for fixture generation and 
 git submodule update --init --recursive
 ```
 
+### Release
+
+Release is tag-driven. After the version in `Cargo.toml` is ready and `main`
+is pushed, create and push a matching tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow verifies the tag matches the crate version, runs format,
+clippy, tests, `cargo package`, and `cargo publish`, builds platform archives
+for `forge-guardrails-proxy`, publishes the GitHub release, then updates
+`whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is configured. Users can
+install the cask with:
+
+```bash
+brew install --cask whit3rabbit/tap/forge-guardrails-proxy
+```
+
 ### Backend setup (pick one)
 
 **llama-server** (recommended — top eval configs all run on llama-server):
@@ -97,7 +141,7 @@ See [Backend Setup](docs/BACKEND_SETUP.md) for full instructions.
 
 ## Quick Start
 
-Start llama-server (in a separate shell). Download the recommended model from [HuggingFace](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) first:
+Start llama-server in a separate shell. Download the recommended model from [HuggingFace](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) first:
 
 ```bash
 llama-server -m path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
@@ -213,7 +257,7 @@ cargo run --bin forge-guardrails-proxy -- \
 See [Tool Output Compression](docs/COMPRESSION.md) for modes, request-level
 `_forge` overrides, and method details.
 
-Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`.
+Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`. Requests without `model` are rejected unless you explicitly configured a fallback with `--model`, `FORGE_MODEL`, or `SMALL_MODEL`.
 
 **Backend compatibility:**
 
@@ -269,7 +313,7 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 |---|---|---|
 | `FORGE_HOST` | `0.0.0.0` | Bind address |
 | `FORGE_PORT` / `PORT` / `LISTEN_PORT` | `8081` | Forge proxy listen port |
-| `FORGE_MODEL` / `SMALL_MODEL` | `gpt-4o-mini` | Default model |
+| `FORGE_MODEL` / `SMALL_MODEL` | `(none)` | Optional fallback model when a request omits `model` |
 | `FORGE_CONTEXT_TOKENS` | `128000` | Token budget |
 | `FORGE_MAX_RETRIES` | `3` | Retry budget per validation failure |
 | `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |

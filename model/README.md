@@ -6,7 +6,7 @@ Do not commit downloaded ONNX weights, model snapshots, Hugging Face caches, or
 `target/classifier-artifacts` / `target/final-response-classifier-artifacts`
 outputs. Keep eval model binaries under `target/`.
 
-Latest checked Hub state: 2026-05-29.
+Latest checked Hub state: 2026-05-30.
 Latest local eval review: 2026-05-30, documented in
 [`local_eval_findings_2026-05-30.md`](local_eval_findings_2026-05-30.md).
 
@@ -14,8 +14,8 @@ Latest local eval review: 2026-05-30, documented in
 
 | Artifact | Hugging Face repo | Latest checked revision | Runtime status |
 |---|---|---|---|
-| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `b35b9734b6a3195e335ceb0a11b49d6782fec3b4` | Runnable by Rust ONNX scorer; promoted default eval pin |
-| Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `80593d1e8a11c3fbfb27ee33d4431b839b7aacfc` | Runnable by Rust ONNX scorer; experimental/shadow-only |
+| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` | Runnable by Rust ONNX scorer; pinned for reproducibility, shadow-only due metric regression |
+| Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `bb11f0aaece9cae6f9b553e7522cb6d75d9cafbc` | Runnable by Rust ONNX scorer; experimental/shadow-only |
 
 Both artifacts are DeBERTa-v3-small text classifiers exported as FP32 ONNX and
 quantized ONNX. Both should start in `shadow` mode. Deterministic Forge
@@ -25,8 +25,13 @@ Current deployment recommendation: keep both artifact families shadow-only.
 For local active-mode policy, set every non-valid label's advisory and enforce
 thresholds to `1.01` until release replay proves the label is safe. This is
 stricter than the current downloaded threshold metadata for
-`wrong_arguments_semantic`, `tool_not_needed`, `needs_clarification`, and all
-final-response non-valid labels.
+`wrong_arguments_semantic`, `tool_not_needed`, and all final-response non-valid
+labels.
+
+The current tool-call pin is worse than the previous strong default revision
+`b35b9734b6a3195e335ceb0a11b49d6782fec3b4`: macro F1 dropped from `0.9830` to
+`0.6813`, and valid-call recall dropped to `0.41`. Do not promote it beyond
+shadow mode without a new replay-backed reason.
 
 ## Download
 
@@ -117,11 +122,11 @@ Latest checked test metrics:
 
 | Metric | Value |
 |---|---:|
-| Accuracy | `0.9770491803278688` |
-| Macro precision | `0.9832233976323463` |
-| Macro recall | `0.9828910846156007` |
-| Macro F1 | `0.9830369261812494` |
-| Test rows | `22265` |
+| Accuracy | `0.7996544197890142` |
+| Macro precision | `0.7170414256557014` |
+| Macro recall | `0.6878722779274437` |
+| Macro F1 | `0.6813248632806018` |
+| Test rows | `21992` |
 
 Important deployment risks:
 
@@ -131,7 +136,7 @@ Important deployment risks:
 - `wrong_tool_semantic` remains conservative because previous Forge telemetry
   showed high-confidence false positives on valid terminal/summarize calls.
 - `needs_clarification` has tiny held-out support and should not be enforced.
-- The promoted default revision changes which artifact eval downloads, not the
+- The pinned default revision changes which artifact eval downloads, not the
   conservative runtime mode. Keep first replay runs in `shadow`.
 - The 2026-05-30 enforce replay regressed `error_recovery*` because valid
   zero-padded numeric recovery calls were blocked as `wrong_arguments_semantic`.
@@ -169,17 +174,17 @@ Latest checked test metrics:
 
 | Metric | Value |
 |---|---:|
-| Accuracy | `0.14285714285714285` |
-| Macro precision | `0.02857142857142857` |
+| Accuracy | `0.09090909090909091` |
+| Macro precision | `0.01818181818181818` |
 | Macro recall | `0.2` |
-| Macro F1 | `0.05` |
-| Test rows | `14` |
+| Macro F1 | `0.03333333333333333` |
+| Test rows | `33` |
 
 The current published final-response ONNX directory includes
 `onnx/tokenizer.json`, so the Rust `OnnxFinalResponseScorer` can load the local
 artifact directly.
 
-The 2026-05-30 release replay labeled every final response as
+The previous 2026-05-30 release replay labeled every final response as
 `failed_to_acknowledge_data_gap` at roughly `0.23` confidence. This is not
 useful enough for advisory or enforcement.
 

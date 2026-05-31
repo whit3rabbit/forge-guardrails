@@ -6,7 +6,7 @@ use crate::cli::{Cli, CliBackend};
 use crate::client::ClientFactory;
 use crate::config::{
     DEFAULT_BACKEND_PORT, DEFAULT_CLI_HOST, DEFAULT_ENV_CONTEXT_TOKENS, DEFAULT_ENV_HOST,
-    DEFAULT_ENV_MODEL, DEFAULT_MAX_RETRIES,
+    DEFAULT_INTERNAL_MODEL, DEFAULT_MAX_RETRIES,
 };
 
 fn parse(args: &[&str]) -> Cli {
@@ -39,6 +39,7 @@ fn external_startup_uses_cli_flags_without_launching_backend() {
     assert_eq!(startup.config.host, "127.0.0.1");
     assert_eq!(startup.config.port, 18081);
     assert_eq!(startup.config.default_model, "default-model");
+    assert!(startup.config.default_model_explicit);
     assert_eq!(startup.config.context_tokens, 4096);
     assert_eq!(startup.config.max_retries, 7);
     assert!(!startup.config.rescue_enabled);
@@ -400,7 +401,7 @@ fn keeps_known_defaults_visible_to_startup() {
     assert_eq!(DEFAULT_BACKEND_PORT, 8080);
     assert_eq!(DEFAULT_CLI_HOST, "127.0.0.1");
     assert_eq!(DEFAULT_ENV_HOST, "0.0.0.0");
-    assert_eq!(DEFAULT_ENV_MODEL, "gpt-4o-mini");
+    assert_eq!(DEFAULT_INTERNAL_MODEL, "forge-guardrails-unset");
     assert_eq!(DEFAULT_ENV_CONTEXT_TOKENS, 128_000);
     assert_eq!(DEFAULT_MAX_RETRIES, 3);
 }

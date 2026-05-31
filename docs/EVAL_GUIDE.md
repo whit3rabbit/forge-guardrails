@@ -231,7 +231,7 @@ cargo run --features classifier --bin download-classifier -- \
 
 The downloader defaults to the pinned Hugging Face revision used by Rust's
 `DEFAULT_CLASSIFIER_REVISION`, currently
-`b35b9734b6a3195e335ceb0a11b49d6782fec3b4` for
+`b8e292b4de5725250bd1698eb5c795ffcb1a4cde` for
 `cowWhySo/toolcall-verifier-classifier-production`. It writes the runnable ONNX
 artifact under `target/classifier-artifacts/onnx` and also downloads published
 schema/report sidecars such as `input_schema_v1.json`,
@@ -338,7 +338,7 @@ cargo run --features classifier --bin download-classifier -- \
 That command writes the published files under
 `target/final-response-classifier-artifacts/onnx` by default. The pinned
 final-response revision is
-`80593d1e8a11c3fbfb27ee33d4431b839b7aacfc` for
+`bb11f0aaece9cae6f9b553e7522cb6d75d9cafbc` for
 `cowWhySo/final-response-verifier-classifier-production`.
 
 Run final-response variants with the matching final-response classifier flags:

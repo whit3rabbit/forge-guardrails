@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Foundation types for an LLM-agent workflow framework"
+repository = "https://github.com/whit3rabbit/forge-guardrails"
+homepage = "https://github.com/whit3rabbit/forge-guardrails"
+readme = "README.md"
 
 [features]
 default = []

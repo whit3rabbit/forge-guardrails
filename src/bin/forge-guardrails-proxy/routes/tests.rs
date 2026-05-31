@@ -16,7 +16,7 @@ use forge_guardrails::{
 
 use super::handlers::{
     anthropic_messages, anthropic_messages_with_client, chat_completions, extract_anthropic_model,
-    extract_openai_model,
+    extract_openai_model, models,
 };
 use super::AppState;
 use crate::client::ClientFactory;
@@ -27,6 +27,7 @@ fn test_config() -> Arc<ProxyConfig> {
         host: "127.0.0.1".to_string(),
         port: 8081,
         default_model: "default".to_string(),
+        default_model_explicit: true,
         context_tokens: 8192,
         max_retries: 0,
         rescue_enabled: true,
@@ -46,9 +47,32 @@ fn test_config() -> Arc<ProxyConfig> {
     })
 }
 
+fn test_config_without_default_model() -> Arc<ProxyConfig> {
+    let mut config = (*test_config()).clone();
+    config.default_model = "forge-guardrails-unset".to_string();
+    config.default_model_explicit = false;
+    Arc::new(config)
+}
+
 fn test_state() -> AppState {
     AppState {
         config: test_config(),
+        client_factory: Arc::new(ClientFactory::DirectOpenAi {
+            base_url: "http://127.0.0.1:9".to_string(),
+            api_key: None,
+            http_client: reqwest::Client::new(),
+            context_tokens: 8192,
+        }),
+        request_mutex: Arc::new(TokioMutex::new(())),
+        scorer: None,
+        final_response_scorer: None,
+        tool_output_state: Arc::new(forge_guardrails::ToolOutputCompressionState::new()),
+    }
+}
+
+fn test_state_without_default_model() -> AppState {
+    AppState {
+        config: test_config_without_default_model(),
         client_factory: Arc::new(ClientFactory::DirectOpenAi {
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: None,
@@ -161,6 +185,33 @@ async fn binary_openai_oversized_body_returns_413() {
     .await;
 
     assert_eq!(response.status().as_u16(), 413);
+}
+
+#[tokio::test]
+async fn binary_models_endpoint_is_empty_without_explicit_default_model() {
+    let response = models(State(test_state_without_default_model())).await;
+
+    assert_eq!(response.status().as_u16(), 200);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["data"].as_array().expect("data").len(), 0);
+}
+
+#[tokio::test]
+async fn binary_openai_missing_model_returns_400_without_explicit_default() {
+    let body = Bytes::from(
+        json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        })
+        .to_string(),
+    );
+
+    let response = chat_completions(State(test_state_without_default_model()), body).await;
+
+    assert_eq!(response.status().as_u16(), 400);
 }
 
 #[tokio::test]

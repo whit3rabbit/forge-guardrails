@@ -8,7 +8,7 @@ use crate::config::{
     cli_model, cli_port, final_response_classifier_settings_from_env_cli, normalized_extra_flags,
     resolve_serialize, tool_call_policy_from_env_cli, tool_output_compression_from_env_cli,
     validate_nonempty, validate_positive_i64, DEFAULT_ENV_CONTEXT_TOKENS,
-    DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_EXTERNAL_MODEL,
+    DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_INTERNAL_MODEL,
 };
 use crate::upstream::{
     direct_anthropic_api_key, direct_local_openai_upstream_from_env, direct_openai_api_key,
@@ -83,7 +83,8 @@ pub(super) fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Sta
     let config = crate::config::ProxyConfig {
         host: cli_host(cli)?,
         port: cli_port(cli)?,
-        default_model: cli_model(cli, DEFAULT_EXTERNAL_MODEL)?,
+        default_model: cli_model(cli, DEFAULT_INTERNAL_MODEL)?,
+        default_model_explicit: cli.model.is_some(),
         context_tokens,
         max_retries: cli_max_retries(cli)?,
         rescue_enabled: !cli.no_rescue,
@@ -170,7 +171,7 @@ fn normalize_anthropic_base_url(raw: &str) -> Result<String, String> {
 }
 
 fn discover_external_context_tokens(base_url: &str) -> i64 {
-    let client = LlamafileClient::new(DEFAULT_EXTERNAL_MODEL)
+    let client = LlamafileClient::new(DEFAULT_INTERNAL_MODEL)
         .with_base_url(base_url)
         .with_mode("native");
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()

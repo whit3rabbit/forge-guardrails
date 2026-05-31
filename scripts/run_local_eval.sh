@@ -77,6 +77,8 @@ else
   RESOURCE_BASELINE=0
 fi
 RESOURCE_INTERVAL="${FORGE_RESOURCE_INTERVAL:-1.0}"
+TOOL_OUTPUT_COMPRESSION="${FORGE_TOOL_OUTPUT_COMPRESSION:-disabled}"
+TOOL_OUTPUT_COMPRESSION_METHOD="${FORGE_TOOL_OUTPUT_COMPRESSION_METHOD:-lzw}"
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
 elif command -v python >/dev/null 2>&1; then
@@ -129,6 +131,10 @@ Options:
   --resource-baseline       Capture proxy/backend CPU and RSS stats during eval windows
   --resource-interval SECONDS
                             Resource sampling interval (default: 1.0)
+  --tool-output-compression disabled|safe|standard|aggressive
+                            Enable proxy tool-output compression (default: $TOOL_OUTPUT_COMPRESSION)
+  --tool-output-compression-method lzw|repair|auto
+                            Aggressive compression method (default: $TOOL_OUTPUT_COMPRESSION_METHOD)
   -h, --help                Show this help
 
 Examples:
@@ -139,6 +145,7 @@ Examples:
   $PROGRAM_NAME --suite release --runs 10 --classify --classifier-mode shadow --verify-final-response
   $PROGRAM_NAME --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
   $PROGRAM_NAME --suite release --runs 10 --download-classifier
+  $PROGRAM_NAME --suite release --runs 10 --tool-output-compression standard
 EOF
 }
 
@@ -573,6 +580,9 @@ start_proxy() {
   else
     log "Final-response classifier: disabled"
   fi
+  proxy_args+=(--tool-output-compression "$TOOL_OUTPUT_COMPRESSION")
+  proxy_args+=(--tool-output-compression-method "$TOOL_OUTPUT_COMPRESSION_METHOD")
+  log "Tool-output compression: mode=$TOOL_OUTPUT_COMPRESSION, method=$TOOL_OUTPUT_COMPRESSION_METHOD"
   if classifier_feature_enabled; then
     log "Classifier JSONL: $classifier_log"
   fi
@@ -815,6 +825,8 @@ resource_interval=$RESOURCE_INTERVAL
 resource_samples_pattern=$OUTPUT_DIR/resource_samples_*.jsonl
 resource_summary_pattern=$OUTPUT_DIR/resource_summary_*.json
 resource_report=$OUTPUT_DIR/resource_baseline_report.txt
+tool_output_compression=$TOOL_OUTPUT_COMPRESSION
+tool_output_compression_method=$TOOL_OUTPUT_COMPRESSION_METHOD
 EOF
   log "Metadata: $metadata"
 }
@@ -935,6 +947,14 @@ while [[ $# -gt 0 ]]; do
       RESOURCE_INTERVAL="$(next_arg "$1" "${2:-}")"
       shift 2
       ;;
+    --tool-output-compression)
+      TOOL_OUTPUT_COMPRESSION="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --tool-output-compression-method)
+      TOOL_OUTPUT_COMPRESSION_METHOD="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -1007,6 +1027,20 @@ case "$FINAL_RESPONSE_CLASSIFIER_MODEL" in
     die "--final-response-classifier-model must be quantized or full"
     ;;
 esac
+case "$TOOL_OUTPUT_COMPRESSION" in
+  disabled|safe|standard|aggressive)
+    ;;
+  *)
+    die "--tool-output-compression must be disabled, safe, standard, or aggressive"
+    ;;
+esac
+case "$TOOL_OUTPUT_COMPRESSION_METHOD" in
+  lzw|repair|auto)
+    ;;
+  *)
+    die "--tool-output-compression-method must be lzw, repair, or auto"
+    ;;
+esac
 if [[ "$VERIFY_FINAL_RESPONSE" == "1" && "$FINAL_RESPONSE_CLASSIFIER_MODE" == "disabled" ]]; then
   die "--verify-final-response cannot be used with --final-response-classifier-mode disabled"
 fi
@@ -1043,6 +1077,7 @@ trap 'exit 129' HUP
 phase "Eval setup"
 log "Output directory: $OUTPUT_DIR"
 log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, proxy_backend_mode: $PROXY_BACKEND_MODE"
+log "Tool-output compression: mode=$TOOL_OUTPUT_COMPRESSION, method=$TOOL_OUTPUT_COMPRESSION_METHOD"
 if [[ "$RESOURCE_BASELINE" == "1" ]]; then
   log "Resource baseline: enabled, interval=${RESOURCE_INTERVAL}s"
 else

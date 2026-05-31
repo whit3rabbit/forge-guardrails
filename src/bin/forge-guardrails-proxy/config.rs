@@ -14,8 +14,7 @@ pub(crate) const DEFAULT_ENV_CONTEXT_TOKENS: i64 = 128_000;
 pub(crate) const DEFAULT_EXTERNAL_CONTEXT_TOKENS: i64 = 8192;
 pub(crate) const DEFAULT_ENV_HOST: &str = "0.0.0.0";
 pub(crate) const DEFAULT_CLI_HOST: &str = "127.0.0.1";
-pub(crate) const DEFAULT_ENV_MODEL: &str = "gpt-4o-mini";
-pub(crate) const DEFAULT_EXTERNAL_MODEL: &str = "default";
+pub(crate) const DEFAULT_INTERNAL_MODEL: &str = "forge-guardrails-unset";
 pub(crate) const DEFAULT_MAX_RETRIES: i32 = 3;
 
 mod env_helpers;
@@ -25,9 +24,9 @@ mod validation;
 mod tests;
 
 use env_helpers::{
-    env_bool, env_classifier_model, env_final_response_classifier_model, env_i32, env_i64,
-    env_optional_string, env_optional_u64, env_scoring_mode, env_string, env_tool_call_policy,
-    env_tool_output_compression,
+    env_bool, env_classifier_model, env_final_response_classifier_model, env_first_string, env_i32,
+    env_i64, env_optional_string, env_optional_u64, env_scoring_mode, env_string,
+    env_tool_call_policy, env_tool_output_compression,
 };
 
 #[cfg(test)]
@@ -45,6 +44,7 @@ pub(crate) struct ProxyConfig {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) default_model: String,
+    pub(crate) default_model_explicit: bool,
     pub(crate) context_tokens: i64,
     pub(crate) max_retries: i32,
     pub(crate) rescue_enabled: bool,
@@ -65,6 +65,7 @@ pub(crate) struct ProxyConfig {
 
 impl ProxyConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
+        let env_model = env_first_string(&["FORGE_MODEL", "SMALL_MODEL"]);
         Ok(Self {
             host: env_string(&["FORGE_HOST"], DEFAULT_ENV_HOST),
             port: env_helpers::env_u16(
@@ -72,7 +73,10 @@ impl ProxyConfig {
                 DEFAULT_PROXY_PORT,
                 "FORGE_PORT",
             )?,
-            default_model: env_string(&["FORGE_MODEL", "SMALL_MODEL"], DEFAULT_ENV_MODEL),
+            default_model: env_model
+                .clone()
+                .unwrap_or_else(|| DEFAULT_INTERNAL_MODEL.to_string()),
+            default_model_explicit: env_model.is_some(),
             context_tokens: env_i64(
                 &["FORGE_CONTEXT_TOKENS"],
                 DEFAULT_ENV_CONTEXT_TOKENS,
@@ -117,6 +121,7 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     }
     if let Some(model) = cli.model.as_deref() {
         config.default_model = validate_nonempty(model, "--model")?.to_string();
+        config.default_model_explicit = true;
     }
     if let Some(tokens) = cli.budget_tokens {
         config.context_tokens = validate_positive_i64(tokens, "--budget-tokens")?;

@@ -26,7 +26,7 @@ sequenceDiagram
 
     Client->>Axum: POST /v1/chat/completions or /v1/messages
     Axum->>Axum: enforce max body size and parse JSON
-    Axum->>Axum: extract request model or default model
+    Axum->>Axum: extract request model or explicit fallback model
     Axum->>Factory: client_for_model(model)
     alt anyllm runtime mode
         Factory->>Runtime: for_model(model)

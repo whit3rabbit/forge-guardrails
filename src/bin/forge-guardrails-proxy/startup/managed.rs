@@ -168,6 +168,7 @@ pub(super) fn build_managed_startup(cli: &Cli, backend: CliBackend) -> Result<St
         host: proxy_host,
         port: proxy_port,
         default_model,
+        default_model_explicit: true,
         context_tokens,
         max_retries,
         rescue_enabled: !cli.no_rescue,

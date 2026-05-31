@@ -7,11 +7,14 @@ use forge_guardrails::{
 };
 
 pub(crate) fn env_string(keys: &[&str], default: &str) -> String {
+    env_first_string(keys).unwrap_or_else(|| default.to_string())
+}
+
+pub(crate) fn env_first_string(keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| env::var(key).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default.to_string())
 }
 
 pub(crate) fn env_tool_output_compression() -> Result<ToolOutputCompressionConfig, String> {

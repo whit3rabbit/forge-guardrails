@@ -39,17 +39,22 @@ pub async fn health() -> Response {
 
 /// Handler for the `/v1/models` endpoint.
 pub async fn models(State(state): State<AppState>) -> Response {
+    let data = if state.config.default_model_explicit {
+        json!([{
+            "id": state.config.default_model,
+            "object": "model",
+            "created": 0,
+            "owned_by": "forge-guardrails"
+        }])
+    } else {
+        json!([])
+    };
     build_response(
         200,
         "application/json",
         json!({
             "object": "list",
-            "data": [{
-                "id": state.config.default_model,
-                "object": "model",
-                "created": 0,
-                "owned_by": "forge-guardrails"
-            }]
+            "data": data
         })
         .to_string(),
     )
@@ -61,7 +66,10 @@ pub async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Res
         Ok(value) => value,
         Err(response) => return build_http_response(response),
     };
-    let model = extract_model_from_value(&parsed, &state.config.default_model);
+    let model = match select_request_model(&parsed, &state.config) {
+        Ok(model) => model,
+        Err(err) => return missing_model_response(err),
+    };
     let client = Arc::new(state.client_factory.client_for_model(model));
     let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
         Box::new(NoCompact),
@@ -103,7 +111,10 @@ pub async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> R
         Ok(request) => request,
         Err(response) => return build_http_response(response),
     };
-    let model = extract_model_from_value(&request.raw, &state.config.default_model);
+    let model = match select_request_model(&request.raw, &state.config) {
+        Ok(model) => model,
+        Err(err) => return missing_model_response(err),
+    };
     let client = Arc::new(state.client_factory.client_for_model(model));
     anthropic_messages_with_request_client(
         state.config,
@@ -216,12 +227,30 @@ pub(crate) fn extract_json_model(body: &[u8], default_model: &str) -> String {
 }
 
 /// Helper function to extract model string from JSON value.
+#[cfg(test)]
 pub(crate) fn extract_model_from_value(value: &Value, default_model: &str) -> String {
+    request_model_from_value(value).unwrap_or_else(|| default_model.to_string())
+}
+
+fn select_request_model(value: &Value, config: &ProxyConfig) -> Result<String, &'static str> {
+    if let Some(model) = request_model_from_value(value) {
+        return Ok(model);
+    }
+    if config.default_model_explicit {
+        return Ok(config.default_model.clone());
+    }
+    Err("request model is required unless --model or FORGE_MODEL is set")
+}
+
+fn missing_model_response(err: &str) -> Response {
+    build_response(400, "application/json", json!({"error": err}).to_string())
+}
+
+fn request_model_from_value(value: &Value) -> Option<String> {
     value
         .get("model")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| default_model.to_string())
 }

@@ -11,7 +11,8 @@ fn sample_config() -> ProxyConfig {
     ProxyConfig {
         host: DEFAULT_ENV_HOST.to_string(),
         port: DEFAULT_PROXY_PORT,
-        default_model: DEFAULT_ENV_MODEL.to_string(),
+        default_model: DEFAULT_INTERNAL_MODEL.to_string(),
+        default_model_explicit: false,
         context_tokens: DEFAULT_ENV_CONTEXT_TOKENS,
         max_retries: DEFAULT_MAX_RETRIES,
         rescue_enabled: true,
@@ -53,6 +54,7 @@ fn env_fallback_accepts_safe_cli_overrides() {
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 9090);
     assert_eq!(config.default_model, "env-override");
+    assert!(config.default_model_explicit);
     assert_eq!(config.context_tokens, 2048);
     assert_eq!(config.max_retries, 0);
     assert!(!config.rescue_enabled);

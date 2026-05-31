@@ -20,74 +20,40 @@ metrics:
   - f1
   - precision
   - recall
-model-index:
-  - name: toolcall-verifier-classifier-production
-    results:
-      - task:
-          type: text-classification
-          name: Tool-call verification
-        dataset:
-          name: toolcall-verifier-dataset
-          type: cowWhySo/toolcall-verifier-dataset
-        metrics:
-          - name: Accuracy
-            type: accuracy
-            value: 0.9770491803278688
-          - name: Macro F1
-            type: f1
-            value: 0.9830369261812494
-          - name: Macro Precision
-            type: precision
-            value: 0.9832233976323463
-          - name: Macro Recall
-            type: recall
-            value: 0.9828910846156007
 ---
 
-# Tool-call Verifier Classifier Production
+# Tool-call Verifier Classifier
 
-This repository contains a production-mode text-classification sidecar for tool-call guardrails. The model scores serialized tool-call candidates after deterministic validation has already handled syntax, JSON schema, unknown tool names, required-step enforcement, prerequisite checks, unsafe batches, and terminal-tool rules.
+This document tracks the current tool-call verifier training state for Forge. It
+is a recovery playbook, not a promotion record. The current published tool-call
+artifact is telemetry-only and must stay in `shadow` mode until a replacement
+passes notebook gates, ONNX parity, release shadow replay, and advisory replay.
 
-The intended deployment pattern is conservative: deterministic guardrails remain authoritative, while this classifier starts in `shadow` mode and is promoted only after repository-specific eval replay proves that it improves nudging or routing without introducing false blocks on valid tool calls.
+The classifier is a DeBERTa sequence-classification sidecar over
+`serialize_state_v1` tool-call contexts. It runs after deterministic validation:
+syntax, JSON schema, unknown tools, required steps, prerequisites, unsafe
+batches, and terminal-tool rules remain Rust-owned and authoritative.
 
-## Model summary
+## Current Status
 
 | Field | Value |
 |---|---|
 | Base model | `microsoft/deberta-v3-small` |
-| Model kind | Text-classification cross-encoder |
+| Notebook | `notebook/toolcall_verifier_training_production_colab_v4.ipynb` |
 | Label mode | `production` |
 | Input schema | `toolcall-verifier-input/v1` |
 | Serializer | `serialize_state_v1` |
-| Max sequence length | `1280` |
-| Deployment default | `shadow` |
-| Primary artifact | `model.onnx` |
-| Quantized artifact | `model_quantized.onnx` |
-| Required tokenizer files | `tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`, `added_tokens.json`, `spm.model` |
-| Threshold file | `thresholds.json` |
-| Manifest file | `artifact_manifest.json` |
-| Promoted default/eval revision | `b35b9734b6a3195e335ceb0a11b49d6782fec3b4` |
+| Default runtime mode | `shadow` |
+| Active non-valid thresholds | `1.01` |
+| Current published tool-call pin | `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` |
+| Previous strong tool-call pin | `b35b9734b6a3195e335ceb0a11b49d6782fec3b4` |
+| Current final-response pin | `bb11f0aaece9cae6f9b553e7522cb6d75d9cafbc` |
 
-## Intended use
-
-Use this model to classify a candidate tool call in the context of:
-
-- the original user request,
-- available tool definitions,
-- required workflow steps,
-- completed and pending steps,
-- terminal tools,
-- recent errors,
-- and the candidate tool call.
-
-It is meant to support:
-
-- shadow telemetry for semantic tool-call quality,
-- advisory nudges when the selected tool or arguments look semantically wrong,
-- eval-backed enforcement for high-confidence semantic errors,
-- Rust-side inference through ONNX Runtime.
-
-It is not meant to replace deterministic guardrails. It should not accept malformed calls, override JSON-schema validation, rewrite arguments, execute tools, or relax required workflow rules.
+Do not promote the current published tool-call pin. It regressed from the
+previous strong revision: held-out macro F1 dropped to about `0.681`, and
+`valid` recall dropped to about `0.41`. The confusion matrix showed valid calls
+being pushed into `wrong_tool_semantic`, so this was a training distribution
+failure, not a threshold problem.
 
 ## Labels
 
@@ -96,150 +62,205 @@ Production mode uses six labels:
 | Label | Meaning | Deployment guidance |
 |---|---|---|
 | `valid` | Candidate call appears appropriate for the request and workflow state. | Allow. |
-| `wrong_tool_semantic` | Candidate uses the wrong tool for the request or workflow state. | Conservative; currently disabled for advisory/enforcement by thresholds. |
-| `wrong_arguments_semantic` | Candidate uses a plausible tool but semantically wrong arguments. | Advisory first; enforce only after eval proof. |
-| `tool_not_needed` | Candidate calls a tool when no tool call is needed. | Advisory first; enforce only after eval proof. |
-| `needs_clarification` | Request is underspecified and should be clarified before tool use. | Advisory first; enforce only after eval proof. |
-| `deterministic_invalid` | Collapsed bucket for failures owned by deterministic validation. | Deterministic-only. Do not enforce from ML. |
+| `wrong_tool_semantic` | Candidate uses the wrong tool for the request or workflow state. | Shadow-only until replay proves precision. |
+| `wrong_arguments_semantic` | Candidate uses a plausible tool but semantically wrong arguments. | Shadow-only until numeric and recovery slices pass. |
+| `tool_not_needed` | Candidate calls a tool when no tool call is needed. | Shadow-only until replay proves safety. |
+| `needs_clarification` | Request is underspecified and should be clarified before tool use. | Ignore as a gate unless support is at least `50` rows. |
+| `deterministic_invalid` | Collapsed bucket for deterministic failures. | Deterministic-only. Never enforce from ML. |
 
-In production mode, the following raw labels are collapsed into `deterministic_invalid`: `invalid_args_schema`, `missing_required_args`, `unknown_tool`, `premature_terminal`, `missing_prerequisite`, `unsafe_parallel_batch`, and `malformed_tool_call`.
+Raw deterministic labels collapse into `deterministic_invalid`:
+`invalid_args_schema`, `missing_required_args`, `unknown_tool`,
+`premature_terminal`, `missing_prerequisite`, `unsafe_parallel_batch`, and
+`malformed_tool_call`.
 
-## Training configuration
+## Current Notebook Settings
 
-Latest production run:
+These are the current recovery defaults that should be preserved unless a new
+run gives a concrete reason to change them.
 
-| Field | Value |
+### Dataset Mix
+
+| Setting | Current value | Reason |
+|---|---:|---|
+| `FORGE_AGENT_HF_DATASET_WEIGHT` | `1` | Private rows tune Forge slices; they should not dominate. |
+| `FORGE_AGENT_HF_TRAIN_FRACTION_TARGET` | `0.25` | Keep private rows in the `0.15` to `0.30` range. |
+| `FORGE_AGENT_HF_PUBLIC_ONLY_TRAIN_CAP` | `0` | Preserve broad public coverage. |
+| `FORGE_AGENT_HF_DOWNSAMPLE_PUBLIC_FOR_TARGET` | `False` | Do not shrink the public backbone to satisfy private fraction. |
+| `PREFER_FORGE_AGENT_HF_DATASET` | `True` | Keep reviewed private rows when present. |
+| `INCLUDE_PRIVATE_AGENT_LOGS` | `False` | Local agent logs remain opt-in. |
+
+Use group-preserving sampling by `example_group_id`. If a hard negative is
+included, keep the paired valid/corrected row in the same group so splitting and
+sampling do not separate the contrastive pair.
+
+### Uploaded Eval Files
+
+Use this hard-negative glob:
+
+```python
+FORGE_HARD_NEGATIVE_GLOB = "/content/*hard_negatives.jsonl"
+```
+
+The previous glob, `/content/*.hard_negatives.jsonl`, did not match files named
+`rust_smoke.tool_call_hard_negatives.jsonl` or
+`rust_smoke.final_response_hard_negatives.jsonl`. A corrected T4 audit showed
+the hard-negative loader working: `forge_hard_negative` rows were present, with
+`7` corrected positives and `6` corrected error-recovery positives.
+
+Telemetry files such as `proxy_classifier_budget_8192.jsonl` and
+`rust_smoke.jsonl` are diagnostics only. Mine them for top-k failures, but do
+not feed raw top-k telemetry into training or use it as promotion evidence.
+
+### Train Rebalance
+
+High-coverage and T4 profiles intentionally use different rebalance behavior.
+The T4 profile is for cheap diagnosis; it is not promotion evidence.
+
+| Setting | High-coverage default | T4/debug default |
+|---|---:|---:|
+| `VALID_TRAIN_FRACTION_TARGET` | `0.40` | `0.40` |
+| `VALID_TRAIN_MAX_DUPLICATION_FACTOR` | `2` | `2` |
+| `ENABLE_SEMANTIC_NEGATIVE_TRAIN_REBALANCE` | `False` | `False` |
+| `WRONG_TOOL_TRAIN_TO_VALID_RATIO_TARGET` | `0.90` unused while disabled | `0.55` unused while disabled |
+| `WRONG_ARGUMENTS_TRAIN_TO_VALID_RATIO_TARGET` | `0.75` unused while disabled | `0.70` unused while disabled |
+| `MAX_SEMANTIC_NEGATIVE_DUPLICATION_FACTOR` | `4` | `2` unused while disabled |
+| `ENABLE_VALID_PROTECTION_EXTRA_TRAIN_REBALANCE` | `True` | `False` |
+| `VALID_PROTECTION_EXTRA_COPY_FACTOR` | `2` | disabled |
+| `VALID_PROTECTION_EXTRA_COPY_ROWS_CAP` | `5000` | disabled |
+
+Non-valid caps remain:
+
+| Label | Max ratio to valid rows |
 |---|---:|
-| GPU profile | `high_vram_quality` |
-| GPU | NVIDIA RTX PRO 6000 Blackwell Server Edition |
-| GPU memory | 95.0 GB |
-| Precision | bf16 + tf32 |
-| Seed | `42` |
-| Max per source | `40000` |
-| Max sequence length | `1280` |
-| Epochs requested | `5` |
-| Per-device train batch | `64` |
-| Eval batch | `128` |
-| Gradient accumulation | `1` |
-| Learning rate | `6e-6` |
-| Warmup ratio | `0.08` |
-| Early stopping patience | `2` |
-| Optimizer | `adamw_torch_fused` |
-| Gradient checkpointing | `false` |
-| Class weights | disabled |
-| Forge augmentation | enabled |
-| Final-response verifier training | enabled in the notebook, but separate from this tool-call classifier |
+| `deterministic_invalid` | `0.35` |
+| `wrong_tool_semantic` | `0.75` |
+| `wrong_arguments_semantic` | `0.90` |
+| `tool_not_needed` | `0.30` |
 
-Split sizes:
+### Valid-Protection Slices
 
-| Split | Rows |
+Track these slices on validation and test. Apply valid recall and
+false-objection gates when a slice has at least `25` valid rows.
+
+- terminal-like tools: `respond`, `summarize`, `report`, `submit_*`, `present`,
+  `recommend`, and `diagnose`,
+- corrected error-recovery positives,
+- fixed-width numeric string arguments, especially zero-padded values such as
+  `0010`,
+- no-op valid calls with empty argument objects.
+
+## Promotion Gates
+
+The immediate notebook gates are:
+
+| Gate | Threshold |
 |---|---:|
-| Train | 178,545 |
-| Calibration | 11,075 |
-| Validation | 11,082 |
-| Test | 22,265 |
+| `valid` recall | `>= 0.94` |
+| `valid` false objection at confidence `0.90` | `<= 0.005` |
+| `wrong_tool_semantic` precision | `>= 0.90` |
+| `needs_clarification` | ignored unless support is at least `50` rows |
+| valid-protection slices with at least `25` valid rows | same valid recall and false-objection gates |
 
-Best validation checkpoint:
+Passing the notebook gates is necessary but not sufficient. Promotion also
+requires FP32 ONNX parity, shadow release replay, false-objection mining, and a
+later clean advisory replay.
+
+## Lessons Learned
+
+### Do Not Threshold Around A Bad Boundary
+
+The current published pin learned a bad boundary: valid calls were pushed into
+`wrong_tool_semantic`. Lowering or raising thresholds cannot fix that. Treat
+that artifact as telemetry-only.
+
+### Public Coverage Is The Backbone
+
+The bad high-VRAM setup over-corrected toward private data: private fraction
+`0.60`, private weight `4x`, and public-only caps around `6000` rows. That
+shrunk broad valid/wrong-tool/wrong-argument coverage and collapsed valid-call
+generalization. Current defaults restore public coverage and keep private rows
+as a tuning slice.
+
+### Hard Negatives Must Stay Paired
+
+Hard negatives without their valid/corrected counterparts teach the classifier
+to object broadly. Keep pairs together with `example_group_id`, and evaluate
+their slices separately.
+
+### Numeric Formatting Is Semantic
+
+For the `error_recovery` smoke tool, `{"count":"0010"}` is valid and
+`{"count":"10"}` is wrong for that schema. This must be trained and evaluated
+as a semantic argument distinction, not treated as a harmless formatting issue.
+
+### T4 Runs Are Diagnostics
+
+T4 runs exposed data-path and balance issues but are not promotion candidates:
+
+| Run | Useful finding | Failure |
+|---|---|---|
+| T4 valid-heavy run | `valid` recall reached `0.947` | `valid` false objection `0.0132`, `wrong_tool_semantic` precision `0.676`, `wrong_tool_semantic` recall `0.088` |
+| T4 semantic-heavy run | `wrong_tool_semantic` recall recovered to `0.773` | `valid` recall collapsed to `0.628`, `wrong_tool_semantic` precision only `0.422` |
+| T4 softened semantic run | `valid` recall recovered to `0.794` and `wrong_tool_semantic` precision improved to `0.528` | still failed `valid` recall, `valid` false objection, `wrong_tool_semantic` precision, and no-op valid slice gates |
+
+The current T4-only rebalance backs off semantic-negative upsampling entirely
+and disables extra protected-valid duplication. This is a diagnostic attempt to
+separate the effects of global valid balance from semantic-negative pressure.
+Use T4 to iterate on data flow, not to decide promotion. If this still fails,
+prefer `t4_proven` or a high-coverage GPU run over more `t4_fast` ratio chasing.
+
+### High-Coverage Recovery Is Closer
+
+The best recovery signal so far came from a high-coverage run after public
+downsampling was disabled:
 
 | Metric | Value |
 |---|---:|
-| Best checkpoint | `/content/toolcall-verifier/model/checkpoint-15665` |
-| Selection metric | `macro_f1` |
-| Validation loss | 0.07397261261940002 |
-| Validation accuracy | 0.9762678216928352 |
-| Validation macro precision | 0.9824560833904975 |
-| Validation macro recall | 0.9820312268109691 |
-| Validation macro F1 | 0.9822315582439032 |
+| Test macro F1 | `0.9848` |
+| `valid` recall | `0.9815` |
+| `wrong_tool_semantic` precision | `0.9865` |
+| `valid` false objection at `0.90` | `0.0077` |
 
-## Test metrics
+That candidate still failed the `0.005` false-objection gate and was not
+promoted. The next high-coverage run should keep public coverage, preserve
+private rows at `0.25`, and focus on valid-protection false objections.
 
-Held-out test set metrics:
+### Quantized ONNX Is A Separate Candidate
 
-| Metric | Value |
+A prior quantized parity result had FP32/quantized top-label agreement around
+`0.342`. Quantized output cannot be trusted just because PyTorch or FP32 ONNX
+looks good. Calibrate thresholds against the artifact that will actually run.
+
+Required parity gates:
+
+| Check | Gate |
 |---|---:|
-| Test loss | 0.061976924538612366 |
-| Accuracy | 0.9770491803278688 |
-| Macro precision | 0.9832233976323463 |
-| Macro recall | 0.9828910846156007 |
-| Macro F1 | 0.9830369261812494 |
-| Samples/sec | 682.714 |
-| Steps/sec | 5.335 |
+| PyTorch vs FP32 ONNX top-label agreement | `>= 0.995` |
+| Quantized ONNX vs FP32 ONNX top-label agreement | `>= 0.98` |
 
-Per-label test report:
+If quantized parity fails, write the parity report, stop packaging/upload, and
+use FP32 ONNX for replay. Publish quantized only as shadow telemetry until
+parity is fixed.
 
-| Label | Precision | Recall | F1 | Support |
-|---|---:|---:|---:|---:|
-| `valid` | 0.95 | 0.97 | 0.96 | 5,042 |
-| `wrong_tool_semantic` | 0.98 | 0.96 | 0.97 | 5,106 |
-| `wrong_arguments_semantic` | 0.98 | 0.98 | 0.98 | 5,033 |
-| `tool_not_needed` | 1.00 | 1.00 | 1.00 | 2,049 |
-| `needs_clarification` | 1.00 | 1.00 | 1.00 | 8 |
-| `deterministic_invalid` | 0.99 | 0.99 | 0.99 | 5,027 |
-| **Macro avg** | **0.98** | **0.98** | **0.98** | **22,265** |
-| **Weighted avg** | **0.98** | **0.98** | **0.98** | **22,265** |
+### Final-Response Verifier Is Separate
 
-Per-source test accuracy:
+The final-response verifier is a separate artifact family and is not mature
+enough for active behavior. A recent runtime replay labeled `302/302` final
+responses as `failed_to_acknowledge_data_gap` at low confidence. Keep it
+shadow-only and document/evaluate it separately.
 
-| Source | Rows | Accuracy | Avg confidence |
-|---|---:|---:|---:|
-| `Salesforce/xlam-function-calling-60k` | 14,710 | 0.978110 | 0.986481 |
-| `glaiveai/glaive-function-calling-v2` | 4,941 | 0.977130 | 0.985937 |
-| `Team-ACE/ToolACE` | 2,299 | 0.970857 | 0.983688 |
-| `agent_training_hf` | 274 | 0.978102 | 0.989761 |
-| `forge_trace` | 30 | 0.933333 | 0.971542 |
-| `forge_augmented` | 11 | 0.909091 | 0.971169 |
-
-Per-label test accuracy:
-
-| True label | Rows | Accuracy | Avg confidence |
-|---|---:|---:|---:|
-| `wrong_tool_semantic` | 5,106 | 0.961614 | 0.976973 |
-| `valid` | 5,042 | 0.965093 | 0.976443 |
-| `wrong_arguments_semantic` | 5,033 | 0.983310 | 0.991983 |
-| `deterministic_invalid` | 5,027 | 0.990253 | 0.994170 |
-| `tool_not_needed` | 2,049 | 0.997072 | 0.998249 |
-| `needs_clarification` | 8 | 1.000000 | 0.972783 |
-
-## Confusion matrix
-
-Rows are true labels. Columns are predicted labels.
-
-| True \\ Predicted | `valid` | `wrong_tool_semantic` | `wrong_arguments_semantic` | `tool_not_needed` | `needs_clarification` | `deterministic_invalid` |
-|---|---:|---:|---:|---:|---:|---:|
-| `valid` | 4,866 | 72 | 87 | 0 | 0 | 17 |
-| `wrong_tool_semantic` | 167 | 4,910 | 13 | 0 | 0 | 16 |
-| `wrong_arguments_semantic` | 65 | 13 | 4,949 | 0 | 0 | 6 |
-| `tool_not_needed` | 1 | 4 | 0 | 2,043 | 0 | 1 |
-| `needs_clarification` | 0 | 0 | 0 | 0 | 8 | 0 |
-| `deterministic_invalid` | 18 | 31 | 0 | 0 | 0 | 4,978 |
-
-## Threshold policy
+## Threshold Policy
 
 The exported default mode is `shadow`, with default action `allow`. Thresholds
-are deployment policy metadata, not proof that enforcement is safe.
+are policy metadata, not proof that enforcement is safe.
 
-The 2026-05-30 local release replay showed that the downloaded
-`wrong_arguments_semantic` active thresholds are unsafe for Forge: valid
-zero-padded numeric recovery calls such as `{"count":"0010"}` were blocked,
-while invalid unpadded calls such as `{"count":"10"}` were allowed as valid.
-The recommended local active-mode policy is therefore stricter than the
-downloaded threshold file: keep every non-valid ML label action-disabled until
-targeted replay proves the label safe.
+Recommended local policy:
 
 ```json
 {
   "schema_version": "toolcall-verifier-thresholds/v1",
   "mode": "shadow",
   "default_action": "allow",
-  "temperature": 1.1033822298049927,
-  "notes": [
-    "Deterministic guardrails remain authoritative.",
-    "Use ML in shadow mode first, then advisory nudges, then high-confidence enforcement only after eval proof.",
-    "All non-valid labels remain action-disabled for the current Forge deployment recommendation.",
-    "wrong_arguments_semantic is action-disabled because the 2026-05-30 replay produced high-confidence false blocks on zero-padded numeric strings.",
-    "wrong_tool_semantic stays action-disabled because Forge telemetry showed high-confidence false positives on valid terminal/summarize calls.",
-    "deterministic_invalid is never enforced by ML."
-  ],
   "labels": {
     "valid": {
       "action": "allow",
@@ -252,7 +273,7 @@ targeted replay proves the label safe.
       "enforce_min_confidence": 1.01
     },
     "wrong_arguments_semantic": {
-      "action": "shadow_only_until_numeric_semantics_fixed",
+      "action": "shadow_only_until_eval_proven",
       "advisory_min_confidence": 1.01,
       "enforce_min_confidence": 1.01
     },
@@ -275,9 +296,14 @@ targeted replay proves the label safe.
 }
 ```
 
-## Input format
+Candidate calibrated thresholds may be recorded for diagnostics, but non-valid
+active thresholds should remain above `1.0` until shadow replay and advisory
+replay both pass.
 
-The classifier expects the canonical serialized format produced by `serialize_state_v1`.
+## Input Format
+
+The classifier expects the canonical serialized format produced by
+`serialize_state_v1`.
 
 ```text
 SCHEMA_VERSION:
@@ -307,44 +333,18 @@ CANDIDATE_CALL:
 {"arguments": {"summary": "Done."}, "name": "report"}
 ```
 
-For the exported parity report, PyTorch and FP32 ONNX agreed on the top label for every sampled row, with a reported max absolute logit difference of `9.655952453613281e-06`. Quantized ONNX was less exact on that sample: top-label agreement was `0.9299610894941635`, with `18` disagreements across `257` rows and a max absolute difference of `7.591222286224365`.
+Runtime integrations should byte-compare serializer output against
+`serializer_fixture.json` before trusting model scores.
 
-## Inference
+## Runtime Files
 
-### Transformers pipeline
-
-```python
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
-
-repo_id = "cowWhySo/toolcall-verifier-classifier-production"
-
-tokenizer = AutoTokenizer.from_pretrained(repo_id, use_fast=False)
-model = AutoModelForSequenceClassification.from_pretrained(repo_id)
-
-clf = pipeline(
-    "text-classification",
-    model=model,
-    tokenizer=tokenizer,
-    top_k=None,
-    device=0,  # use -1 for CPU
-)
-
-scores = clf(serialized_tool_call, truncation=True, max_length=1280)[0]
-scores = sorted(scores, key=lambda item: item["score"], reverse=True)
-print(scores[:5])
-```
-
-### ONNX Runtime
-
-The ONNX path is the recommended Rust/runtime deployment path. Load the model with the same tokenizer behavior and the same serialized input text used during training.
-
-Required files:
+Required artifact files:
 
 ```text
 model.onnx
-model_quantized.onnx
 labels.json
 thresholds.json
+candidate_thresholds.json
 artifact_manifest.json
 input_schema.json
 serializer_fixture.json
@@ -353,14 +353,17 @@ special_tokens_map.json
 added_tokens.json
 spm.model
 config.json
-test_metrics.json
-training_metrics.json
 training_run_summary.json
+test_metrics.json
+promotion_gate_report.json
+valid_protection_slice_metrics.json
+onnx_parity_report.json
 ```
 
-Runtime integrations should byte-compare their serializer output against `serializer_fixture.json` before trusting model scores. This catches train/inference drift.
+`model_quantized.onnx` may be published only when quantized parity passes. If it
+does not pass, treat it as telemetry-only and prefer FP32 ONNX for replay.
 
-## Rust deployment guidance
+## Rust Deployment Guidance
 
 Recommended integration order:
 
@@ -374,94 +377,21 @@ Recommended integration order:
 7. Enforce mode: block only high-confidence semantic labels after eval proof.
 ```
 
-Suggested runtime flags:
+Loading failures should fail closed for strict deployment modes. Scoring
+failures should fail open in `shadow` and `advisory` modes, with telemetry.
 
-```text
---classifier-dir <path>
---classifier-mode off|shadow|advisory|enforce
---classifier-max-latency-ms <n>
-FORGE_CLASSIFIER_DIR
-FORGE_CLASSIFIER_MODE
-FORGE_CLASSIFIER_MAX_LATENCY_MS
-```
+## Promotion Ladder
 
-Default should be `off` unless a classifier directory is explicitly provided. First rollout should use `shadow`.
+1. Train replacement.
+2. Require good PyTorch validation/test metrics.
+3. Require good FP32 ONNX parity.
+4. Require good quantized parity, or skip quantized active use.
+5. Run release eval in `shadow`.
+6. Mine false objections and top-k disagreement rows.
+7. Run advisory replay.
+8. Consider enforcement only after advisory replay is clean.
 
-Recommended artifact-loader checks:
-
-```text
-artifact_manifest.json exists and includes training_run_summary/test_metrics provenance
-artifact_schema_version == "toolcall-verifier-artifact/v1"
-input_schema_version == "toolcall-verifier-input/v1"
-serializer == "serialize_state_v1"
-labels.json labels match model config
-thresholds.json has every deployed label
-tokenizer files exist
-ONNX file exists
-```
-
-Loading failures should fail closed for strict deployment modes. Scoring failures should fail open in `shadow` and `advisory` modes, with telemetry.
-
-## Calibration and safety notes
-
-- Keep the model in `shadow` mode until eval replay confirms behavior on your real traffic and workflow families.
-- Do not use `deterministic_invalid` predictions to enforce blocks. Deterministic Rust guardrails own those decisions.
-- `wrong_tool_semantic` is intentionally disabled by threshold values above `1.0` because the current telemetry showed high-confidence false positives on otherwise valid terminal/summarize calls.
-- `wrong_arguments_semantic` should also stay disabled for active action. The 2026-05-30 replay produced high-confidence false blocks on valid zero-padded numeric strings and high-confidence false allows on invalid unpadded numeric strings.
-- High-confidence mistakes were observed, including valid calls predicted as deterministic or wrong-argument failures. Use per-family replay, not only aggregate F1, before promotion.
-- Valid-call false block rates from the latest run were `70/5042 = 0.0139` at confidence `0.80`, `57/5042 = 0.0113` at `0.90`, `43/5042 = 0.0085` at `0.95`, `28/5042 = 0.0056` at `0.98`, and `16/5042 = 0.0032` at `0.99`.
-- The `needs_clarification` test support is small (`8` rows), so treat that label as under-validated despite the perfect held-out score.
-- For fixed-width numeric strings, train and evaluate both representation and value. A four-digit count field has a structural range of `0000` through `9999`, but a request for `10` records is semantically correct only as `0010` for that tool.
-- The latest local eval/resource review is documented in [`local_eval_findings_2026-05-30.md`](local_eval_findings_2026-05-30.md).
-- Validate public dataset licenses and any Forge-derived traces before publishing derived artifacts broadly.
-
-## Tokenizer notes
-
-The training run emitted tokenizer warnings around slow-to-fast conversion and regex/tokenization behavior. For parity-sensitive deployment, prefer the tokenizer path used by the notebook and artifact tests, and keep `use_fast=False` unless you have separately verified byte-for-byte or score-level parity.
-
-If your Transformers version emits a Mistral regex warning for the local artifact, load with the appropriate `fix_mistral_regex=True` setting where supported. For Rust deployment, verify whether `tokenizer.json` is present and equivalent. If tokenizer parity is uncertain, use a sidecar scorer process until the tokenizer path is proven.
-
-## ONNX parity check
-
-The latest downloaded `onnx_parity_report.json` reported:
-
-| Check | Value |
-|---|---:|
-| Rows | 257 |
-| PyTorch/FP32 ONNX top-label agreement | 1.0 |
-| PyTorch/FP32 ONNX max absolute difference | `9.655952453613281e-06` |
-| Quantized artifact present | true |
-| FP32/quantized top-label agreement | 0.9299610894941635 |
-| FP32/quantized disagreements | 18 |
-| FP32/quantized max absolute difference | `7.591222286224365` |
-
-This is an artifact parity report, not a full deployment benchmark. The quantized disagreement rate is a concrete reason to keep quantized deployments in `shadow` until replay traces prove the thresholds are safe.
-
-## Related final-response verifier
-
-The notebook can also train a separate final-response verifier with labels such as `valid_final_response`, `missing_tool_fact`, `contradicts_tool_result`, `unsupported_claim`, and `failed_to_acknowledge_data_gap`. That verifier is a separate artifact family and should be documented, evaluated, and deployed independently from this tool-call verifier.
-
-The latest final-response run was small: `128` total rows split into `97` train, `17` validation, and `14` test rows. Its held-out macro F1 was `0.05`, so it should stay experimental/shadow-only until the dataset is materially expanded.
-
-The 2026-05-30 release replay also showed poor runtime separation: `302/302`
-final responses were labeled `failed_to_acknowledge_data_gap` at roughly `0.23`
-confidence. Keep all final-response non-valid labels action-disabled with
-`advisory_min_confidence=1.01` and `enforce_min_confidence=1.01` until top-k
-telemetry and expanded eval data show useful separation.
-
-## Limitations
-
-- This model was trained on serialized tool-call contexts, not arbitrary natural language.
-- It assumes deterministic validation has already run.
-- It is sensitive to serializer drift, tokenizer drift, and tool-list truncation.
-- Aggregate metrics are strong, but valid-call false positives are more important than headline macro F1 for enforcement.
-- The Forge-specific test slices are still small: `forge_trace` has `30` rows and `forge_augmented` has `11` rows. They are useful smoke signals, not sufficient Forge coverage.
-- The final-response verifier path in the notebook is not mature enough for enforcement based on the shown data.
-- Resource cost is not free: the local final-response shadow run raised proxy mean RSS from `416.82 MiB` in the tool-call-only enforce run to `906.51 MiB`, with proxy p95 RSS rising from `603.73 MiB` to `1276.23 MiB`.
-
-## Recommended eval replay before promotion
-
-Run at least these variants before changing deployment mode:
+Minimum replay matrix:
 
 ```text
 no_classifier
@@ -471,13 +401,14 @@ classifier_fp32_onnx_advisory
 classifier_quantized_onnx_advisory
 ```
 
-Promotion criteria should include:
+Promotion must show:
 
-- zero or near-zero false objections on valid calls,
+- `valid` recall at least `0.94`,
+- `valid` false objection at confidence `0.90` at most `0.005`,
+- `wrong_tool_semantic` precision at least `0.90`,
+- valid-protection slice gates for any slice with at least `25` valid rows,
 - no regression in terminal-tool workflows,
 - no regression in summarize/report workflows,
-- improved targeted scenario-family scores,
-- acceptable p95/p99 latency,
-- acceptable proxy RSS and CPU budgets with resource sampling enabled,
-- PyTorch/ONNX/quantized parity on replay traces,
-- stable behavior across real tool schemas, not only public function-calling datasets.
+- no regression in fixed-width numeric strings or corrected error-recovery calls,
+- acceptable p95/p99 latency and proxy RSS,
+- stable behavior across real Forge tool schemas, not only public datasets.
