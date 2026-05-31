@@ -6,9 +6,9 @@ use crate::clients::base::ToolCall;
 use crate::core::message::{Message, MessageRole, MessageType};
 use crate::core::tool_spec::ToolSpec;
 use crate::guardrails::{
-    recent_errors_from_messages, FinalResponseContext, FinalResponseScorer,
-    FinalResponseToolResult, ScoringContext, ScoringPipeline, StepEnforcer, ToolCallScorer,
-    WorkflowStateForScoring,
+    final_response_top_k_from_logits, recent_errors_from_messages, tool_call_top_k_from_logits,
+    FinalResponseContext, FinalResponseScorer, FinalResponseToolResult, ScoringContext,
+    ScoringPipeline, StepEnforcer, ToolCallScorer, WorkflowStateForScoring,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 
@@ -69,6 +69,7 @@ pub(super) async fn score_proxy_tool_calls(
                     "tool": call.tool.as_str(),
                     "label": score.label.as_label().as_ref(),
                     "confidence": score.confidence,
+                    "top_k": tool_call_top_k_from_logits(&score.logits),
                     "action": score.action.as_str(),
                     "latency_ms": score.latency_ms,
                     "model_version": score.model_version.as_str(),
@@ -207,6 +208,7 @@ async fn score_proxy_final_candidate(
                     "terminal_tool": terminal_tool_name,
                     "label": score.label.as_label().as_ref(),
                     "confidence": score.confidence,
+                    "top_k": final_response_top_k_from_logits(&score.logits),
                     "action": score.action.as_str(),
                     "latency_ms": score.latency_ms,
                     "model_version": score.model_version.as_str(),

@@ -4,7 +4,7 @@ mod cli;
 mod client;
 mod config;
 mod response;
-mod routes;
+pub mod routes;
 mod startup;
 mod upstream;
 

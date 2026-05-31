@@ -4,35 +4,32 @@
 //! It converts inbound OpenAI messages, runs inference with validation/retry,
 //! then strips respond() calls from output.
 
-use crate::clients::base::{
-    LLMClient, LLMRequestOptions, LLMResponse, LLMUsageDetails, TextResponse, ToolCall,
-};
+use crate::clients::base::{LLMClient, LLMRequestOptions, LLMResponse, TextResponse, ToolCall};
 use crate::context::manager::ContextManager;
-use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::error::StreamError;
-use crate::guardrails::{FinalResponseScorer, StepCheck, StepEnforcer, ToolCallScorer};
+use crate::guardrails::{FinalResponseScorer, StepEnforcer, ToolCallScorer};
 use crate::proxy::{
     extract_passthrough, extract_sampling, openai_to_messages, strip_respond_calls,
     OpenAiMessageError,
 };
-use crate::tool_output::{
-    compress_tool_output, ToolOutputCompressionConfig, ToolOutputCompressionState,
-};
+use crate::tool_output::{ToolOutputCompressionConfig, ToolOutputCompressionState};
 use crate::tool_policy::{
     evaluate_tool_call_policy, ToolCallPolicyConfig, ToolCallPolicyRequestState,
 };
 use crate::tools::respond::RESPOND_TOOL_NAME;
 use anyllm_translate::anthropic::streaming::StreamEvent;
-use anyllm_translate::anthropic::MessageCreateRequest;
 use futures_core::Stream;
-use indexmap::{IndexMap, IndexSet};
-use serde_json::{json, Value};
+use indexmap::IndexSet;
+use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod anthropic;
 mod classifier_log;
+mod compression;
+mod nudge;
 mod passthrough;
 mod prior_tool_results;
 mod request_contract;
@@ -40,6 +37,18 @@ mod response_shape;
 mod scoring;
 mod tool_specs;
 
+pub use anthropic::{
+    handle_anthropic_messages, handle_anthropic_messages_with_scorer,
+    handle_anthropic_messages_with_scorers,
+    handle_anthropic_messages_with_scorers_and_tool_controls,
+    handle_anthropic_messages_with_scorers_and_tool_output_compression,
+};
+use compression::{compress_proxy_tool_results, patch_anthropic_tool_results};
+use nudge::{
+    emit_proxy_classifier_nudge_or_error, emit_proxy_final_response_tool_nudge_or_error,
+    emit_proxy_step_nudge_or_error, emit_proxy_tool_policy_nudge_or_error,
+    emit_proxy_user_classifier_nudge_or_error, synthetic_respond_tool_call,
+};
 pub use passthrough::run_passthrough;
 use prior_tool_results::record_completed_proxy_tool_results;
 #[cfg(test)]
@@ -51,11 +60,9 @@ use request_contract::{
     strip_forge_extension_from_body, validate_proxy_step_contract, FORGE_EXTENSION_FIELD,
     FORGE_REQUIRED_STEPS_FIELD, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
 };
-use response_shape::{
-    anthropic_events_stream, text_content_result, text_response_result, tool_calls_result,
-};
 #[cfg(test)]
 use response_shape::{collect_anthropic_events, collect_openai_events};
+use response_shape::{text_content_result, text_response_result, tool_calls_result};
 use scoring::{score_proxy_final_text, score_proxy_final_tool_calls, score_proxy_tool_calls};
 pub use tool_specs::parse_tool_specs;
 
@@ -158,206 +165,6 @@ impl AnthropicHandlerError {
                 message
             }
         }
-    }
-}
-
-fn chat_error_to_anthropic(error: HandlerError) -> AnthropicHandlerError {
-    match error {
-        HandlerError::BadRequest(message) => AnthropicHandlerError::BadRequest(message),
-        HandlerError::Upstream(message) => AnthropicHandlerError::Upstream(message),
-    }
-}
-
-/// Handle /v1/messages by translating Anthropic input through the guarded
-/// OpenAI-compatible handler, then translating the response back to Anthropic.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_anthropic_messages<C: LLMClient + 'static>(
-    body: &MessageCreateRequest,
-    raw_body: &Value,
-    client: &Arc<C>,
-    context_manager: &Arc<Mutex<ContextManager>>,
-    max_retries: i32,
-    rescue_enabled: bool,
-) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
-    handle_anthropic_messages_with_scorer(
-        body,
-        raw_body,
-        client,
-        context_manager,
-        max_retries,
-        rescue_enabled,
-        None,
-    )
-    .await
-}
-
-/// Handle /v1/messages with an optional shadow classifier scorer.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_anthropic_messages_with_scorer<C: LLMClient + 'static>(
-    body: &MessageCreateRequest,
-    raw_body: &Value,
-    client: &Arc<C>,
-    context_manager: &Arc<Mutex<ContextManager>>,
-    max_retries: i32,
-    rescue_enabled: bool,
-    scorer: Option<Arc<dyn ToolCallScorer>>,
-) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
-    handle_anthropic_messages_with_scorers(
-        body,
-        raw_body,
-        client,
-        context_manager,
-        max_retries,
-        rescue_enabled,
-        scorer,
-        None,
-    )
-    .await
-}
-
-/// Handle /v1/messages with optional tool-call and final-response scorers.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_anthropic_messages_with_scorers<C: LLMClient + 'static>(
-    body: &MessageCreateRequest,
-    raw_body: &Value,
-    client: &Arc<C>,
-    context_manager: &Arc<Mutex<ContextManager>>,
-    max_retries: i32,
-    rescue_enabled: bool,
-    scorer: Option<Arc<dyn ToolCallScorer>>,
-    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
-) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
-    handle_anthropic_messages_with_scorers_and_tool_controls(
-        body,
-        raw_body,
-        client,
-        context_manager,
-        max_retries,
-        rescue_enabled,
-        scorer,
-        final_response_scorer,
-        ToolOutputCompressionConfig::disabled(),
-        None,
-        ToolCallPolicyConfig::disabled(),
-    )
-    .await
-}
-
-/// Handle /v1/messages with optional scorers and tool-output compression.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_anthropic_messages_with_scorers_and_tool_output_compression<
-    C: LLMClient + 'static,
->(
-    body: &MessageCreateRequest,
-    raw_body: &Value,
-    client: &Arc<C>,
-    context_manager: &Arc<Mutex<ContextManager>>,
-    max_retries: i32,
-    rescue_enabled: bool,
-    scorer: Option<Arc<dyn ToolCallScorer>>,
-    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
-    default_tool_output_compression: ToolOutputCompressionConfig,
-    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
-) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
-    handle_anthropic_messages_with_scorers_and_tool_controls(
-        body,
-        raw_body,
-        client,
-        context_manager,
-        max_retries,
-        rescue_enabled,
-        scorer,
-        final_response_scorer,
-        default_tool_output_compression,
-        tool_output_state,
-        ToolCallPolicyConfig::disabled(),
-    )
-    .await
-}
-
-/// Handle /v1/messages with optional scorers, tool-output compression, and tool-call policy.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_anthropic_messages_with_scorers_and_tool_controls<C: LLMClient + 'static>(
-    body: &MessageCreateRequest,
-    raw_body: &Value,
-    client: &Arc<C>,
-    context_manager: &Arc<Mutex<ContextManager>>,
-    max_retries: i32,
-    rescue_enabled: bool,
-    scorer: Option<Arc<dyn ToolCallScorer>>,
-    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
-    default_tool_output_compression: ToolOutputCompressionConfig,
-    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
-    default_tool_call_policy: ToolCallPolicyConfig,
-) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
-    let config = anyllm_translate::TranslationConfig::default();
-    let openai_req = anyllm_translate::translate_request(body, &config)
-        .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
-    let mut openai_value = serde_json::to_value(&openai_req)
-        .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
-    copy_forge_extension_if_missing(raw_body, &mut openai_value);
-    if let (Some(max_tokens), Some(obj)) =
-        (raw_body.get("max_tokens"), openai_value.as_object_mut())
-    {
-        obj.insert("max_tokens".to_string(), max_tokens.clone());
-        obj.remove("max_completion_tokens");
-    }
-
-    match handle_chat_completions_impl(
-        &openai_value,
-        client,
-        context_manager,
-        max_retries,
-        rescue_enabled,
-        Some(raw_body.clone()),
-        scorer,
-        final_response_scorer,
-        default_tool_output_compression,
-        tool_output_state,
-        default_tool_call_policy,
-    )
-    .await
-    .map_err(chat_error_to_anthropic)?
-    {
-        HandlerResult::Response(openai_resp) => {
-            let response: anyllm_translate::openai::ChatCompletionResponse =
-                serde_json::from_value(openai_resp)
-                    .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
-            let anthropic_resp = anyllm_translate::translate_response(&response, &body.model);
-            let mut value = serde_json::to_value(anthropic_resp)
-                .map_err(|e| AnthropicHandlerError::Internal(e.to_string()))?;
-            apply_anthropic_usage_details(&mut value, client.last_usage_details().as_ref());
-            Ok(AnthropicHandlerResult::Response(value))
-        }
-        HandlerResult::StreamBody(openai_events) => Ok(AnthropicHandlerResult::StreamBody(
-            anthropic_events_stream(openai_events, body.model.clone()),
-        )),
-    }
-}
-
-fn copy_forge_extension_if_missing(raw_body: &Value, openai_value: &mut Value) {
-    let Some(forge) = raw_body.get(FORGE_EXTENSION_FIELD) else {
-        return;
-    };
-    let Some(obj) = openai_value.as_object_mut() else {
-        return;
-    };
-    obj.entry(FORGE_EXTENSION_FIELD.to_string())
-        .or_insert_with(|| forge.clone());
-}
-
-fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDetails>) {
-    let Some(details) = details else {
-        return;
-    };
-    let Some(usage) = value.get_mut("usage").and_then(Value::as_object_mut) else {
-        return;
-    };
-    if let Some(read) = details.cache_read_input_tokens {
-        usage.insert("cache_read_input_tokens".to_string(), json!(read));
-    }
-    if let Some(created) = details.cache_creation_input_tokens {
-        usage.insert("cache_creation_input_tokens".to_string(), json!(created));
     }
 }
 
@@ -497,7 +304,7 @@ pub async fn handle_chat_completions_with_scorers_and_tool_controls<C: LLMClient
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_chat_completions_impl<C: LLMClient + 'static>(
+pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     body: &Value,
     client: &Arc<C>,
     context_manager: &Arc<Mutex<ContextManager>>,
@@ -565,6 +372,10 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             let mut patched = body.as_ref().clone();
             if patch_anthropic_tool_results(&mut patched, &tool_output_updates) {
                 request_options.inbound_anthropic_body = Some(Arc::new(patched));
+            } else {
+                tracing::warn!(
+                    "failed to patch compressed tool outputs into Anthropic request body; falling back to rebuilt body which may discard custom metadata or cache_control flags"
+                );
             }
         }
     }
@@ -929,375 +740,6 @@ async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     };
 
     Ok(handler_result)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolOutputCompressionUpdate {
-    tool_call_id: Option<String>,
-    output: String,
-}
-
-fn compress_proxy_tool_results(
-    messages: &mut [Message],
-    config: &ToolOutputCompressionConfig,
-    state: Option<&ToolOutputCompressionState>,
-) -> Vec<ToolOutputCompressionUpdate> {
-    if !config.enabled() {
-        return Vec::new();
-    }
-
-    let mut pending_tool_calls: IndexMap<String, ToolCallInfo> = IndexMap::new();
-    let mut updates = Vec::new();
-    for message in messages {
-        match message.role {
-            MessageRole::Assistant => {
-                let Some(tool_calls) = &message.tool_calls else {
-                    continue;
-                };
-                for call in tool_calls {
-                    pending_tool_calls.insert(call.call_id.clone(), call.clone());
-                }
-            }
-            MessageRole::Tool => {
-                if message.metadata.msg_type != MessageType::ToolResult {
-                    continue;
-                }
-                let call = message
-                    .tool_call_id
-                    .as_deref()
-                    .and_then(|call_id| pending_tool_calls.get(call_id));
-                let tool_name = call
-                    .map(|call| call.name.as_str())
-                    .or(message.tool_name.as_deref())
-                    .unwrap_or("generic");
-                let args = call.and_then(|call| call.args.as_ref());
-                let result = compress_tool_output(tool_name, args, &message.content, config, state);
-                if result.output != message.content {
-                    tracing::info!(
-                        target: "forge.tool_output",
-                        tool = %result.canonical_tool,
-                        family = %result.family,
-                        mode = %result.mode,
-                        before_tokens = result.before_tokens,
-                        after_tokens = result.after_tokens,
-                        saved_tokens = result.saved_tokens,
-                        saved_pct = result.saved_pct,
-                        redacted = result.redacted,
-                        capped = result.capped,
-                        deduped = result.deduped,
-                        "compressed proxy tool output"
-                    );
-                    updates.push(ToolOutputCompressionUpdate {
-                        tool_call_id: message.tool_call_id.clone(),
-                        output: result.output.clone(),
-                    });
-                    message.content = result.output;
-                }
-            }
-            _ => {}
-        }
-    }
-    updates
-}
-
-fn patch_anthropic_tool_results(body: &mut Value, updates: &[ToolOutputCompressionUpdate]) -> bool {
-    let mut pending = IndexMap::new();
-    for update in updates {
-        let Some(tool_call_id) = update
-            .tool_call_id
-            .as_deref()
-            .filter(|tool_call_id| !tool_call_id.is_empty())
-        else {
-            return false;
-        };
-        pending.insert(tool_call_id.to_string(), update.output.clone());
-    }
-
-    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
-        return false;
-    };
-    for message in messages {
-        let Some(content) = message.get_mut("content") else {
-            continue;
-        };
-        if !patch_anthropic_content_blocks(content, &mut pending) {
-            return false;
-        }
-    }
-
-    pending.is_empty()
-}
-
-fn patch_anthropic_content_blocks(
-    content: &mut Value,
-    pending: &mut IndexMap<String, String>,
-) -> bool {
-    let Value::Array(blocks) = content else {
-        return true;
-    };
-
-    for block in blocks {
-        let Some(obj) = block.as_object_mut() else {
-            continue;
-        };
-        if obj.get("type").and_then(Value::as_str) != Some("tool_result") {
-            continue;
-        }
-        let Some(tool_use_id) = obj
-            .get("tool_use_id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        let Some(output) = pending.get(&tool_use_id).cloned() else {
-            continue;
-        };
-        if !patch_anthropic_tool_result_content(obj, &output) {
-            return false;
-        }
-        pending.shift_remove(&tool_use_id);
-    }
-
-    true
-}
-
-fn patch_anthropic_tool_result_content(
-    obj: &mut serde_json::Map<String, Value>,
-    output: &str,
-) -> bool {
-    let output = raw_anthropic_tool_result_output(obj, output);
-    match obj.get_mut("content") {
-        Some(Value::String(content)) => {
-            *content = output;
-            true
-        }
-        Some(Value::Null) | None => {
-            obj.insert("content".to_string(), Value::String(output));
-            true
-        }
-        Some(Value::Array(blocks)) => patch_single_anthropic_tool_result_text_block(blocks, output),
-        _ => false,
-    }
-}
-
-fn raw_anthropic_tool_result_output(obj: &serde_json::Map<String, Value>, output: &str) -> String {
-    if obj.get("is_error").and_then(Value::as_bool) == Some(true) {
-        output.strip_prefix("Error: ").unwrap_or(output).to_string()
-    } else {
-        output.to_string()
-    }
-}
-
-fn patch_single_anthropic_tool_result_text_block(blocks: &mut [Value], output: String) -> bool {
-    let [block] = blocks else {
-        return false;
-    };
-    let Some(obj) = block.as_object_mut() else {
-        return false;
-    };
-    if obj.get("type").and_then(Value::as_str) != Some("text") {
-        return false;
-    }
-    if !obj.get("text").is_some_and(Value::is_string) {
-        return false;
-    }
-    obj.insert("text".to_string(), Value::String(output));
-    true
-}
-
-fn synthetic_respond_tool_call(text: &TextResponse) -> ToolCall {
-    let mut args = IndexMap::new();
-    args.insert("message".to_string(), Value::String(text.content.clone()));
-    ToolCall::new(RESPOND_TOOL_NAME, args)
-}
-
-fn emit_proxy_step_nudge_or_error(
-    enforcer: &StepEnforcer,
-    step_check: StepCheck,
-    tool_calls: Vec<ToolCall>,
-    messages: &mut Vec<Message>,
-    tool_call_counter: &mut i64,
-) -> Result<(), String> {
-    if enforcer.premature_exhausted() {
-        return Err(format!(
-            "step enforcement exhausted after {} premature terminal tool attempts; pending required steps: {}",
-            enforcer.premature_attempts(),
-            enforcer.pending().join(", ")
-        ));
-    }
-    let nudge = step_check.nudge.expect("step nudge required");
-    let calls =
-        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
-    emit_proxy_guardrail_nudge_results(
-        &calls,
-        messages,
-        PROXY_STEP_INDEX,
-        MessageType::StepNudge,
-        "[StepEnforcementError]",
-        &nudge.content,
-    );
-    Ok(())
-}
-
-fn emit_proxy_classifier_nudge_or_error(
-    error_tracker: &mut crate::guardrails::ErrorTracker,
-    tool_calls: Vec<ToolCall>,
-    messages: &mut Vec<Message>,
-    tool_call_counter: &mut i64,
-    nudge_content: &str,
-) -> Result<(), String> {
-    error_tracker.record_retry();
-    if error_tracker.retries_exhausted() {
-        return Err(format!(
-            "classifier objections exhausted after {} retries",
-            error_tracker.max_retries()
-        ));
-    }
-    let calls =
-        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
-    emit_proxy_guardrail_nudge_results(
-        &calls,
-        messages,
-        PROXY_STEP_INDEX,
-        MessageType::RetryNudge,
-        "[ClassifierNudge]",
-        nudge_content,
-    );
-    Ok(())
-}
-
-fn emit_proxy_tool_policy_nudge_or_error(
-    error_tracker: &mut crate::guardrails::ErrorTracker,
-    tool_calls: Vec<ToolCall>,
-    messages: &mut Vec<Message>,
-    tool_call_counter: &mut i64,
-    nudge_content: &str,
-) -> Result<(), String> {
-    error_tracker.record_retry();
-    if error_tracker.retries_exhausted() {
-        return Err(format!(
-            "tool-call policy objections exhausted after {} retries",
-            error_tracker.max_retries()
-        ));
-    }
-    let calls =
-        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
-    emit_proxy_guardrail_nudge_results(
-        &calls,
-        messages,
-        PROXY_STEP_INDEX,
-        MessageType::RetryNudge,
-        "[ToolCallPolicyNudge]",
-        nudge_content,
-    );
-    Ok(())
-}
-
-fn emit_proxy_final_response_tool_nudge_or_error(
-    error_tracker: &mut crate::guardrails::ErrorTracker,
-    tool_calls: Vec<ToolCall>,
-    messages: &mut Vec<Message>,
-    tool_call_counter: &mut i64,
-    nudge_content: &str,
-) -> Result<(), String> {
-    error_tracker.record_retry();
-    if error_tracker.retries_exhausted() {
-        return Err(format!(
-            "final-response classifier objections exhausted after {} retries",
-            error_tracker.max_retries()
-        ));
-    }
-    let calls =
-        emit_proxy_assistant_tool_calls(tool_calls, messages, tool_call_counter, PROXY_STEP_INDEX);
-    emit_proxy_guardrail_nudge_results(
-        &calls,
-        messages,
-        PROXY_STEP_INDEX,
-        MessageType::RetryNudge,
-        "[FinalResponseNudge]",
-        nudge_content,
-    );
-    Ok(())
-}
-
-fn emit_proxy_user_classifier_nudge_or_error(
-    error_tracker: &mut crate::guardrails::ErrorTracker,
-    messages: &mut Vec<Message>,
-    nudge_content: &str,
-) -> Result<(), String> {
-    error_tracker.record_retry();
-    if error_tracker.retries_exhausted() {
-        return Err(format!(
-            "final-response classifier objections exhausted after {} retries",
-            error_tracker.max_retries()
-        ));
-    }
-    messages.push(Message::new(
-        MessageRole::User,
-        format!("[FinalResponseNudge] {nudge_content}"),
-        MessageMeta::new(MessageType::RetryNudge).with_step_index(PROXY_STEP_INDEX),
-    ));
-    Ok(())
-}
-
-fn emit_proxy_assistant_tool_calls(
-    mut calls: Vec<ToolCall>,
-    messages: &mut Vec<Message>,
-    tool_call_counter: &mut i64,
-    step_index: i64,
-) -> Vec<ToolCall> {
-    if let Some(reasoning) = calls.first().and_then(|tc| tc.reasoning.as_ref()) {
-        messages.push(Message::new(
-            MessageRole::Assistant,
-            reasoning.as_str(),
-            MessageMeta::new(MessageType::Reasoning).with_step_index(step_index),
-        ));
-    }
-
-    let mut infos = Vec::with_capacity(calls.len());
-    for tc in &mut calls {
-        let call_id = tc.id.clone().unwrap_or_else(|| {
-            let id = crate::core::inference::format_tool_call_id(*tool_call_counter);
-            *tool_call_counter += 1;
-            id
-        });
-        tc.id = Some(call_id.clone());
-        infos.push(ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), call_id));
-    }
-
-    messages.push(
-        Message::new(
-            MessageRole::Assistant,
-            "",
-            MessageMeta::new(MessageType::ToolCall).with_step_index(step_index),
-        )
-        .with_tool_calls(infos),
-    );
-    calls
-}
-
-fn emit_proxy_guardrail_nudge_results(
-    calls: &[ToolCall],
-    messages: &mut Vec<Message>,
-    step_index: i64,
-    msg_type: MessageType,
-    prefix: &str,
-    nudge_content: &str,
-) {
-    for tc in calls {
-        let call_id = tc.id.as_deref().unwrap_or_default();
-        let error_content = format!("{prefix} {nudge_content}");
-        messages.push(
-            Message::new(
-                MessageRole::Tool,
-                error_content,
-                MessageMeta::new(msg_type).with_step_index(step_index),
-            )
-            .with_tool_name(&tc.tool)
-            .with_tool_call_id(call_id),
-        );
-    }
 }
 
 /// Remove respond() calls, keeping only real tool calls.

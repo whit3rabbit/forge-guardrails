@@ -231,7 +231,7 @@ cargo run --features classifier --bin download-classifier -- \
 
 The downloader defaults to the pinned Hugging Face revision used by Rust's
 `DEFAULT_CLASSIFIER_REVISION`, currently
-`1c87eceea15ec42f755deafb0ac4166bd0bd51b0` for
+`b8e292b4de5725250bd1698eb5c795ffcb1a4cde` for
 `cowWhySo/toolcall-verifier-classifier-production`. It writes the runnable ONNX
 artifact under `target/classifier-artifacts/onnx` and also downloads published
 schema/report sidecars such as `input_schema_v1.json`,
@@ -268,23 +268,35 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 
 scripts/run_local_eval.sh --suite release --runs 10 \
   --classify \
+  --classifier-mode shadow \
+  --verify-final-response \
+  --final-response-classifier-mode shadow \
+  --output-dir target/local-eval/release-onnx-final-shadow
+
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
   --classifier-mode enforce \
   --output-dir target/local-eval/release-onnx-enforce
 ```
 
 The classifier default is `shadow`, but the supported modes are `disabled`,
 `shadow`, `advisory`, and `enforce`. In shadow mode it should not change
-completeness, success, retries, or nudges. In enforce mode it can retry/block
-only labels whose artifact threshold is met; labels with thresholds above `1.0`
-remain telemetry-only, and deterministic guardrails remain authoritative for
-schema/protocol invalidity. `scripts/run_local_eval.sh` writes proxy classifier
-telemetry to `proxy_classifier_<budget>.jsonl` whenever the classifier is
-enabled, using the `FORGE_CLASSIFIER_LOG` environment variable. Use that JSONL
-and Rust smoke JSONL classifier fields to inspect classifier scores; use the
-Python oracle JSONL and reports to confirm behavior changes. The proxy summary
-also compares classifier labels against oracle requests when classifier JSONL is
-available, so threshold promotion decisions should use oracle outcomes rather
-than confidence alone.
+completeness, success, retries, or nudges. Shadow runs show counterfactual
+classifier decisions in telemetry only: inspect `action`, `label`, and
+`confidence` in `proxy_classifier_<budget>.jsonl`, plus the sorted `top_k`
+probability entries for calibration and label-collapse checks. Also inspect
+`classifier_*` and `final_response_classifier_*` fields in `rust_smoke.jsonl`.
+In enforce mode it can retry/block only labels whose artifact threshold is met;
+labels with thresholds above `1.0` remain telemetry-only, and deterministic
+guardrails remain authoritative for schema/protocol invalidity.
+`scripts/run_local_eval.sh` writes proxy classifier telemetry to
+`proxy_classifier_<budget>.jsonl` whenever a tool-call classifier or
+final-response verifier is enabled, using the `FORGE_CLASSIFIER_LOG`
+environment variable. Use that JSONL and Rust smoke JSONL classifier fields to
+inspect classifier scores; use the Python oracle JSONL and reports to confirm
+behavior changes. The proxy summary also compares classifier labels against
+oracle requests when classifier JSONL is available, so threshold promotion
+decisions should use oracle outcomes rather than confidence alone.
 
 Classifier JSONL writes use a bounded async sink. Optional controls are
 `FORGE_CLASSIFIER_LOG_QUEUE_CAPACITY`, `FORGE_CLASSIFIER_LOG_MAX_EVENT_BYTES`,
@@ -302,7 +314,20 @@ candidate/context pairs during replay.
 
 The Colab production notebook now exports the tool-call verifier and the
 separate final-response verifier by default. Keep both in `shadow` for first
-replay. Download the final-response artifact with:
+replay. The eval shortcut below downloads the pinned quantized final-response
+verifier into `target/final-response-classifier-artifacts/onnx` when needed,
+enables it, and passes it to both the proxy and Rust smoke runner:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
+  --classifier-mode shadow \
+  --verify-final-response \
+  --final-response-classifier-mode shadow \
+  --output-dir target/local-eval/release-onnx-final-shadow
+```
+
+You can also download the final-response artifact explicitly with:
 
 ```bash
 cargo run --features classifier --bin download-classifier -- \
@@ -313,7 +338,7 @@ cargo run --features classifier --bin download-classifier -- \
 That command writes the published files under
 `target/final-response-classifier-artifacts/onnx` by default. The pinned
 final-response revision is
-`69d1a75d0fad25e3cf1333c7ea9c7cf0584614a4` for
+`bb11f0aaece9cae6f9b553e7522cb6d75d9cafbc` for
 `cowWhySo/final-response-verifier-classifier-production`.
 
 Run final-response variants with the matching final-response classifier flags:

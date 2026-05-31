@@ -45,8 +45,9 @@ pub use policy::{
 };
 pub use response_validator::{ResponseValidator, RetryNudgeFn, ValidationResult};
 pub use scoring::{
-    score_final_response_async, score_tool_call_async, serialize_final_response_state_v1,
-    ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore,
+    final_response_top_k_from_logits, score_final_response_async, score_tool_call_async,
+    serialize_final_response_state_v1, tool_call_top_k_from_logits, ClassifierAction,
+    ClassifierTopKEntry, FinalResponseClass, FinalResponseContext, FinalResponseScore,
     FinalResponseScorer, FinalResponseToolResult, NoopFinalResponseScorer, NoopToolCallScorer,
     ScorerMode, ScoringExecutor, ScoringPipeline, ToolCallClass, ToolCallScore, ToolCallScorer,
 };

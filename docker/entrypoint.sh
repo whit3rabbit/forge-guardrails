@@ -139,7 +139,10 @@ fi
 
 append_default "--host" "${FORGE_HOST:-0.0.0.0}"
 append_default "--port" "${FORGE_PORT:-${PORT:-${LISTEN_PORT:-8081}}}"
-append_default "--model" "${FORGE_MODEL:-${SMALL_MODEL:-gpt-4o-mini}}"
+default_model="${FORGE_MODEL:-${SMALL_MODEL:-}}"
+if [[ -n "$default_model" ]]; then
+    append_default "--model" "$default_model"
+fi
 
 if [[ "$using_sidecar" == "true" || -n "${FORGE_CONTEXT_TOKENS:-}" ]]; then
     append_default "--budget-tokens" "${FORGE_CONTEXT_TOKENS:-128000}"

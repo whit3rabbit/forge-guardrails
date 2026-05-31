@@ -26,7 +26,7 @@ const NOISE_DIRS: &[&str] = &[
 ];
 
 pub(in crate::tool_output) fn is_noise_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
     NOISE_DIRS.iter().any(|dir| {
         lower.contains(&format!("/{dir}/"))
             || lower.starts_with(&format!("{dir}/"))

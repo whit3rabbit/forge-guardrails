@@ -8,6 +8,7 @@ from .schemas import FINAL_RESPONSE_TRAINING_SCHEMA, TOOL_CALL_TRAINING_SCHEMA
 
 
 def validate_tool_call_row(row: dict[str, Any]) -> None:
+    """Validate a single tool call training data row against the schema and parameter definitions."""
     validate(instance=row, schema=TOOL_CALL_TRAINING_SCHEMA)
     call = row["input"]["candidate_call"]
     tool = _tool_by_name(row["input"]["available_tools"], call["name"])
@@ -19,6 +20,7 @@ def validate_tool_call_row(row: dict[str, Any]) -> None:
 
 
 def validate_final_response_row(row: dict[str, Any]) -> None:
+    """Validate a single final response training data row against the schema."""
     validate(instance=row, schema=FINAL_RESPONSE_TRAINING_SCHEMA)
 
 

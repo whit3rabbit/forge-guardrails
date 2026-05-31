@@ -96,7 +96,7 @@ CASES = [
         "opentoken_filter": "cargo",
         "args": {"command": "cargo check --message-format=json"},
         "input": '{"reason":"compiler-artifact","package_id":"demo 0.1.0","target":{"name":"demo"}}\n'
-        '{"reason":"compiler-message","message":{"level":"error","message":"cannot find value `missing` in this scope","code":{"code":"E0425"},"spans":[{"file_name":"src/lib.rs","line_start":7,"column_start":5,"line_end":7,"column_end":12,"text":[{"text":"    missing","highlight_start":5,"highlight_end":12}]}],"rendered":"error[E0425]: cannot find value `missing` in this scope\\n --> src/lib.rs:7:5\\n  |\\n7 |     missing\\n  |     ^^^^^^^ not found in this scope\\n"}}}\n'
+        '{"reason":"compiler-message","message":{"level":"error","message":"cannot find value `missing` in this scope","code":{"code":"E0425"},"spans":[{"file_name":"src/lib.rs","line_start":7,"column_start":5,"line_end":7,"column_end":12,"text":[{"text":"    missing","highlight_start":5,"highlight_end":12}]}],"rendered":"error[E0425]: cannot find value `missing` in this scope\\n --> src/lib.rs:7:5\\n  |\\n7 |     missing\\n  |     ^^^^^^^ not found in this scope\\n"}}\n'
         '{"reason":"build-finished","success":false}\n',
     },
     {
@@ -342,7 +342,7 @@ def expand_input(case: dict) -> str:
     )
 
 
-FORGE_SAFETY_PRESERVE_INPUTS = {"cargo_json_diagnostic"}
+FORGE_SAFETY_PRESERVE_INPUTS = set()
 
 FORGE_SAFETY_EXPECTED_OUTPUTS = {
     "grep_rg_json_context_events": "2 files, 2 matches:\n\n"
@@ -350,6 +350,7 @@ FORGE_SAFETY_EXPECTED_OUTPUTS = {
     "  10: pub struct Widget;\n\n"
     "src/ui.rs:\n"
     "  42: Widget",
+    "cargo_json_diagnostic": "Errors (1):\nerror[E0425]: cannot find value `missing` in this scope\n --> src/lib.rs:7:5\n  |\n7 |     missing\n  |     ^^^^^^^ not found in this scope\n\n",
 }
 
 

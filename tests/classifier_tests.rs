@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use forge_guardrails::guardrails::{
-    score_final_response_async, score_tool_call_async, serialize_final_response_state_v1,
-    ArtifactManifest, ClassifierAction, ClassifierArtifact, FinalResponseClass,
-    FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScore, FinalResponseScorer,
-    FinalResponseToolResult, LabelsFile, NoopFinalResponseScorer, ScorerMode, ScoringContext,
-    ScoringMetadata, ScoringPipeline, TerminalTool, Thresholds, ToolCallClass, ToolCallScore,
-    ToolCallScorer, WorkflowStateForScoring,
+    final_response_top_k_from_logits, score_final_response_async, score_tool_call_async,
+    serialize_final_response_state_v1, tool_call_top_k_from_logits, ArtifactManifest,
+    ClassifierAction, ClassifierArtifact, FinalResponseClass, FinalResponseClassifierArtifact,
+    FinalResponseContext, FinalResponseScore, FinalResponseScorer, FinalResponseToolResult,
+    LabelsFile, NoopFinalResponseScorer, ScorerMode, ScoringContext, ScoringMetadata,
+    ScoringPipeline, TerminalTool, Thresholds, ToolCallClass, ToolCallScore, ToolCallScorer,
+    WorkflowStateForScoring,
 };
 use forge_guardrails::streaming::{LLMResponse, ToolCall};
 use forge_guardrails::{serialize_state_v1, serialize_state_v2, ToolSpecForScoring};
@@ -438,6 +439,32 @@ fn final_response_artifact_metadata_loads_from_dir() {
         .for_final_response_label(&FinalResponseClass::MissingToolFact);
     assert_eq!(threshold.advisory_min_confidence, 0.90);
     assert_eq!(threshold.enforce_min_confidence, 0.995);
+}
+
+#[test]
+fn top_k_tool_call_telemetry_uses_expected_label_order() {
+    let top_k = tool_call_top_k_from_logits(&[0.0, 1.0, 5.0, 2.0, -1.0, 0.5]);
+
+    assert_eq!(top_k.len(), 6);
+    assert_eq!(top_k[0].label, "wrong_arguments_semantic");
+    assert!(top_k[0].confidence > top_k[1].confidence);
+    assert_eq!(top_k[0].logit, 5.0);
+}
+
+#[test]
+fn top_k_final_response_telemetry_uses_expected_label_order() {
+    let top_k = final_response_top_k_from_logits(&[0.0, 0.5, -1.0, 1.0, 3.0]);
+
+    assert_eq!(top_k.len(), 5);
+    assert_eq!(top_k[0].label, "failed_to_acknowledge_data_gap");
+    assert!(top_k[0].confidence > top_k[1].confidence);
+    assert_eq!(top_k[0].logit, 3.0);
+}
+
+#[test]
+fn top_k_telemetry_omits_unknown_label_orders() {
+    assert!(tool_call_top_k_from_logits(&[1.0, 0.0]).is_empty());
+    assert!(final_response_top_k_from_logits(&[1.0, 0.0]).is_empty());
 }
 
 #[test]

@@ -1,0 +1,583 @@
+use super::*;
+use indexmap::IndexMap;
+use serde_json::{json, Value};
+
+fn safe_config() -> ToolOutputCompressionConfig {
+    ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Safe)
+}
+
+#[test]
+fn mode_parse_accepts_expected_values() {
+    assert_eq!(
+        "disabled".parse::<ToolOutputCompressionMode>().unwrap(),
+        ToolOutputCompressionMode::Disabled
+    );
+    assert_eq!(
+        "safe".parse::<ToolOutputCompressionMode>().unwrap(),
+        ToolOutputCompressionMode::Safe
+    );
+    assert_eq!(
+        "standard".parse::<ToolOutputCompressionMode>().unwrap(),
+        ToolOutputCompressionMode::Standard
+    );
+    assert_eq!(
+        "aggressive".parse::<ToolOutputCompressionMode>().unwrap(),
+        ToolOutputCompressionMode::Aggressive
+    );
+}
+
+#[test]
+fn method_parse_accepts_expected_values() {
+    assert_eq!(
+        "lzw".parse::<ToolOutputCompressionMethod>().unwrap(),
+        ToolOutputCompressionMethod::Lzw
+    );
+    assert_eq!(
+        "repair".parse::<ToolOutputCompressionMethod>().unwrap(),
+        ToolOutputCompressionMethod::Repair
+    );
+    assert_eq!(
+        "auto".parse::<ToolOutputCompressionMethod>().unwrap(),
+        ToolOutputCompressionMethod::Auto
+    );
+    assert!("gzip".parse::<ToolOutputCompressionMethod>().is_err());
+}
+
+#[test]
+fn disabled_returns_original_output() {
+    let result = compress_tool_output(
+        "bash",
+        None,
+        "unchanged",
+        &ToolOutputCompressionConfig::disabled(),
+        None,
+    );
+    assert_eq!(result.output, "unchanged");
+    assert_eq!(result.saved_tokens, 0);
+}
+
+#[test]
+fn safe_redacts_secret_like_values() {
+    let result = compress_tool_output(
+        "bash",
+        None,
+        "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz",
+        &safe_config(),
+        None,
+    );
+    assert!(result.redacted);
+    assert!(result.output.contains("[REDACTED_SECRET]"));
+    assert!(!result.output.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[test]
+fn safe_redaction_can_be_disabled() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        redact_secrets: false,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let result = compress_tool_output(
+        "bash",
+        None,
+        "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz",
+        &config,
+        None,
+    );
+    assert!(!result.redacted);
+    assert!(result.output.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[test]
+fn safe_strips_ansi_sequences() {
+    let result = compress_tool_output(
+        "bash",
+        None,
+        "\u{1b}[31merror\u{1b}[0m",
+        &safe_config(),
+        None,
+    );
+    assert_eq!(result.output, "error");
+    assert!(result.strategies.contains(&"strip_ansi".to_string()));
+}
+
+#[test]
+fn safe_redacts_secret_split_by_ansi_sequences() {
+    let result = compress_tool_output(
+        "bash",
+        None,
+        "token sk-\u{1b}[31mabcdefghijklmnopqrstuvwxyz\u{1b}[0m",
+        &safe_config(),
+        None,
+    );
+    assert!(result.redacted);
+    assert!(result.output.contains("[REDACTED_SECRET]"));
+    assert!(!result.output.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[test]
+fn safe_preserves_thinking_blocks_from_tool_output() {
+    let raw = "visible before\n<thinking>\nprivate chain\n</thinking>\nvisible after\n";
+    let result = compress_tool_output("bash", None, raw, &safe_config(), None);
+    assert_eq!(result.output, raw);
+    assert!(!result.strategies.contains(&"strip_thinking".to_string()));
+}
+
+#[test]
+fn safe_suppresses_binary_output() {
+    let result = compress_tool_output("bash", None, "abc\0def", &safe_config(), None);
+    assert!(result.capped);
+    assert!(result.output.contains("Binary output suppressed"));
+}
+
+#[test]
+fn safe_caps_oversized_output() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        max_output_bytes: 20,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let result = compress_tool_output("bash", None, "a".repeat(200).as_str(), &config, None);
+    assert!(result.capped);
+    assert!(result.output.contains("Tool output capped"));
+}
+
+#[test]
+fn standard_minifies_json_when_smaller() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let result = compress_tool_output("read", None, "{\n  \"a\": 1,\n  \"b\": 2\n}", &config, None);
+    assert_eq!(result.output, "{\"a\":1,\"b\":2}");
+}
+
+#[test]
+fn standard_routes_grep_output_by_file() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let result = compress_tool_output(
+        "search",
+        None,
+        "src/a.rs:10:fn alpha()\nsrc/a.rs:20:fn beta()\ntarget/x.rs:1:noise\n",
+        &config,
+        None,
+    );
+    assert!(result.output.contains("src/a.rs:"));
+    assert!(!result.output.contains("target/x.rs"));
+}
+
+#[test]
+fn standard_grep_unknown_output_is_preserved() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "rg: regex parse error:\n    (?:\n    ^\nerror: unclosed group\n";
+
+    let result = compress_tool_output("grep", None, raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.output.contains("(no matches)"));
+}
+
+#[test]
+fn standard_glob_all_noise_paths_are_preserved() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "target/debug/build.log\nnode_modules/pkg/index.js\n";
+
+    let result = compress_tool_output("glob", None, raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.output.contains("(no matches)"));
+}
+
+#[test]
+fn standard_cargo_unknown_success_output_is_preserved() {
+    let mut args = IndexMap::new();
+    args.insert("command".to_string(), json!("cargo build"));
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "Compiling demo v0.1.0\nFinished dev [unoptimized] target(s) in 0.1s\n";
+
+    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.output.contains("compiled successfully"));
+}
+
+#[test]
+fn standard_cargo_json_diagnostics_are_summarized() {
+    let mut args = IndexMap::new();
+    args.insert(
+        "command".to_string(),
+        json!("cargo check --message-format=json"),
+    );
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error[E0425]: missing value\\n --> src/lib.rs:1:1\\n\"}}\n{\"reason\":\"build-finished\",\"success\":false}\n";
+
+    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+    assert!(result.output.starts_with("Errors (1):\nerror[E0425]"));
+    assert!(!result.output.contains("\"reason\""));
+}
+
+#[test]
+fn standard_test_unknown_success_output_is_preserved() {
+    let mut args = IndexMap::new();
+    args.insert("command".to_string(), json!("python custom_harness.py"));
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "custom harness completed without standard summary\n";
+
+    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.output.contains("all tests passed"));
+}
+
+#[test]
+fn standard_read_large_source_returns_outline() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let mut args = IndexMap::new();
+    args.insert("path".to_string(), json!("src/example.rs"));
+    let mut source = String::new();
+    source.push_str("use crate::thing;\n");
+    for idx in 0..300 {
+        source.push_str(&format!("let value_{idx} = {idx};\n"));
+    }
+    source.push_str("pub struct Widget {\n    id: String,\n}\n");
+    source.push_str("fn run_widget() {\n    println!(\"run\");\n}\n");
+
+    let result = compress_tool_output("read_file", Some(&args), &source, &config, None);
+
+    assert!(result.output.starts_with("// src/example.rs ("));
+    assert!(result.output.contains("L1: use crate"));
+    assert!(result.output.contains("pub struct Widget"));
+    assert!(result.output.contains("fn run_widget"));
+    assert!(!result.output.contains("let value_299"));
+}
+
+#[test]
+fn standard_read_keeps_config_files_verbatim() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let mut args = IndexMap::new();
+    args.insert("path".to_string(), json!("Cargo.toml"));
+    let raw = "[package]\nname = \"forge\"\n\n[dependencies]\nserde = \"1\"\n";
+
+    let result = compress_tool_output("read_file", Some(&args), raw, &config, None);
+
+    assert_eq!(result.output, raw);
+}
+
+#[test]
+fn standard_detects_bash_family_from_command_args() {
+    let mut args = IndexMap::new();
+    args.insert("command".to_string(), json!("cargo test"));
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let result = compress_tool_output(
+        "shell",
+        Some(&args),
+        "Compiling x\nerror: failed\nlots of noise\n",
+        &config,
+        None,
+    );
+    assert_eq!(result.canonical_tool, "bash");
+    assert_eq!(result.family, "cargo");
+    assert!(result.output.contains("error: failed"));
+}
+
+#[test]
+fn standard_bash_git_diff_keeps_hunks_and_changed_lines() {
+    let mut args = IndexMap::new();
+    args.insert("command".to_string(), json!("git diff"));
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "\
+diff --git a/src/lib.rs b/src/lib.rs
+index 111..222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+ context line
+-old value
++new value
+";
+
+    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+
+    assert!(result.output.contains("Files changed: 1"));
+    assert!(result.output.contains("src/lib.rs"));
+    assert!(result.output.contains("@@ -1,3 +1,3 @@"));
+    assert!(result.output.contains("-old value"));
+    assert!(result.output.contains("+new value"));
+    assert!(!result.output.contains("diff --git"));
+    assert!(!result.output.contains("context line"));
+}
+
+#[test]
+fn standard_glob_drops_noise_paths_when_useful() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let mut lines = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
+    for idx in 0..40 {
+        lines.push(format!("target/debug/deps/generated_artifact_{idx}.rs"));
+        lines.push(format!("node_modules/pkg_{idx}/index.js"));
+    }
+    let raw = lines.join("\n");
+
+    let result = compress_tool_output("glob", None, &raw, &config, None);
+
+    assert!(result.output.contains("src/main.rs"));
+    assert!(result.output.contains("src/lib.rs"));
+    assert!(!result.output.contains("node_modules"));
+    assert!(!result.output.contains("target/debug"));
+}
+
+#[test]
+fn opentoken_filter_fixture_cases_match_expected_outputs() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../tests/parity/fixtures/opentoken_tool_output_filters.json"
+    ))
+    .expect("valid OpenToken tool-output fixture");
+    let cases = fixture["cases"].as_array().expect("fixture cases");
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let tool = case["tool"].as_str().expect("case tool");
+        let input = fixture_input(case);
+        let args = fixture_args(case);
+        let result = compress_tool_output(tool, args.as_ref(), &input, &config, None);
+        let expected = case["expected_output"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: missing expected_output"));
+        assert_eq!(
+            result.output, expected,
+            "{name}: OpenToken fixture mismatch"
+        );
+    }
+}
+
+#[test]
+fn standard_filter_does_not_grow_output() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "short";
+    let result = compress_tool_output("bash", None, raw, &config, None);
+    assert_eq!(result.output, raw);
+}
+
+#[test]
+fn aggressive_normalizes_timestamps_and_hashes() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = "2026-05-28T12:34:56Z completed artifact 0123456789abcdef0123456789abcdef\n";
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(result.output.contains("[timestamp]"));
+    assert!(result.output.contains("[hash]"));
+    assert!(result
+        .strategies
+        .contains(&"normalize_dynamic_log_noise".to_string()));
+}
+
+#[test]
+fn aggressive_converts_json_array_to_tabular_form_when_smaller() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_status_name":"passed","long_duration_ms":10,"long_file_path":"src/a.rs"},
+  {"long_status_name":"failed","long_duration_ms":20,"long_file_path":"src/b.rs"},
+  {"long_status_name":"passed","long_duration_ms":30,"long_file_path":"src/c.rs"}
+]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(result.output.starts_with("[3 rows]\n"));
+    assert!(result
+        .output
+        .contains("long_status_name\tlong_duration_ms\tlong_file_path"));
+    assert!(result.output.contains("failed\t20\tsrc/b.rs"));
+    assert!(result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn standard_does_not_apply_lzw() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = repeated_lzw_output();
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.strategies.contains(&"lzw_dictionary".to_string()));
+}
+
+#[test]
+fn standard_ignores_dictionary_method() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        method: ToolOutputCompressionMethod::Repair,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = repeated_lzw_output();
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.output.starts_with("[Forge RePair Dictionary]"));
+    assert!(!result.strategies.contains(&"repair_dictionary".to_string()));
+}
+
+#[test]
+fn aggressive_lzw_records_strategy() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = repeated_lzw_output();
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert!(result.output.starts_with("[Forge LZW Dictionary]"));
+    assert!(result.strategies.contains(&"lzw_dictionary".to_string()));
+}
+
+#[test]
+fn aggressive_repair_records_strategy() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        method: ToolOutputCompressionMethod::Repair,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = repeated_lzw_output();
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert!(result.output.starts_with("[Forge RePair Dictionary]"));
+    assert!(result.strategies.contains(&"repair_dictionary".to_string()));
+}
+
+#[test]
+fn aggressive_auto_uses_smaller_dictionary_output() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        method: ToolOutputCompressionMethod::Auto,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = repeated_lzw_output();
+    let lzw = compress_lzw_dictionary(&raw).expect("lzw output");
+    let repair = compress_repair_dictionary(&raw).expect("repair output");
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert_eq!(result.output.len(), lzw.len().min(repair.len()));
+    assert!(result.strategies.contains(&"auto_dictionary".to_string()));
+}
+
+#[test]
+fn dedup_returns_bounded_marker_for_repeated_output() {
+    let state = ToolOutputCompressionState::new();
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("s1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = (0..200)
+        .map(|idx| format!("unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let first = compress_tool_output("bash", None, &raw, &config, Some(&state));
+    let second = compress_tool_output("bash", None, &raw, &config, Some(&state));
+    assert!(!first.deduped);
+    assert!(second.deduped);
+    assert!(second.output.contains("Duplicate of call #"));
+}
+
+fn repeated_lzw_output() -> String {
+    (0..24)
+        .map(|idx| {
+            format!(
+                "error: repeated dependency resolution failure in workspace crate alpha at module_{idx}\n"
+            )
+        })
+        .collect::<String>()
+}
+
+fn fixture_args(case: &Value) -> Option<IndexMap<String, Value>> {
+    let args = case.get("args")?.as_object()?;
+    Some(
+        args.iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    )
+}
+
+fn fixture_input(case: &Value) -> String {
+    if let Some(input) = case.get("input").and_then(Value::as_str) {
+        return input.to_string();
+    }
+    let mut result = String::new();
+    for part in case["input_parts"]
+        .as_array()
+        .expect("input or input_parts")
+    {
+        let text = part["text"].as_str().expect("input part text");
+        let repeat = part
+            .get("repeat")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .try_into()
+            .expect("repeat fits usize");
+        for _ in 0..repeat {
+            result.push_str(text);
+        }
+    }
+    result
+}
+
+#[test]
+fn test_looks_like_jsonl_strict() {
+    use super::postcall::looks_like_jsonl;
+
+    // Valid JSONL
+    assert!(looks_like_jsonl("{\"a\": 1}\n{\"b\": 2}"));
+    assert!(looks_like_jsonl("  {\"a\": 1}  \n  {\"b\": 2}  "));
+
+    // Single valid JSON object
+    assert!(looks_like_jsonl("{\n  \"a\": 1\n}"));
+
+    // Invalid: Starts with '{' but contains plain text / table data later
+    assert!(!looks_like_jsonl("{\n  \"a\": 1\n}\nplain text here"));
+    assert!(!looks_like_jsonl("{\n  \"a\": 1\n}\n| col1 | col2 |"));
+
+    // Invalid: Plain text
+    assert!(!looks_like_jsonl("plain text"));
+}
+
+#[test]
+fn test_cargo_json_messages_with_mixed_lines() {
+    use super::families::cargo::filter_cargo_output;
+
+    // Mixed output: Compile status text + JSON compiler message
+    let raw = "\
+Compiling demo v0.1.0
+{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error[E0425]: missing value\\n\"}}
+Finished dev [unoptimized] target(s) in 0.1s
+";
+    let result = filter_cargo_output("cargo build", raw);
+    // If it successfully parses JSON, it should output:
+    // "Errors (1):\nerror[E0425]: missing value"
+    assert!(result.starts_with("Errors (1):"));
+    assert!(result.contains("error[E0425]"));
+}
+
+#[test]
+fn test_windows_path_compatibility() {
+    use super::basename;
+    use super::filters::filter_glob_output;
+    use super::filters::is_noise_path;
+
+    // 1. is_noise_path matches Windows paths
+    assert!(is_noise_path("node_modules\\lodash\\index.js"));
+    assert!(is_noise_path("target\\debug\\build.log"));
+
+    // 2. basename extracts command names on Windows paths
+    assert_eq!(
+        basename("C:\\Users\\admin\\.cargo\\bin\\cargo.exe"),
+        "cargo.exe"
+    );
+
+    // 3. filter_glob_output groups Windows paths under directory
+    let mut lines = Vec::new();
+    for idx in 0..105 {
+        lines.push(format!("src\\file_{idx}.rs"));
+    }
+    let raw_glob = lines.join("\n");
+    let filtered = filter_glob_output(&raw_glob);
+    assert!(filtered.contains("src/: 105 files"));
+}

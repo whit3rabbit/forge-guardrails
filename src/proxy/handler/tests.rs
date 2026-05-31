@@ -4,6 +4,7 @@ use crate::clients::base::{
     SamplingParams, StreamChunk, TokenUsage, ToolCall,
 };
 use crate::clients::AnthropicClient;
+use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
 use crate::{
     ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore, ToolCallClass,

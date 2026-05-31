@@ -5,6 +5,7 @@
 //! - extract_tool_call: parses tool calls from freeform model output
 //! - rescue_tool_call: fallback parsing with multiple strategies
 
+/// Nudge prompts generation utilities for workflow violations or retries.
 pub mod nudges;
 mod parse_strategies;
 

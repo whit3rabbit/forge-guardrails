@@ -1,4 +1,4 @@
-mod cargo;
+pub(super) mod cargo;
 mod docker;
 mod fs;
 mod generic;

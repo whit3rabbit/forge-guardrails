@@ -8,6 +8,7 @@ DEFAULT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 
 def load_env_file(path: Path = DEFAULT_ENV_PATH) -> dict[str, str]:
+    """Parse key-value pairs from an environment file and load them into os.environ."""
     loaded: dict[str, str] = {}
     if not path.exists():
         return loaded
@@ -26,6 +27,7 @@ def load_env_file(path: Path = DEFAULT_ENV_PATH) -> dict[str, str]:
 
 
 def env_default(primary: str, fallback: str, *aliases: str) -> str:
+    """Retrieve an environment variable by name or aliases, falling back to a default value."""
     for key in (primary, *aliases):
         value = os.getenv(key)
         if value:

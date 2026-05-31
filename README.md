@@ -40,6 +40,30 @@ Supports Ollama, llama-server (llama.cpp), Llamafile, Anthropic, and anyllm-rout
 
 ## Install
 
+Install the proxy binary:
+
+```bash
+# macOS, using the Homebrew cask
+brew install --cask whit3rabbit/tap/forge-guardrails-proxy
+
+# macOS or Linux, from crates.io
+cargo install forge-guardrails --locked --bin forge-guardrails-proxy
+```
+
+Use it with an existing OpenAI-compatible local backend:
+
+```bash
+forge-guardrails-proxy \
+  --backend-url http://localhost:8080 \
+  --port 8081
+```
+
+Then point OpenAI-compatible clients at `http://localhost:8081/v1`.
+Requests should include their own `model` field. The proxy does not pick a
+default upstream model unless you explicitly set `--model`, `FORGE_MODEL`, or
+`SMALL_MODEL`; managed `ollama` still requires `--model`, and managed
+`llamaserver` / `llamafile` use `--gguf`.
+
 Add to your `Cargo.toml`:
 
 ```toml
@@ -71,6 +95,26 @@ The `forge/` submodule contains the Python reference for fixture generation and 
 git submodule update --init --recursive
 ```
 
+### Release
+
+Release is tag-driven. After the version in `Cargo.toml` is ready and `main`
+is pushed, create and push a matching tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow verifies the tag matches the crate version, runs format,
+clippy, tests, `cargo package`, and `cargo publish`, builds platform archives
+for `forge-guardrails-proxy`, publishes the GitHub release, then updates
+`whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is configured. Users can
+install the cask with:
+
+```bash
+brew install --cask whit3rabbit/tap/forge-guardrails-proxy
+```
+
 ### Backend setup (pick one)
 
 **llama-server** (recommended — top eval configs all run on llama-server):
@@ -97,7 +141,7 @@ See [Backend Setup](docs/BACKEND_SETUP.md) for full instructions.
 
 ## Quick Start
 
-Start llama-server (in a separate shell). Download the recommended model from [HuggingFace](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) first:
+Start llama-server in a separate shell. Download the recommended model from [HuggingFace](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) first:
 
 ```bash
 llama-server -m path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
@@ -213,7 +257,7 @@ cargo run --bin forge-guardrails-proxy -- \
 See [Tool Output Compression](docs/COMPRESSION.md) for modes, request-level
 `_forge` overrides, and method details.
 
-Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`.
+Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as the API base URL. Anthropic-compatible clients should use `http://localhost:8081`; the proxy accepts Anthropic Messages API requests at `POST /v1/messages`. Requests without `model` are rejected unless you explicitly configured a fallback with `--model`, `FORGE_MODEL`, or `SMALL_MODEL`.
 
 **Backend compatibility:**
 
@@ -269,7 +313,7 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 |---|---|---|
 | `FORGE_HOST` | `0.0.0.0` | Bind address |
 | `FORGE_PORT` / `PORT` / `LISTEN_PORT` | `8081` | Forge proxy listen port |
-| `FORGE_MODEL` / `SMALL_MODEL` | `gpt-4o-mini` | Default model |
+| `FORGE_MODEL` / `SMALL_MODEL` | `(none)` | Optional fallback model when a request omits `model` |
 | `FORGE_CONTEXT_TOKENS` | `128000` | Token budget |
 | `FORGE_MAX_RETRIES` | `3` | Retry budget per validation failure |
 | `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |
@@ -531,6 +575,9 @@ src/
   lib.rs                     Public API re-exports
   error.rs                   ForgeError hierarchy
   server.rs                  setup_backend(), ServerManager, BudgetMode
+  classifier_download.rs     Classifier artifact download logic (--features classifier)
+  tool_output.rs             Tool-output compression pipeline (safe / standard / aggressive)
+  tool_policy.rs             Per-request allowed/blocked tool sets and prerequisite policy
   core/
     message.rs               Message, MessageRole, MessageType, MessageMeta, ToolCallInfo
     tool_spec.rs             ToolSpec, ToolDef, ParamModel — tool schema and callable defs
@@ -545,6 +592,12 @@ src/
     response_validator.rs    ResponseValidator, ValidationResult
     step_enforcer.rs         StepEnforcer, StepCheck, StepPrerequisite
     error_tracker.rs         ErrorTracker
+    scoring.rs               ScoringPipeline, ScoringExecutor — async classifier dispatch
+    scoring_context.rs       ScoringContext — serialized input for ONNX scorer
+    classifier_artifact.rs   Artifact loader, manifest validation, threshold policy
+    onnx_scorer.rs           OnnxToolCallScorer, OnnxFinalResponseScorer (--features classifier)
+    history.rs               Events timeline for validation results and violations
+    policy.rs                Allowed/blocked tool policy based on sequence prerequisites
   clients/
     base.rs                  LLMClient trait, ChunkType, StreamChunk, LLMCallInfo, TokenUsage
     sampling.rs              Model sampling defaults, MODEL_SAMPLING_DEFAULTS
@@ -558,7 +611,7 @@ src/
     hardware.rs              HardwareProfile, detect_hardware()
   prompts/
     mod.rs                   Tool prompt builders (prompt-injected path)
-    nudges.rs                Retry and step-enforcement nudge templates
+    nudges.rs                Retry, step-enforcement, and semantic classifier nudge templates
     parse_strategies.rs      Rescue parsing: Mistral, Qwen, fenced JSON
   tools/
     respond.rs               Synthetic respond tool (respond_tool(), respond_spec())
@@ -568,7 +621,11 @@ src/
     server.rs                HTTPServer — axum HTTP/SSE server
   bin/
     forge-guardrails-proxy.rs  CLI proxy entry point
+    download-classifier.rs     Standalone artifact downloader for eval / training paths
     forge-eval/                Native Rust eval smoke runner
+model/
+  README.md                  Artifact repository index and download commands
+  MODEL.md                   Full model card: training config, metrics, labels, thresholds
 tests/
   parity/                    Python-generated golden fixtures for Rust parity tests
   parity_tests.rs            Rust assertions against python_golden.json
@@ -604,11 +661,13 @@ use forge_guardrails::{
     ContextManager, NoCompact, SlidingWindowCompact, TieredCompact,
     // Guardrails
     Guardrails, StepEnforcer, ErrorTracker, ResponseValidator,
+    // Scoring pipeline (async classifier dispatch)
+    ScoringPipeline, ScoringExecutor, ScoringContext,
     // Step tracking
     StepTracker, SlotWorker,
-    // Prompts and nudges
+    // Prompts and nudges (including semantic classifier nudges)
     retry_nudge, step_nudge, prerequisite_nudge, unknown_tool_nudge,
-    rescue_tool_call, build_tool_prompt,
+    classifier_nudge, rescue_tool_call, build_tool_prompt,
     // Proxy / server
     handle_chat_completions, handle_anthropic_messages,
     HTTPServer, ServerManager, setup_backend,
@@ -631,7 +690,11 @@ Relevant pieces:
 - `ResponseValidator` / `ValidationResult`
 - `StepEnforcer` / `StepCheck` / `StepPrerequisite`
 - `ErrorTracker`
-- `retry_nudge`, `step_nudge`, `prerequisite_nudge`, `unknown_tool_nudge`
+- `retry_nudge`, `step_nudge`, `prerequisite_nudge`, `unknown_tool_nudge`, `classifier_nudge`
+- `ScoringPipeline` / `ScoringExecutor` — async classifier dispatch for shadow, advisory, and enforce modes
+- `ScoringContext` — serializes workflow state into the canonical `toolcall-verifier-input/v1` format for the ONNX scorer
+
+The ONNX tool-call verifier and final-response verifier are built with `--features classifier`. Both start in `shadow` mode and are promoted only after eval replay proves safety. See [model/README.md](model/README.md) for artifact contracts, labels, thresholds, and promotion criteria.
 
 ### 3. OpenAI-compatible proxy / server layer
 
@@ -675,9 +738,10 @@ Both clients expose provider observability through `LLMClient::last_call_info()`
 
 - 487+ passing tests across 16 test files
 - Deterministic parity suite against `tests/parity/fixtures/python_golden.json`
+- Classifier tests (`--test classifier_tests`) cover artifact loading, serializer parity, ONNX scorer output, and scoring pipeline routing
 - 0 contamination incidents in the clean-room run
 
-Keep tests deterministic where possible. Backend integration tests use mock servers (via `mockito`) unless they intentionally qualify a live backend.
+Keep tests deterministic where possible. Backend integration tests use mock servers (via `mockito`) unless they intentionally qualify a live backend. Classifier tests require `--features classifier` and the pinned ONNX artifact; they are gated separately from the core test suite.
 
 ## Known Review Areas Before Release
 

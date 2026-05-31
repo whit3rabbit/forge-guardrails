@@ -138,6 +138,7 @@ def print_classifier_summary(
     rows: list[dict[str, Any]],
     classifier_rows: list[dict[str, Any]],
 ) -> None:
+    """Summarize and print classifier telemetry match results."""
     if not classifier_rows:
         return
 
@@ -184,6 +185,7 @@ def print_summary(
     rows: list[dict[str, Any]],
     classifier_rows: list[dict[str, Any]] | None = None,
 ) -> None:
+    """Calculate and print aggregate completeness and accuracy results."""
     total = len(rows)
     complete = sum(1 for row in rows if row.get("completeness"))
     success = sum(1 for row in rows if bool(row.get("success")))
@@ -267,6 +269,7 @@ def print_summary(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command line arguments for the summary script."""
     parser = argparse.ArgumentParser(
         description="Summarize proxy eval JSONL by completeness and accuracy"
     )
@@ -282,6 +285,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main() -> None:
+    """Main entrypoint for parsing options and printing the summary."""
     args = parse_args()
     print_summary(_load_rows(args.jsonl), _load_many(args.classifier_jsonl))
 

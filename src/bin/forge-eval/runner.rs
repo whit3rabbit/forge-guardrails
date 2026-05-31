@@ -2,9 +2,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use forge_guardrails::{
-    ClassifierModelKind, CompactEvent, ContextManager, FinalResponseScore, FinalResponseScoreFn,
-    FinalResponseScorer, LLMClient, Message, NoCompact, ScorerMode, StreamChunk, ToolCall,
-    ToolCallScore, ToolCallScoreFn, ToolCallScorer, WorkflowRunner,
+    final_response_top_k_from_logits, tool_call_top_k_from_logits, ClassifierModelKind,
+    CompactEvent, ContextManager, FinalResponseScore, FinalResponseScoreFn, FinalResponseScorer,
+    LLMClient, Message, NoCompact, ScorerMode, StreamChunk, ToolCall, ToolCallScore,
+    ToolCallScoreFn, ToolCallScorer, WorkflowRunner,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -241,6 +242,7 @@ fn classifier_score_json(call: &ToolCall, score: &ToolCallScore) -> Value {
         "tool": call.tool.as_str(),
         "label": score.label.as_label().as_ref(),
         "confidence": score.confidence,
+        "top_k": tool_call_top_k_from_logits(&score.logits),
         "action": score.action.as_str(),
         "latency_ms": score.latency_ms,
         "model_version": score.model_version.as_str(),
@@ -251,8 +253,53 @@ fn final_response_score_json(score: &FinalResponseScore) -> Value {
     json!({
         "label": score.label.as_label().as_ref(),
         "confidence": score.confidence,
+        "top_k": final_response_top_k_from_logits(&score.logits),
         "action": score.action.as_str(),
         "latency_ms": score.latency_ms,
         "model_version": score.model_version.as_str(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forge_guardrails::{ClassifierAction, FinalResponseClass, ToolCallClass};
+    use indexmap::IndexMap;
+
+    #[test]
+    fn classifier_score_json_includes_top_k_probabilities() {
+        let score = ToolCallScore {
+            label: ToolCallClass::WrongArgumentsSemantic,
+            confidence: 0.9,
+            logits: vec![0.0, 1.0, 5.0, 2.0, -1.0, 0.5],
+            action: ClassifierAction::ShadowOnly,
+            model_version: "test".to_string(),
+            latency_ms: 1.0,
+        };
+        let row = classifier_score_json(&ToolCall::new("fetch", IndexMap::new()), &score);
+
+        assert_eq!(row["top_k"][0]["label"], json!("wrong_arguments_semantic"));
+        assert_eq!(row["top_k"][0]["logit"], json!(5.0));
+        assert!(row["top_k"][0]["confidence"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn final_response_score_json_includes_top_k_probabilities() {
+        let score = FinalResponseScore {
+            label: FinalResponseClass::FailedToAcknowledgeDataGap,
+            confidence: 0.8,
+            logits: vec![0.0, 0.5, -1.0, 1.0, 3.0],
+            action: ClassifierAction::ShadowOnly,
+            model_version: "test-final".to_string(),
+            latency_ms: 1.0,
+        };
+        let row = final_response_score_json(&score);
+
+        assert_eq!(
+            row["top_k"][0]["label"],
+            json!("failed_to_acknowledge_data_gap")
+        );
+        assert_eq!(row["top_k"][0]["logit"], json!(3.0));
+        assert!(row["top_k"][0]["confidence"].as_f64().unwrap() > 0.0);
+    }
 }

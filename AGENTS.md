@@ -19,69 +19,59 @@ The reference Python implementation is available in the [forge](file:///Users/wh
 
 ## Core layout
 
-- `src/`: Rust library and binary implementation
-  - `core/`: Core types and runner orchestration loop
-    - `inference.rs`: Low-level LLM request/response envelopes, stream metadata, and role/reasoning folding
-    - `message.rs`: Unified message format, roles, and metadata models
-    - `runner.rs`: Multi-turn stateful executor enforcing the guardrails loop and shared scoring pipeline
-    - `slot_worker.rs`: Handles slot allocation and queuing for backend runtimes
-    - `steps.rs`: Required step tracking and workflow iteration constraints
-    - `tool_spec.rs`: ToolSpec schemas, properties, and parameter conversion
-    - `workflow.rs`: Target workflows, required steps, and prerequisites
-  - `guardrails/`: Multi-tiered validator and step enforcement layer
-    - `error_tracker.rs`: Monitors soft resolution and hard execution error budgets
-    - `guardrails.rs`: Main facade pipeline orchestrating checks and retries
-    - `history.rs`: Events timeline tracking validation results and violations
-    - `nudge.rs`: Manages nudge states for retrying/rescuing tools
-    - `policy.rs`: Allowed/blocked tools based on sequence prerequisites
-    - `response_validator.rs`: JSON Schema verification and malformed argument checking
-    - `scoring.rs`: Classifier traits, bounded async scoring executor, and shared scoring pipeline
-    - `step_enforcer.rs`: Sequences verification and prerequisite rules
-  - `clients/`: Multi-provider backend adapters and settings
-    - `base.rs`: `LLMClient` trait, response envelope, streaming, and tool formatting definitions
-    - `sampling.rs`: Model-specific sampling presets for 69+ models
-    - `anthropic/`: Messages format translations, thinking extraction, and cache controls
-    - `llamafile/`: Llamafile/llama.cpp server adapter, NDJSON stream parsing, and reasoning folding
-    - `ollama/`: Ollama local adapter, options validation, and stream boundaries
-    - `anyllm_proxy.rs`: AnyLlm Proxy / Runtime Client for unified provider translation
-  - `context/`: Memory budget tracking and token compaction logic
-    - `hardware.rs`: Apple Silicon plist / NVIDIA system memory context probing
-    - `manager.rs`: Active token counts, budget warnings, and compaction triggers
-    - `strategies.rs`: Slidewindow, phased compaction, and summary fallback strategies
-  - `prompts/`: Nudge generation and raw text extraction
-    - `nudges.rs`: System template builders for step, unknown tool, and error retries
-    - `parse_strategies.rs`: Robust extraction of JSON/XML tool calls from chat text
-  - `proxy/`: OpenAI-compatible and Anthropic-compatible proxy server
-    - `handler.rs`: Route handling, stream intercepts, scoring, and result mapping
-    - `proxy.rs`: Request translations, SSE chunk shaping, and respond stripping
-    - `server.rs`: Lifecycle of the proxy daemon
-  - `tools/`: Built-in terminal commands
-    - `respond.rs`: Built-in terminal tool for concluding workflows
-  - `bin/`: Execute runners
-    - `forge-eval/`: Benchmark suite evaluating model performance locally
-    - `forge-guardrails-proxy/`: HTTP daemon server entrypoint
-- `tests/`: Extensive integration and regression test coverage
-  - `parity/`: Python golden fixtures and generate scripts to preserve behavioral parity
-- `scripts/`: Local dev tooling, launchers, and eval summaries
-  - `start_llamaserver_proxy.sh`: Launches local llama-server backend using GGUF
-  - `run_local_eval.sh`: Automates smoke/release suites, starting the proxy and oracle
-  - `eval_openai_proxy.py`: Python oracle evaluating scenario completeness
-  - `publish_docker.sh`: Publishes multi-arch docker builds to Docker Hub
-- `docs/`: Comprehensive manuals and guides
-  - `USER_GUIDE.md`: Developer guide to library APIs, configurations, and use cases
-  - `WORKFLOW.md`: Explanation of guardrails loop and sequential step enforcement
-  - `SCHEMA.md`: Data contracts, JSON specs, and internal `_forge` metadata structures
-  - `MODEL_TRAINING_SCHEMA.md`: Tool-call and final-response verifier training, artifact, threshold, telemetry, and hard-negative schemas
-  - `PARITY.md`: Specifications for maintaining strict parity with Python Forge
-  - `CLEANROOM.md`: Summary of clean-room implementation history
-  - `BACKEND_SETUP.md`: Setup configurations for local and remote providers
-  - `EVAL_GUIDE.md`: Guide to setting up, running, and analyzing evaluation benchmarks
-  - `COMPRESSION.md`: Tool-output compression modes, request overrides, and safety notes
-- `Dockerfile`: Single-port deployment configuration for normal proxy use
-- `Dockerfile.classifier`: Single-port proxy image that builds with
-  `--features classifier` and preloads the quantized tool-call ONNX classifier
-  artifact
-- `docker/entrypoint.sh`: Process supervisor for private sidecar and public proxy services
+```text
+forge-guardrails (root)
+├── docker/                             # Docker deployment & container supervisor configs
+├── docs/                               # Developer manuals, architecture specs, user guides
+├── forge/                              # Submodule pointing to Python Forge reference implementation
+├── notebook/                           # Jupyter notebooks for classifier & verifier model training
+├── scripts/                            # Release scripts, local run launchers, eval pipelines, setup
+├── src/                                # Rust implementation source
+│   ├── bin/                            # Binary entrypoints for proxy and CLI eval runner
+│   │   ├── forge-eval/                 # Local benchmark/eval scenario execution suite
+│   │   └── forge-guardrails-proxy/     # Production HTTP server daemon
+│   ├── classifier_download/            # Helpers for checking, caching, and downloading verifier models
+│   ├── clients/                        # Low-level multi-provider adapters (Anthropic, Llamafile, Ollama)
+│   │   ├── anthropic/                  # Message payload mapper and cache control
+│   │   ├── llamafile/                  # Llama.cpp backend adapter and stream parser
+│   │   └── ollama/                     # Ollama local runtime adapter
+│   ├── context/                        # Token budgets, memory manager, hardware probe, and compaction logic
+│   ├── core/                           # Core guardrail loop orchestration, messages, slots, step definitions
+│   ├── guardrails/                     # Schema validation, error budget tracking, policy enforcement, classifier scoring
+│   ├── prompts/                        # Nudge generators, rescue text templates, and XML/JSON tool extraction logic
+│   ├── proxy/                          # SSE streaming mapping, router routes, request/response translation
+│   ├── server/                         # Proxy daemon daemon server controller lifecycle
+│   ├── tool_output/                    # Standard & aggressive tool-result compaction, LZW compression
+│   └── tools/                          # Default executor terminal tools (e.g. respond)
+└── tests/                              # Integration & regression tests
+    ├── fixtures/                       # Static mock files and target schema data
+    ├── parity/                         # Generate scripts & fixtures comparisons for Python behavioral parity
+    └── support/                        # Mock servers, test doubles, and shared assertions
+```
+
+### Directory Descriptions
+
+- **`docker/`**: Contains Docker-related deployment artifacts, configuration files, and supervisor entrypoints (like `docker/entrypoint.sh`).
+- **`docs/`**: Comprehensive developer and reference documentation, covering user guides, internal data contracts, schemas, verification strategies, compaction logic, and parity details.
+- **`forge/`**: Git submodule pointing to the reference Python implementation (`antoinezambelli/forge`). Used as the gold standard for behavioral parity, validation test references, and benchmark matrices.
+- **`notebook/`**: Google Colab-first Jupyter notebooks for verifier model training (e.g., tool-call classifiers).
+- **`scripts/`**: DevOps scripts, release management, local runner tools, managed llama-server helpers, and performance evaluation tooling.
+- **`src/`**: Main Rust source directory containing library components and binary entrypoints.
+  - **`src/core/`**: Orchestrates runner loops and defines central data structures (messages, inference metadata, slots, workflows, steps, and tool specifications).
+  - **`src/guardrails/`**: Coordinates workflow validations, step enforcement rules, response parsing, schema checks, retry loops, and classification/scoring executor pipelines.
+  - **`src/clients/`**: Host adapters for individual LLM backends (Anthropic, Llamafile, Ollama, and anyllm router translator).
+  - **`src/context/`**: Token usage budget tracking, hardware probes (M-series plist, NVIDIA CUDA memory checks), and phased/sliding-window memory compaction strategies.
+  - **`src/prompts/`**: Formulates templates for agent retry/rescue nudges and implements XML/JSON extraction regexes/parsers.
+  - **`src/proxy/`**: Server handlers translating OpenAI/Anthropic format payloads, managing SSE streaming, intercepts, and scoring.
+  - **`src/server/`**: Server runner daemon, lifecycle orchestration, and health control.
+  - **`src/tool_output/`**: Token compaction/compression utilities for prior tool results (Standard/Aggressive compression, LZW, and redaction logic).
+  - **`src/tools/`**: Built-in runtime tool definitions executed inside the runner environment (such as `respond`).
+  - **`src/classifier_download/`**: Controls download, verification, caching, and loading of verifier/classifier ONNX binaries.
+  - **`src/bin/`**: Binaries, including the evaluation CLI runner (`forge-eval`) and the main daemon server (`forge-guardrails-proxy`).
+- **`tests/`**: Integration, parity, and regression test suites.
+  - **`tests/parity/`**: Fixture generation and test fixtures generated by the Python reference to enforce byte-for-byte behavior alignment.
+  - **`tests/fixtures/`**: Static test files and mock message histories.
+  - **`tests/support/`**: Shared test doubles, mock clients, and validation harnesses.
 
 ## Commands
 
@@ -99,14 +89,15 @@ Makefile shortcuts:
 
 ```bash
 make build
+make build-release
 make fmt-check
 make clippy
 make test
 ```
 
-`make build`, `make check`, `make test`, and `make clippy` use
-`FEATURES=classifier` by default. Override with `FEATURES=""` when a no-feature
-build is intentional.
+`make build`, `make build-release`, `make check`, `make test`, and
+`make clippy` use `FEATURES=classifier` by default. Override with
+`FEATURES=""` when a no-feature build is intentional.
 
 Focused eval/parity checks:
 
@@ -120,6 +111,8 @@ cargo test --bin forge-eval
 python scripts/eval_openai_proxy.py --help
 scripts/run_local_eval.sh --suite smoke --runs 1
 make eval-smoke
+make eval-smoke-classify
+make eval-smoke-final-response
 ```
 
 Verifier model training:
@@ -315,6 +308,19 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 make eval-release-classify
 ```
 
+Final-response verifier shadow benchmark, downloading verifier artifacts if
+missing:
+
+```bash
+scripts/run_local_eval.sh --suite release --runs 10 \
+  --classify \
+  --classifier-mode shadow \
+  --verify-final-response \
+  --final-response-classifier-mode shadow \
+  --output-dir target/local-eval/release-onnx-final-shadow
+make eval-release-final-response-shadow
+```
+
 ONNX classifier mode comparison:
 
 ```bash
@@ -334,15 +340,21 @@ scripts/run_local_eval.sh --suite release --runs 10 \
 make eval-release OUTPUT_DIR=target/local-eval/release-baseline
 make eval-release-classify OUTPUT_DIR=target/local-eval/release-onnx-shadow
 make eval-release-classify CLASSIFIER_MODE=enforce OUTPUT_DIR=target/local-eval/release-onnx-enforce
+make eval-release-classify-shadow OUTPUT_DIR=target/local-eval/release-onnx-shadow
+make eval-release-classify-advisory OUTPUT_DIR=target/local-eval/release-onnx-advisory
+make eval-release-classify-enforce OUTPUT_DIR=target/local-eval/release-onnx-enforce
 ```
 
 The Makefile eval targets enable `--resource-baseline` by default. Use
-`RESOURCE_INTERVAL=...`, `RUNS=...`, `OUTPUT_DIR=...`, and `EVAL_ARGS="..."`
-to pass common overrides without editing the launcher.
+`RESOURCE_INTERVAL=...`, `RUNS=...`, `OUTPUT_DIR=...`,
+`CLASSIFIER_MODE=...`, `FINAL_RESPONSE_CLASSIFIER_MODE=...`, and
+`EVAL_ARGS="..."` to pass common overrides without editing the launcher.
 
-When evaluating a final-response verifier, include the matching
-`--final-response-classifier-dir`, `--final-response-classifier-mode`, and
-`--final-response-classifier-model` flags.
+Use `make eval-release-final-response` for release evals with both the
+tool-call classifier and final-response verifier enabled. It uses
+`CLASSIFIER_MODE=shadow` and `FINAL_RESPONSE_CLASSIFIER_MODE=shadow` by
+default. Use `make eval-release-final-response-shadow` for the standard shadow
+output directory `target/local-eval/release-onnx-final-shadow`.
 
 For eval convenience, `scripts/run_local_eval.sh --classify` uses the same
 user-facing cache as `forge-guardrails-proxy --classify-download`,
