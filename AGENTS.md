@@ -239,6 +239,36 @@ scripts/publish_docker.sh
 different tag, registry, platform matrix, or buildx builder. The script pushes
 both `${VERSION}` and `latest`.
 
+Crates.io, GitHub Release, and Homebrew cask release flow:
+
+```bash
+git status --short --branch
+git submodule status forge
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo package --locked
+git push origin main
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+- The release workflow runs on `v*.*.*` tags and verifies the tag matches
+  `Cargo.toml`'s package version before publishing.
+- Keep the `forge` submodule pinned to a commit that is fetchable from its
+  configured remote. Do not release a parent commit that points at a local-only
+  submodule commit.
+- The workflow publishes the crate with `cargo publish --locked`, builds
+  platform archives for `forge-guardrails-proxy`, publishes the GitHub release,
+  and updates `whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is set.
+- Do not run `cargo publish` or manually edit the Homebrew cask unless the
+  workflow fails and the user explicitly asks for manual recovery.
+- The Homebrew cask install command is:
+
+```bash
+brew install --cask whit3rabbit/tap/forge-guardrails-proxy
+```
+
 Regenerate Python parity fixtures after intentional reference-behavior changes:
 
 ```bash

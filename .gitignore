@@ -62,3 +62,9 @@ notebook/generatetd/.env
 notebook/generatetd/*.egg-info/
 notebook/generatetd/out/
 notebook/generatetd/local_review*.jsonl
+
+# Local eval summaries and generated notebook JSONL diagnostics
+notebook/jsonl/proxy_*.jsonl
+notebook/jsonl/rust_smoke.jsonl
+notebook/jsonl/*_report.txt
+notebook/jsonl/*_summary.txt
