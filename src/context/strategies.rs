@@ -91,8 +91,8 @@ impl CompactStrategy for SlidingWindowCompact {
 /// Three-phase progressive compaction strategy.
 ///
 /// Phase 1: Drop nudge messages, truncate long tool results.
-/// Phase 2: Phase 1 + drop all tool results.
-/// Phase 3: Phase 2 + drop reasoning and text_response (tool_call skeleton only).
+/// Phase 2: Phase 1 + drop old tool_call/tool_result messages.
+/// Phase 3: Phase 2 + drop old reasoning and text_response messages.
 pub struct TieredCompact {
     /// The number of recent workflow step iterations to protect from compaction.
     pub keep_recent: i64,

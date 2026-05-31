@@ -90,6 +90,18 @@ forge-guardrails-proxy \
   --llamafile-runtime /opt/forge/bin/llamafile
 ```
 
+Programmatic startup must pass the same trusted runtime path:
+
+```text
+setup_backend(
+    "llamafile",
+    None,
+    Some(Path::new("path/to/model.gguf")),
+    Some(Path::new("/opt/forge/bin/llamafile")),
+    /* budget and runtime options */
+)
+```
+
 The runtime path must be absolute, resolve to a regular file, and be
 executable on Unix platforms.
 
