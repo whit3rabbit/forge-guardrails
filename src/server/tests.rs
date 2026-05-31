@@ -15,6 +15,7 @@ use super::runtime::validate_llamafile_runtime_path;
 use super::*;
 
 static TEST_PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static NEXT_TEST_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 fn port_test_guard() -> std::sync::MutexGuard<'static, ()> {
     TEST_PORT_LOCK
@@ -113,8 +114,16 @@ fn sh_quote(path: &Path) -> String {
 
 #[allow(dead_code)]
 fn free_port() -> i64 {
+    for _ in 0..8_000 {
+        let next = NEXT_TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let port = 41_000 + i64::from(next % 8_000);
+        if TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+            return port;
+        }
+    }
+
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    listener.local_addr().unwrap().port() as i64
+    listener.local_addr().unwrap().port().into()
 }
 
 #[allow(dead_code)]
