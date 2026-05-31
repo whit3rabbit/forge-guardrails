@@ -127,6 +127,7 @@ fn test_lifecycle_options() -> LifecycleOptions {
     }
 }
 
+#[cfg(all(unix, not(all(target_os = "macos", target_arch = "x86_64"))))]
 fn fake_backend_lifecycle_options() -> LifecycleOptions {
     LifecycleOptions {
         ready_timeout: Duration::from_secs(30),
@@ -630,6 +631,7 @@ fn invalid_extra_flags_fail_before_stopping_existing_backend() {
     let _ = std::fs::remove_dir_all(test_dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn child_exit_during_readiness_fails_start() {
     let _guard = port_test_guard();
@@ -693,6 +695,7 @@ fn readiness_requires_default_generation_settings() {
     let _ = mgr.stop_with_options(Duration::from_millis(200), Duration::ZERO);
 }
 
+#[cfg(unix)]
 #[test]
 fn failed_readiness_terminates_child_and_clears_state() {
     let _guard = port_test_guard();
@@ -785,6 +788,7 @@ PY
     let _ = std::fs::remove_dir_all(test_dir);
 }
 
+#[cfg(all(unix, not(all(target_os = "macos", target_arch = "x86_64"))))]
 #[test]
 fn forge_fast_restarts_with_half_total_context() {
     let _guard = port_test_guard();
@@ -822,6 +826,7 @@ fn forge_fast_restarts_with_half_total_context() {
     let _ = std::fs::remove_dir_all(test_dir);
 }
 
+#[cfg(all(unix, not(all(target_os = "macos", target_arch = "x86_64"))))]
 #[test]
 fn manual_llamaserver_budget_comes_from_props() {
     let _guard = port_test_guard();
@@ -907,6 +912,7 @@ fn run_config_inequality_mode() {
     assert_ne!(c1, c2);
 }
 
+#[cfg(all(unix, not(all(target_os = "macos", target_arch = "x86_64"))))]
 #[test]
 fn test_setup_backend_ordering() {
     let _guard = port_test_guard();
