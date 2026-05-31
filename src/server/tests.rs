@@ -2,8 +2,11 @@ use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use super::args::build_backend_args;
 use super::lifecycle::LifecycleOptions;
@@ -14,7 +17,9 @@ use super::*;
 static TEST_PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn port_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    TEST_PORT_LOCK.lock().unwrap()
+    TEST_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]
@@ -119,6 +124,13 @@ fn test_lifecycle_options() -> LifecycleOptions {
         ready_poll_interval: Duration::from_millis(20),
         stop_timeout: Duration::from_millis(200),
         vram_clear_delay: Duration::ZERO,
+    }
+}
+
+fn fake_backend_lifecycle_options() -> LifecycleOptions {
+    LifecycleOptions {
+        ready_timeout: Duration::from_secs(30),
+        ..test_lifecycle_options()
     }
 }
 
@@ -796,7 +808,7 @@ fn forge_fast_restarts_with_half_total_context() {
             None,
             None,
             false,
-            test_lifecycle_options(),
+            fake_backend_lifecycle_options(),
         )
         .unwrap();
 
@@ -833,7 +845,7 @@ fn manual_llamaserver_budget_comes_from_props() {
             None,
             None,
             false,
-            test_lifecycle_options(),
+            fake_backend_lifecycle_options(),
         )
         .unwrap();
 
