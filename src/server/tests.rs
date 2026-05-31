@@ -190,6 +190,7 @@ PY
     write_executable(path, body.as_bytes());
 }
 
+#[cfg(unix)]
 fn write_stubborn_runtime(path: &Path, term_marker: &Path) {
     let marker = serde_json::to_string(&term_marker.to_string_lossy()).unwrap();
     let body = format!(
