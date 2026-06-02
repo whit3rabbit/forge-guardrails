@@ -10,8 +10,9 @@ use std::sync::Arc;
 use axum::routing::{get, options, post};
 use axum::Router;
 use forge_guardrails::{
-    init_proxy_classifier_log_sink_from_env, FinalResponseScorer, ServerManager, ToolCallScorer,
-    ToolOutputCompressionState,
+    init_proxy_classifier_log_sink_from_env, init_proxy_training_capture_sink_from_env,
+    shutdown_proxy_classifier_log_sink, shutdown_proxy_training_capture_sink, FinalResponseScorer,
+    ServerManager, ToolCallScorer, ToolOutputCompressionState,
 };
 use tokio::sync::Mutex as TokioMutex;
 
@@ -38,6 +39,8 @@ pub(crate) async fn serve(
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
 ) -> Result<(), String> {
     let result = serve_inner(config, client_factory, scorer, final_response_scorer).await;
+    shutdown_proxy_training_capture_sink();
+    shutdown_proxy_classifier_log_sink();
     if let Some(server) = managed_server {
         if let Err(err) = server.stop() {
             let stop_err = format!("failed to stop managed backend: {err}");
@@ -69,6 +72,7 @@ async fn serve_inner(
         tool_output_state: Arc::new(ToolOutputCompressionState::new()),
     };
     init_proxy_classifier_log_sink_from_env();
+    init_proxy_training_capture_sink_from_env();
 
     eprintln!(
         "forge-guardrails-proxy listening on http://{}:{}",

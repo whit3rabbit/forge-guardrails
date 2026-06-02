@@ -261,8 +261,28 @@ git push origin v0.1.0
 - The workflow publishes the crate with `cargo publish --locked`, builds
   platform archives for `forge-guardrails-proxy`, publishes the GitHub release,
   and updates `whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is set.
+- `HOMEBREW_TAP_TOKEN` must be an Actions secret on
+  `whit3rabbit/forge-guardrails`, because this repo owns the release workflow.
+  The token itself must have read/write `Contents` access to
+  `whit3rabbit/homebrew-tap`. A token stored only on the tap repo is not visible
+  to this workflow.
+- Verify release secrets before tagging:
+
+```bash
+gh secret list --repo whit3rabbit/forge-guardrails
+```
+
 - Do not run `cargo publish` or manually edit the Homebrew cask unless the
   workflow fails and the user explicitly asks for manual recovery.
+- If the tag release already published to crates.io, do not rerun the whole
+  release workflow. Rerun only the `Update Homebrew Cask` job, otherwise
+  `cargo publish` will fail because crates.io versions are immutable:
+
+```bash
+gh run view <release-run-id> --json jobs --jq '.jobs[] | {name,databaseId,status,conclusion}'
+gh run rerun <release-run-id> --job <update-homebrew-cask-job-id>
+```
+
 - The Homebrew cask install command is:
 
 ```bash

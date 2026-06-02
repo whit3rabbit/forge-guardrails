@@ -39,7 +39,7 @@ batches, and terminal-tool rules remain Rust-owned and authoritative.
 | Field | Value |
 |---|---|
 | Base model | `microsoft/deberta-v3-small` |
-| Notebook | `notebook/toolcall_verifier_training_production_colab_v4.ipynb` |
+| Notebook | `notebook/toolcall_verifier_training_production_colab_v5.ipynb` |
 | Label mode | `production` |
 | Input schema | `toolcall-verifier-input/v1` |
 | Serializer | `serialize_state_v1` |
@@ -93,6 +93,40 @@ Use group-preserving sampling by `example_group_id`. If a hard negative is
 included, keep the paired valid/corrected row in the same group so splitting and
 sampling do not separate the contrastive pair.
 
+### Private Generated Dataset
+
+The current private generated dataset used for `agent_training_hf` is
+`notebook/generatetd/out/openrouter-train-3k` and contains `2650` tool-call
+rows:
+
+| Label | Rows |
+|---|---:|
+| `valid` | `2077` |
+| `wrong_tool_semantic` | `247` |
+| `wrong_arguments_semantic` | `80` |
+| `tool_not_needed` | `246` |
+
+This dataset is useful as Forge-style valid-call coverage, but it is not strong
+wrong-tool training evidence yet. In this run, `246/247` private wrong-tool rows
+used a literal `synthetic_unrelated_tool` distractor, so the negative boundary is
+mostly a name-level shortcut. The latest pasted evaluation showed
+`agent_training_hf` accuracy around `0.975`, while the large wrong-tool
+confusions still came from public datasets. Do not infer from that private score
+that the classifier has learned real wrong-tool semantics.
+
+Before increasing private weight or enabling semantic-negative train rebalance,
+improve generated wrong-tool rows:
+
+- prefer real competing tools from the same observed task group when available;
+- otherwise use a small reviewed distractor catalog rather than the single
+  `synthetic_unrelated_tool` name;
+- include paired valid rows in the same `example_group_id`;
+- keep schema-valid arguments for the distractor so the label remains semantic
+  wrong-tool, not deterministic invalid or wrong-argument noise;
+- mine high-confidence reviewed quarantines, such as `uv lock` requested but
+  `make build` executed, into paired wrong-argument or wrong-tool examples only
+  after verification accepts them as training rows.
+
 ### Uploaded Eval Files
 
 Use this hard-negative glob:
@@ -124,9 +158,9 @@ The T4 profile is for cheap diagnosis; it is not promotion evidence.
 | `WRONG_TOOL_TRAIN_TO_VALID_RATIO_TARGET` | `0.90` unused while disabled | `0.55` unused while disabled |
 | `WRONG_ARGUMENTS_TRAIN_TO_VALID_RATIO_TARGET` | `0.75` unused while disabled | `0.70` unused while disabled |
 | `MAX_SEMANTIC_NEGATIVE_DUPLICATION_FACTOR` | `4` | `2` unused while disabled |
-| `ENABLE_VALID_PROTECTION_EXTRA_TRAIN_REBALANCE` | `True` | `False` |
-| `VALID_PROTECTION_EXTRA_COPY_FACTOR` | `2` | disabled |
-| `VALID_PROTECTION_EXTRA_COPY_ROWS_CAP` | `5000` | disabled |
+| `ENABLE_VALID_PROTECTION_EXTRA_TRAIN_REBALANCE` | `True` | `True` |
+| `VALID_PROTECTION_EXTRA_COPY_FACTOR` | `2` | `2` |
+| `VALID_PROTECTION_EXTRA_COPY_ROWS_CAP` | `5000` | `5000` |
 
 Non-valid caps remain:
 
@@ -202,12 +236,29 @@ T4 runs exposed data-path and balance issues but are not promotion candidates:
 | T4 valid-heavy run | `valid` recall reached `0.947` | `valid` false objection `0.0132`, `wrong_tool_semantic` precision `0.676`, `wrong_tool_semantic` recall `0.088` |
 | T4 semantic-heavy run | `wrong_tool_semantic` recall recovered to `0.773` | `valid` recall collapsed to `0.628`, `wrong_tool_semantic` precision only `0.422` |
 | T4 softened semantic run | `valid` recall recovered to `0.794` and `wrong_tool_semantic` precision improved to `0.528` | still failed `valid` recall, `valid` false objection, `wrong_tool_semantic` precision, and no-op valid slice gates |
+| T4 `auto`/`t4_proven` recovery run | macro F1 recovered to `0.7603` and `valid` recall to `0.9109` after the `t4_fast` collapse | still failed `valid` recall, `valid` false objection `0.0127`, `wrong_tool_semantic` precision `0.7273`, fixed-width/no-op slice gates, and showed `CANDIDATE_CALL` truncation around `12.5%` |
+| T4 `openrouter-train-3k` run | test `valid` recall reached `0.9408`, `wrong_arguments_semantic` precision reached `0.9523`, and `agent_training_hf` accuracy reached about `0.975` | validation/test still failed promotion: test valid false objection `0.0128`, test `wrong_tool_semantic` precision `0.8462`, wrong-tool recall only about `0.30`, and protected valid slices still failed |
 
 The current T4-only rebalance backs off semantic-negative upsampling entirely
-and disables extra protected-valid duplication. This is a diagnostic attempt to
-separate the effects of global valid balance from semantic-negative pressure.
-Use T4 to iterate on data flow, not to decide promotion. If this still fails,
-prefer `t4_proven` or a high-coverage GPU run over more `t4_fast` ratio chasing.
+and keeps extra protected-valid duplication enabled. This is a diagnostic
+attempt to separate the effects of global valid balance and protected valid
+support from semantic-negative pressure. Use T4 to iterate on data flow, not to
+decide promotion. If T4 continues to fail after data-quality fixes, prefer a
+high-coverage GPU run with a longer context window over more `t4_fast` ratio
+chasing.
+
+The `openrouter-train-3k` result changes the immediate diagnosis. It no longer
+looks like the model primarily pushes valid calls into `wrong_tool_semantic`.
+Instead, it is too permissive on public wrong-tool rows: `755/1139` test
+`wrong_tool_semantic` rows were predicted `valid`, while private
+`agent_training_hf` rows were already mostly correct. Fix generated and public
+wrong-tool evidence before changing gates or thresholds.
+
+The latest `auto`/`t4_proven` sidecars also exposed a reporting issue: split
+balancing produced `25` corrected error-recovery valid rows in both validation
+and test, but the evaluation slice mask reported zero rows. Slice diagnostics
+must use the precomputed `valid_protection_*` columns when present, not only
+metadata reparsing after JSON dataset reload.
 
 ### High-Coverage Recovery Is Closer
 

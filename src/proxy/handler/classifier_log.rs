@@ -131,6 +131,17 @@ pub(super) fn init_proxy_classifier_log_sink_from_env() {
     let _ = classifier_log_sink_from_env();
 }
 
+pub(super) fn shutdown_proxy_classifier_log_sink() {
+    match CLASSIFIER_LOG_SINK.lock() {
+        Ok(mut guard) => {
+            *guard = None;
+        }
+        Err(err) => {
+            warn_classifier_log_init_once(format!("classifier log lock poisoned: {err}"));
+        }
+    }
+}
+
 pub(super) fn emit_proxy_classifier_jsonl(event: Value) {
     let Some(sink) = classifier_log_sink_from_env() else {
         return;

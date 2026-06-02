@@ -36,6 +36,7 @@ mod request_contract;
 mod response_shape;
 mod scoring;
 mod tool_specs;
+mod training_capture;
 
 pub use anthropic::{
     handle_anthropic_messages, handle_anthropic_messages_with_scorer,
@@ -69,6 +70,21 @@ pub use tool_specs::parse_tool_specs;
 /// Initialize the optional bounded proxy classifier JSONL sink from environment.
 pub fn init_proxy_classifier_log_sink_from_env() {
     classifier_log::init_proxy_classifier_log_sink_from_env();
+}
+
+/// Initialize the optional bounded private training-capture JSONL sink from environment.
+pub fn init_proxy_training_capture_sink_from_env() {
+    training_capture::init_proxy_training_capture_sink_from_env();
+}
+
+/// Shut down the optional bounded proxy classifier JSONL sink.
+pub fn shutdown_proxy_classifier_log_sink() {
+    classifier_log::shutdown_proxy_classifier_log_sink();
+}
+
+/// Shut down the optional bounded private training-capture JSONL sink.
+pub fn shutdown_proxy_training_capture_sink() {
+    training_capture::shutdown_proxy_training_capture_sink();
 }
 
 /// Stream of OpenAI chat completion chunk objects.
@@ -713,6 +729,12 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         ),
         LLMResponse::ToolCalls(ref calls) => {
             let (real_calls, respond_text) = strip_respond_calls(calls);
+            training_capture::emit_proxy_training_tool_call_candidates(
+                &internal_msgs,
+                &real_calls,
+                step_enforcer.as_ref(),
+                &tool_specs,
+            );
 
             if real_calls.is_empty() {
                 // Pure respond: convert to text.

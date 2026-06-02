@@ -59,7 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="total synthetic hard negatives, split evenly across current synthetic types",
     )
     gen.add_argument("--synthetic-missing-argument", type=int, default=0)
-    gen.add_argument("--synthetic-wrong-tool", type=int, default=0)
+    gen.add_argument(
+        "--synthetic-wrong-tool",
+        type=int,
+        default=0,
+        help="deprecated no-op; use reviewed real competing-tool rows from forge-dataset instead",
+    )
     gen.add_argument("--synthetic-tool-not-needed", type=int, default=0)
     return parser.parse_args(argv)
 
@@ -70,6 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         provider = "none" if args.no_api else args.provider
         try:
             synthetic_missing_argument, synthetic_wrong_tool, synthetic_tool_not_needed = resolve_synthetic_counts(args)
+            if args.synthetic_wrong_tool > 0:
+                print(
+                    "generatetd: --synthetic-wrong-tool is disabled until it can use reviewed real competing tools",
+                    file=sys.stderr,
+                )
         except ValueError as exc:
             print(f"generatetd: {exc}", file=sys.stderr)
             return 2
@@ -120,11 +130,11 @@ def resolve_synthetic_counts(args: argparse.Namespace) -> tuple[int, int, int]:
     if balanced and any(per_type):
         raise ValueError("--synthetic-balanced cannot be combined with per-type synthetic count flags")
     if not balanced:
-        return tuple(per_type)  # type: ignore[return-value]
+        return per_type[0], 0, per_type[2]
 
-    base = balanced // 3
-    remainder = balanced % 3
-    counts = [base, base, base]
+    base = balanced // 2
+    remainder = balanced % 2
+    counts = [base, base]
     for index in range(remainder):
         counts[index] += 1
-    return counts[0], counts[1], counts[2]
+    return counts[0], 0, counts[1]

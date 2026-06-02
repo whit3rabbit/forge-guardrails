@@ -106,10 +106,12 @@ pub use proxy::{
     handle_chat_completions_with_scorer, handle_chat_completions_with_scorers,
     handle_chat_completions_with_scorers_and_tool_controls,
     handle_chat_completions_with_scorers_and_tool_output_compression, has_respond_tool,
-    init_proxy_classifier_log_sink_from_env, openai_to_messages, respond_tool_openai,
-    strip_respond_calls, text_response_to_openai, text_to_sse_events, tool_calls_to_openai,
-    tool_calls_to_sse_events, AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult,
-    HTTPServer, HandlerError, HandlerResult, OpenAiEventStream, OpenAiMessageError,
+    init_proxy_classifier_log_sink_from_env, init_proxy_training_capture_sink_from_env,
+    openai_to_messages, respond_tool_openai, shutdown_proxy_classifier_log_sink,
+    shutdown_proxy_training_capture_sink, strip_respond_calls, text_response_to_openai,
+    text_to_sse_events, tool_calls_to_openai, tool_calls_to_sse_events, AnthropicEventStream,
+    AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerError, HandlerResult,
+    OpenAiEventStream, OpenAiMessageError,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tool_output::{

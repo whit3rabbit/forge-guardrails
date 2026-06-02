@@ -143,6 +143,113 @@ async fn classifier_log_sink_drops_oversized_events() {
     std::fs::remove_file(path).ok();
 }
 
+#[tokio::test]
+async fn training_capture_sink_writes_one_event_per_line() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "forge-proxy-training-capture-{}-{}.jsonl",
+        std::process::id(),
+        super::classifier_log::unix_ms()
+    ));
+    std::fs::remove_file(&path).ok();
+    let first = json!({"kind": "tool_call_candidate", "tool": "search_docs"});
+    let second = json!({"kind": "tool_call_candidate", "tool": "read_doc"});
+
+    let sink = super::training_capture::TrainingCaptureSink::spawn(
+        super::training_capture::TrainingCaptureConfig::new(path.clone()).with_queue_capacity(4),
+    )
+    .expect("sink");
+    sink.emit(first.clone());
+    sink.emit(second.clone());
+    sink.flush().await.expect("flush");
+
+    let text = std::fs::read_to_string(&path).expect("jsonl");
+    let rows = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("json row"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, vec![first, second]);
+    std::fs::remove_file(path).ok();
+}
+
+#[tokio::test]
+async fn training_capture_sink_redacts_private_payload_fields() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "forge-proxy-training-capture-redacted-{}-{}.jsonl",
+        std::process::id(),
+        super::classifier_log::unix_ms()
+    ));
+    std::fs::remove_file(&path).ok();
+    let event = json!({
+        "kind": "tool_call_candidate",
+        "user_request": "secret request",
+        "initial_user_request": "initial secret",
+        "workflow_state": {"recent_errors": ["secret error"]},
+        "available_tools": [{"name": "secret_tool"}],
+        "candidate_call": {"name": "search_docs", "arguments": {"query": "secret query"}},
+        "later_tool_result": {"content": "secret result"}
+    });
+
+    let sink = super::training_capture::TrainingCaptureSink::spawn(
+        super::training_capture::TrainingCaptureConfig::new(path.clone()).with_redaction(true),
+    )
+    .expect("sink");
+    sink.emit(event);
+    sink.flush().await.expect("flush");
+
+    let text = std::fs::read_to_string(&path).expect("jsonl");
+    assert!(!text.contains("secret"));
+    let row = serde_json::from_str::<Value>(text.trim()).expect("json row");
+    assert_eq!(row["user_request"], "[redacted]");
+    assert_eq!(row["available_tools"], "[redacted]");
+    assert_eq!(row["candidate_call"]["arguments"], "[redacted]");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn training_capture_event_includes_available_tools_and_private_metadata() {
+    let mut args = IndexMap::new();
+    args.insert("query".to_string(), json!("proxy capture"));
+    let call = ToolCall::new("search_docs", args);
+    let available_tools = json!([
+        {
+            "name": "search_docs",
+            "description": "Search project documentation.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        }
+    ]);
+    let workflow_state = json!({
+        "required_steps": [],
+        "completed_steps": [],
+        "pending_steps": [],
+        "terminal_tools": ["respond"],
+        "recent_errors": []
+    });
+
+    let event = super::training_capture::training_capture_event_for_candidate(
+        "group-1",
+        0,
+        "Find proxy docs",
+        "Find proxy docs",
+        &workflow_state,
+        &available_tools,
+        &call,
+    );
+
+    assert_eq!(event["schema_version"], "forge-proxy-training-capture/v1");
+    assert_eq!(event["kind"], "tool_call_candidate");
+    assert_eq!(event["example_group_id"], "group-1");
+    assert_eq!(event["available_tools"], available_tools);
+    assert_eq!(event["candidate_call"]["name"], "search_docs");
+    assert_eq!(event["metadata"]["private_agent_log"], true);
+    assert_eq!(event["metadata"]["public_export_allowed"], false);
+}
+
 async fn collect_stream_events(result: HandlerResult) -> Vec<Value> {
     match result {
         HandlerResult::StreamBody(stream) => collect_openai_events(stream).await.unwrap(),

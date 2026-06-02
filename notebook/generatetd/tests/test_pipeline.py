@@ -208,13 +208,11 @@ def test_synthetic_tool_rows_are_bounded_and_labeled(tmp_path):
     )
     assert [item["label"] for item in synthetic] == [
         "wrong_arguments_semantic",
-        "wrong_tool_semantic",
         "tool_not_needed",
     ]
     assert all(item["review"]["synthetic"] is True for item in synthetic)
     assert synthetic[0]["input"]["candidate_call"]["arguments"] == {}
-    assert synthetic[1]["input"]["candidate_call"]["name"] == "synthetic_unrelated_tool"
-    assert synthetic[2]["input"]["user_request"].startswith("Reply briefly")
+    assert synthetic[1]["input"]["user_request"].startswith("Reply briefly")
 
 
 def tool_observation(tmp_path):

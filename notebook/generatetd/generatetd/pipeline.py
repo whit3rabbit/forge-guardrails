@@ -482,23 +482,7 @@ def mutate_missing_argument(row: dict[str, Any], mutation_type: str, options: Ge
 
 
 def mutate_wrong_tool(row: dict[str, Any], mutation_type: str, options: GenerateOptions) -> dict[str, Any] | None:
-    input_obj = deepcopy(row["input"])
-    call = input_obj["candidate_call"]
-    original_name = str(call["name"])
-    wrong_name = "synthetic_unrelated_tool"
-    if original_name == wrong_name:
-        return None
-    original_tool = next((tool for tool in input_obj["available_tools"] if tool.get("name") == original_name), None)
-    if original_tool is None:
-        return None
-    input_obj["available_tools"].append({
-        "name": wrong_name,
-        "description": "Synthetic distractor tool that does not satisfy the observed task.",
-        "parameters": deepcopy(original_tool.get("parameters") or {"type": "object", "properties": {}}),
-    })
-    call["name"] = wrong_name
-    rationale = f"Synthetic hard negative: replaced valid tool {original_name!r} with unrelated tool {wrong_name!r}."
-    return synthetic_tool_row(row, input_obj, "wrong_tool_semantic", mutation_type, rationale, options, {})
+    return None
 
 
 def mutate_tool_not_needed(row: dict[str, Any], mutation_type: str, options: GenerateOptions) -> dict[str, Any] | None:

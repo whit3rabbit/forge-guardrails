@@ -108,7 +108,11 @@ python -m generatetd generate \
   --out out/synthetic-balanced-smoke
 ```
 
-This splits the requested synthetic total evenly across the current synthetic types. For `75`, that means up to `25` each. If the number is not divisible by three, the remainder is assigned deterministically in this order: `missing_argument`, `wrong_tool`, `tool_not_needed`. Final counts may be lower after schema validation and dedupe.
+This splits the requested synthetic total evenly across the active synthetic
+types: `missing_argument` and `tool_not_needed`. The old synthetic wrong-tool
+path is disabled because it used a fake `synthetic_unrelated_tool` distractor and
+created noisy shortcuts instead of real wrong-tool semantics. Final counts may be
+lower after schema validation and dedupe.
 
 Use per-type counts when you need exact control:
 
@@ -117,7 +121,6 @@ python -m generatetd generate \
   --no-api \
   --limit 100 \
   --synthetic-missing-argument 25 \
-  --synthetic-wrong-tool 25 \
   --synthetic-tool-not-needed 25 \
   --out out/synthetic-smoke
 ```
@@ -127,8 +130,11 @@ python -m generatetd generate \
 Synthetic types:
 
 - `missing_argument`: removes one argument and labels `wrong_arguments_semantic`.
-- `wrong_tool`: swaps the candidate call to a synthetic distractor tool and labels `wrong_tool_semantic`.
 - `tool_not_needed`: changes the request to a direct no-tool request and labels `tool_not_needed`.
+
+Generate wrong-tool rows through `forge-dataset` or another reviewed multi-tool
+capture path where the distractor is a real available competing tool, schema
+valid for that wrong tool, and reviewer/verifier approved.
 
 Synthetic negatives are useful for coverage, but keep them capped. They should supplement real hard negatives, not dominate the dataset.
 
@@ -201,9 +207,9 @@ python -m generatetd generate \
 - `--serializer v1|v2`: choose the Forge scorer serialization used for dedupe keys.
 - `--verify-review`: run a second LLM gate before accepting reviewed rows.
 - `--verifier-provider`: provider for `--verify-review`, default `same`.
-- `--synthetic-balanced`: total synthetic hard negatives split evenly across current synthetic types.
+- `--synthetic-balanced`: total synthetic hard negatives split evenly across active synthetic types.
 - `--synthetic-missing-argument`: number of valid rows to mutate into missing-argument negatives.
-- `--synthetic-wrong-tool`: number of valid rows to mutate into wrong-tool negatives.
+- `--synthetic-wrong-tool`: disabled no-op until wrong-tool generation uses reviewed real competing tools.
 - `--synthetic-tool-not-needed`: number of valid rows to mutate into tool-not-needed negatives.
 - `--api-max-attempts`: total attempts per review request, default `4`.
 - `--api-backoff-seconds`: initial retry delay, doubled on each retry, default `1.0`.
