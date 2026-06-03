@@ -38,6 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gen.add_argument("--quiet", action="store_true", help="suppress progress messages on stderr")
     gen.add_argument("--emit-notebook-adapter", dest="emit_notebook_adapter", action="store_true", default=True)
     gen.add_argument("--no-notebook-adapter", dest="emit_notebook_adapter", action="store_false")
+    gen.add_argument("--tool-calls-only", action="store_true", help="skip final-response row generation")
     gen.add_argument("--fail-on-private-public-export", action="store_true", default=True)
     gen.add_argument("--allow-private-public-export", dest="fail_on_private_public_export", action="store_false")
     gen.add_argument("--codex-root", type=Path, default=Path.home() / ".codex")
@@ -109,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
                     synthetic_missing_argument=synthetic_missing_argument,
                     synthetic_wrong_tool=synthetic_wrong_tool,
                     synthetic_tool_not_needed=synthetic_tool_not_needed,
+                    tool_calls_only=args.tool_calls_only,
                     progress=not args.quiet,
                 )
             )

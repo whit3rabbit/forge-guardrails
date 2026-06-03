@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 
 pub(crate) const CAPTURE_SCHEMA_VERSION: &str = "forge-dataset-capture/v1";
 pub(crate) const TRAINING_SCHEMA_VERSION: &str = "toolcall-verifier-training/v1";
+pub(crate) const TRAINING_INPUT_SCHEMA_VERSION_V1: &str = "toolcall-verifier-input/v1";
 pub(crate) const TRAINING_INPUT_SCHEMA_VERSION: &str = "toolcall-verifier-input/v2";
 pub(crate) const ALLOWED_LABELS: &[&str] = &[
     "valid",
@@ -10,9 +11,21 @@ pub(crate) const ALLOWED_LABELS: &[&str] = &[
     "tool_not_needed",
     "needs_clarification",
 ];
+pub(crate) const TRAINING_LABELS: &[&str] = &[
+    "valid",
+    "wrong_tool_semantic",
+    "wrong_arguments_semantic",
+    "tool_not_needed",
+    "needs_clarification",
+    "deterministic_invalid",
+];
 
 pub(crate) fn is_allowed_label(label: &str) -> bool {
     ALLOWED_LABELS.contains(&label)
+}
+
+pub(crate) fn is_training_label(label: &str) -> bool {
+    TRAINING_LABELS.contains(&label)
 }
 
 pub(crate) fn capture_candidate_call(name: &str, arguments: Value) -> Value {

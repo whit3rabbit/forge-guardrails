@@ -14,6 +14,11 @@ forge-dataset review
   -> MiniMax/OpenRouter reviewer
   -> MiniMax/OpenRouter verifier
   -> streaming toolcall-verifier-training/v1 JSONL
+forge-dataset agent-logs
+  -> sanitized Codex/Claude log mining through notebook/generatetd backend
+forge-dataset assemble
+  -> proxy rows + agent-log rows
+  -> combined private JSONL + notebook adapter + manifest
 forge-dataset validate
   -> JSONL/schema sanity checks
 ```
@@ -48,6 +53,25 @@ The script:
 - reviews and verifies rows to `training.toolcall.jsonl`.
 
 Use `--capture-only` or `--provider none` to skip external review.
+
+To include sanitized local agent logs in the same run, opt in explicitly:
+
+```bash
+scripts/run_dataset_workflow.sh \
+  /path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf \
+  --provider openrouter \
+  --verifier-provider minimax \
+  --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 75 \
+  --include-agent-logs \
+  --agent-log-limit 1000 \
+  --agent-log-synthetic-balanced 250 \
+  --out-dir target/dataset/merged-run
+```
+
+This keeps proxy-reviewed Forge rows first, mines tool-call rows from sanitized
+Codex/Claude logs through the temporary `notebook/generatetd` backend, then
+assembles both sources into `training.toolcall.combined.jsonl`.
 
 ## Tool-Call Prompts
 
@@ -113,7 +137,8 @@ cargo run --bin forge-dataset -- review \
   --input target/dataset/capture.jsonl \
   --output target/dataset/training.toolcall.jsonl \
   --provider openrouter \
-  --verifier-provider same
+  --verifier-provider same \
+  --concurrency 4
 ```
 
 Review with MiniMax:
@@ -145,6 +170,11 @@ cargo run --bin forge-dataset -- review \
 rejected reviewer/verifier failures with a different provider, use a fresh
 output path or move the rejects file aside.
 
+`--concurrency N` parallelizes the main capture review pass while keeping JSONL
+writes ordered and single-threaded. Start with `4`; higher values can hit
+provider rate limits. To skip generated targeted alternatives, pass
+`--max-alternative-ratio 0`.
+
 Validate JSONL files:
 
 ```bash
@@ -154,6 +184,36 @@ cargo run --bin forge-dataset -- validate \
   --input target/dataset/proxy_training_capture.jsonl \
   --input target/dataset/training.toolcall.jsonl
 ```
+
+Mine agent logs directly through the canonical `forge-dataset` surface:
+
+```bash
+cargo run --bin forge-dataset -- agent-logs \
+  --out target/dataset/run/agent_logs \
+  --provider openrouter \
+  --verifier-provider minimax \
+  --limit 1000 \
+  --synthetic-balanced 250
+```
+
+`agent-logs` wraps `notebook/generatetd generate --tool-calls-only` and writes
+`tool_call_training.jsonl` under the chosen output directory. It keeps
+final-response row generation out of the merged default path.
+
+Assemble reviewed proxy rows and agent-log rows:
+
+```bash
+cargo run --bin forge-dataset -- assemble \
+  --input target/dataset/run/training.toolcall.jsonl \
+  --input target/dataset/run/agent_logs/tool_call_training.jsonl \
+  --out-dir target/dataset/run \
+  --combined-output training.toolcall.combined.jsonl
+```
+
+`assemble` validates canonical `toolcall-verifier-training/v1` rows, accepts
+tool-call input v1 or v2, stamps private provenance on accepted rows, dedupes
+by serialized model input, preserves the first input on exact duplicates, and
+writes conflicting duplicate labels to `conflicts.jsonl`.
 
 ## Provider Configuration
 
@@ -206,9 +266,15 @@ Default one-command output files under `target/dataset/run/`:
 - `proxy_training_capture.jsonl`: proxy-side accepted candidate telemetry.
 - `training.toolcall.jsonl`: verifier-approved training rows.
 - `training.toolcall.rejects.jsonl`: malformed/rejected reviewer or verifier rows.
+- `agent_logs/tool_call_training.jsonl`: optional sanitized local agent-log rows.
+- `training.toolcall.combined.jsonl`: optional assembled proxy-first + agent-log rows.
+- `agent_training.notebook.jsonl`: optional notebook adapter emitted by `assemble`.
+- `dataset_manifest.json`: optional assembled run manifest.
+- `quarantine.jsonl` and `conflicts.jsonl`: optional assemble rejects and label conflicts.
 
 The proxy capture log is useful for auditing what Forge accepted. The canonical
-training input is `training.toolcall.jsonl`.
+training input is `training.toolcall.jsonl` for proxy-only runs and
+`training.toolcall.combined.jsonl` for merged runs.
 
 ## Recommended Generation Size
 

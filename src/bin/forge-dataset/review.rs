@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
+use futures_util::future::join_all;
 use serde_json::{json, Value};
 
 use crate::cli::{default_minimax_model, default_openrouter_model, ReviewCli};
@@ -45,13 +46,14 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
     let total_captures = count_jsonl_rows(&cli.input)?;
     let mut progress = ReviewProgress::new(total_captures);
     eprintln!(
-        "review start input={} output={} rejects={} reviewer={} verifier={} resume={} captures={}",
+        "review start input={} output={} rejects={} reviewer={} verifier={} resume={} concurrency={} captures={}",
         cli.input,
         cli.output,
         reject_path.display(),
         reviewer_label,
         verifier_label,
         cli.resume,
+        cli.concurrency,
         total_captures
     );
     if cli.resume {
@@ -65,6 +67,7 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
 
     let file =
         File::open(&cli.input).map_err(|err| format!("failed to read {}: {err}", cli.input))?;
+    let mut batch = Vec::with_capacity(cli.concurrency);
     for (line_index, line) in BufReader::new(file).lines().enumerate() {
         progress.seen += 1;
         let line =
@@ -86,187 +89,35 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
         }
 
         progress.log_reviewing(&capture);
-        let decision = match review_capture(&reviewer, &capture).await {
-            Ok(decision) => decision,
-            Err(err) => {
-                append_reject(&reject_path, "reviewer_rejected", &err, &capture, None)?;
-                progress.rejected += 1;
-                progress.log_rejected("reviewer_rejected");
-                continue;
-            }
-        };
-
-        if let Some(corrected) = decision.corrected_candidate_call.as_ref() {
-            if let Err(err) = validate_candidate_call(&capture["available_tools"], corrected) {
-                append_reject(
-                    &reject_path,
-                    "invalid_corrected_candidate_call",
-                    &err,
-                    &capture,
-                    Some(decision.raw.clone()),
-                )?;
-                progress.rejected += 1;
-                progress.log_rejected("invalid_corrected_candidate_call");
-                continue;
-            }
-        }
-
-        let candidate_call = capture["candidate_call"].clone();
-        let verifier_decision = match verify_label(
-            &verifier,
-            &capture,
-            &candidate_call,
-            &decision.label,
-            &decision.rationale,
-        )
-        .await
-        {
-            Ok(decision) => decision,
-            Err(err) => {
-                append_reject(
-                    &reject_path,
-                    "verifier_invalid_response",
-                    &err,
-                    &capture,
-                    None,
-                )?;
-                progress.rejected += 1;
-                progress.log_rejected("verifier_invalid_response");
-                continue;
-            }
-        };
-        if !verifier_decision.accepted {
-            append_reject(
+        batch.push(CaptureJob {
+            row_index: progress.seen,
+            capture,
+        });
+        if batch.len() >= cli.concurrency {
+            flush_capture_batch(
+                &mut batch,
+                &reviewer,
+                &verifier,
                 &reject_path,
-                "verifier_rejected",
-                &verifier_decision.rationale,
-                &capture,
-                Some(verifier_decision.raw),
-            )?;
-            progress.rejected += 1;
-            progress.log_rejected("verifier_rejected");
-            continue;
-        }
-        if let Some(reason) = post_review_quality_reject(
-            &capture,
-            &candidate_call,
-            &decision.label,
-            "real_model_call",
-        ) {
-            append_reject(
-                &reject_path,
-                "post_review_quality_rejected",
-                &reason,
-                &capture,
-                Some(decision.raw.clone()),
-            )?;
-            progress.rejected += 1;
-            progress.log_rejected("post_review_quality_rejected");
-            continue;
-        }
-
-        let corrected_positive = decision
-            .corrected_candidate_call
-            .as_ref()
-            .filter(|_| decision.label != "valid")
-            .map(|call| json!({"candidate_call": call}));
-        let real_row = training_row(
-            &capture,
-            candidate_call,
-            &decision.label,
-            "real_model_call",
-            &decision,
-            &verifier_decision,
-            corrected_positive,
-        );
-        append_jsonl(&cli.output, &real_row)?;
-        resume_state.record_training_row(&real_row);
-        progress.accepted_real += 1;
-        progress.log_accepted(&decision.label, "real_model_call");
-        if decision.label == "valid" {
-            resume_state
-                .valid_real_capture_keys
-                .insert(capture_key.clone());
-            alternative_proposals.extend(propose_targeted_alternatives(&capture));
-        }
-
-        if decision.label != "valid" {
-            if let Some(corrected) = decision.corrected_candidate_call.as_ref() {
-                if let Some(reason) = post_review_quality_reject(
-                    &capture,
-                    corrected,
-                    "valid",
-                    "reviewer_corrected_positive",
-                ) {
-                    append_reject(
-                        &reject_path,
-                        "post_review_corrected_positive_quality_rejected",
-                        &reason,
-                        &capture,
-                        Some(decision.raw.clone()),
-                    )?;
-                    progress.rejected += 1;
-                    progress.log_rejected("post_review_corrected_positive_quality_rejected");
-                    continue;
-                }
-                let corrected_verifier = match verify_label(
-                    &verifier,
-                    &capture,
-                    corrected,
-                    "valid",
-                    "Reviewer supplied this corrected candidate call as the positive target.",
-                )
-                .await
-                {
-                    Ok(decision) => decision,
-                    Err(err) => {
-                        append_reject(
-                            &reject_path,
-                            "corrected_positive_verifier_invalid_response",
-                            &err,
-                            &capture,
-                            None,
-                        )?;
-                        progress.rejected += 1;
-                        progress.log_rejected("corrected_positive_verifier_invalid_response");
-                        continue;
-                    }
-                };
-                if corrected_verifier.accepted {
-                    let corrected_decision = ReviewDecision {
-                        label: "valid".to_string(),
-                        confidence: decision.confidence,
-                        rationale: "Reviewer-corrected positive.".to_string(),
-                        corrected_candidate_call: None,
-                        raw: decision.raw.clone(),
-                    };
-                    let corrected_row = training_row(
-                        &capture,
-                        corrected.clone(),
-                        "valid",
-                        "reviewer_corrected_positive",
-                        &corrected_decision,
-                        &corrected_verifier,
-                        None,
-                    );
-                    append_jsonl(&cli.output, &corrected_row)?;
-                    resume_state.record_training_row(&corrected_row);
-                    progress.accepted_corrected += 1;
-                    progress.log_accepted("valid", "reviewer_corrected_positive");
-                } else {
-                    append_reject(
-                        &reject_path,
-                        "corrected_positive_verifier_rejected",
-                        &corrected_verifier.rationale,
-                        &capture,
-                        Some(corrected_verifier.raw),
-                    )?;
-                    progress.rejected += 1;
-                    progress.log_rejected("corrected_positive_verifier_rejected");
-                }
-            }
+                &cli.output,
+                &mut resume_state,
+                &mut progress,
+                &mut alternative_proposals,
+            )
+            .await?;
         }
     }
+    flush_capture_batch(
+        &mut batch,
+        &reviewer,
+        &verifier,
+        &reject_path,
+        &cli.output,
+        &mut resume_state,
+        &mut progress,
+        &mut alternative_proposals,
+    )
+    .await?;
 
     eprintln!(
         "review capture pass complete seen={} skipped={} accepted_real={} accepted_corrected={} rejected={} proposed_alternatives={}",
@@ -304,6 +155,287 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
         cli.output
     );
 
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CaptureJob {
+    row_index: usize,
+    capture: Value,
+}
+
+#[derive(Debug, Default)]
+struct CaptureReviewOutcome {
+    writes: Vec<CaptureWrite>,
+    alternative_proposals: Vec<AlternativeProposal>,
+}
+
+impl CaptureReviewOutcome {
+    fn training(&mut self, row: Value) {
+        self.writes.push(CaptureWrite::Training(row));
+    }
+
+    fn reject(
+        &mut self,
+        reason: &str,
+        detail: impl Into<String>,
+        capture: &Value,
+        raw_response: Option<Value>,
+    ) {
+        self.writes.push(CaptureWrite::Reject(RejectRecord {
+            reason: reason.to_string(),
+            detail: detail.into(),
+            capture: capture.clone(),
+            raw_response,
+        }));
+    }
+}
+
+#[derive(Debug)]
+enum CaptureWrite {
+    Training(Value),
+    Reject(RejectRecord),
+}
+
+#[derive(Debug)]
+struct RejectRecord {
+    reason: String,
+    detail: String,
+    capture: Value,
+    raw_response: Option<Value>,
+}
+
+async fn flush_capture_batch(
+    batch: &mut Vec<CaptureJob>,
+    reviewer: &JsonLlmClient,
+    verifier: &JsonLlmClient,
+    reject_path: &Path,
+    output_path: &str,
+    resume_state: &mut ResumeState,
+    progress: &mut ReviewProgress,
+    alternative_proposals: &mut Vec<AlternativeProposal>,
+) -> Result<(), String> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let jobs = std::mem::take(batch);
+    let outcomes = join_all(jobs.into_iter().map(|job| async move {
+        let row_index = job.row_index;
+        let outcome = review_capture_job(reviewer, verifier, job.capture).await;
+        (row_index, outcome)
+    }))
+    .await;
+
+    for (row_index, outcome) in outcomes {
+        apply_capture_outcome(
+            row_index,
+            outcome,
+            reject_path,
+            output_path,
+            resume_state,
+            progress,
+            alternative_proposals,
+        )?;
+    }
+    Ok(())
+}
+
+async fn review_capture_job(
+    reviewer: &JsonLlmClient,
+    verifier: &JsonLlmClient,
+    capture: Value,
+) -> CaptureReviewOutcome {
+    let mut outcome = CaptureReviewOutcome::default();
+    let decision = match review_capture(reviewer, &capture).await {
+        Ok(decision) => decision,
+        Err(err) => {
+            outcome.reject("reviewer_rejected", err, &capture, None);
+            return outcome;
+        }
+    };
+
+    if let Some(corrected) = decision.corrected_candidate_call.as_ref() {
+        if let Err(err) = validate_candidate_call(&capture["available_tools"], corrected) {
+            outcome.reject(
+                "invalid_corrected_candidate_call",
+                err,
+                &capture,
+                Some(decision.raw.clone()),
+            );
+            return outcome;
+        }
+    }
+
+    let candidate_call = capture["candidate_call"].clone();
+    let verifier_decision = match verify_label(
+        verifier,
+        &capture,
+        &candidate_call,
+        &decision.label,
+        &decision.rationale,
+    )
+    .await
+    {
+        Ok(decision) => decision,
+        Err(err) => {
+            outcome.reject("verifier_invalid_response", err, &capture, None);
+            return outcome;
+        }
+    };
+    if !verifier_decision.accepted {
+        outcome.reject(
+            "verifier_rejected",
+            verifier_decision.rationale,
+            &capture,
+            Some(verifier_decision.raw),
+        );
+        return outcome;
+    }
+    if let Some(reason) = post_review_quality_reject(
+        &capture,
+        &candidate_call,
+        &decision.label,
+        "real_model_call",
+    ) {
+        outcome.reject(
+            "post_review_quality_rejected",
+            reason,
+            &capture,
+            Some(decision.raw.clone()),
+        );
+        return outcome;
+    }
+
+    let corrected_positive = decision
+        .corrected_candidate_call
+        .as_ref()
+        .filter(|_| decision.label != "valid")
+        .map(|call| json!({"candidate_call": call}));
+    let real_row = training_row(
+        &capture,
+        candidate_call,
+        &decision.label,
+        "real_model_call",
+        &decision,
+        &verifier_decision,
+        corrected_positive,
+    );
+    outcome.training(real_row);
+    if decision.label == "valid" {
+        outcome
+            .alternative_proposals
+            .extend(propose_targeted_alternatives(&capture));
+    }
+
+    if decision.label != "valid" {
+        if let Some(corrected) = decision.corrected_candidate_call.as_ref() {
+            if let Some(reason) = post_review_quality_reject(
+                &capture,
+                corrected,
+                "valid",
+                "reviewer_corrected_positive",
+            ) {
+                outcome.reject(
+                    "post_review_corrected_positive_quality_rejected",
+                    reason,
+                    &capture,
+                    Some(decision.raw.clone()),
+                );
+                return outcome;
+            }
+            let corrected_verifier = match verify_label(
+                verifier,
+                &capture,
+                corrected,
+                "valid",
+                "Reviewer supplied this corrected candidate call as the positive target.",
+            )
+            .await
+            {
+                Ok(decision) => decision,
+                Err(err) => {
+                    outcome.reject(
+                        "corrected_positive_verifier_invalid_response",
+                        err,
+                        &capture,
+                        None,
+                    );
+                    return outcome;
+                }
+            };
+            if corrected_verifier.accepted {
+                let corrected_decision = ReviewDecision {
+                    label: "valid".to_string(),
+                    confidence: decision.confidence,
+                    rationale: "Reviewer-corrected positive.".to_string(),
+                    corrected_candidate_call: None,
+                    raw: decision.raw.clone(),
+                };
+                let corrected_row = training_row(
+                    &capture,
+                    corrected.clone(),
+                    "valid",
+                    "reviewer_corrected_positive",
+                    &corrected_decision,
+                    &corrected_verifier,
+                    None,
+                );
+                outcome.training(corrected_row);
+            } else {
+                outcome.reject(
+                    "corrected_positive_verifier_rejected",
+                    corrected_verifier.rationale,
+                    &capture,
+                    Some(corrected_verifier.raw),
+                );
+            }
+        }
+    }
+
+    outcome
+}
+
+fn apply_capture_outcome(
+    row_index: usize,
+    outcome: CaptureReviewOutcome,
+    reject_path: &Path,
+    output_path: &str,
+    resume_state: &mut ResumeState,
+    progress: &mut ReviewProgress,
+    alternative_proposals: &mut Vec<AlternativeProposal>,
+) -> Result<(), String> {
+    for write in outcome.writes {
+        match write {
+            CaptureWrite::Training(row) => {
+                let label = row
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let source_bucket = row
+                    .get("review")
+                    .and_then(|review| review.get("source_bucket"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                append_jsonl(output_path, &row)?;
+                resume_state.record_training_row(&row);
+                match source_bucket.as_str() {
+                    "real_model_call" => progress.accepted_real += 1,
+                    "reviewer_corrected_positive" => progress.accepted_corrected += 1,
+                    _ => {}
+                }
+                progress.log_accepted(row_index, &label, &source_bucket);
+            }
+            CaptureWrite::Reject(reject) => {
+                append_reject_record(reject_path, &reject)?;
+                progress.rejected += 1;
+                progress.log_rejected(row_index, &reject.reason);
+            }
+        }
+    }
+    alternative_proposals.extend(outcome.alternative_proposals);
     Ok(())
 }
 
@@ -651,10 +783,10 @@ impl ReviewProgress {
         );
     }
 
-    fn log_accepted(&self, label: &str, source_bucket: &str) {
+    fn log_accepted(&self, row_index: usize, label: &str, source_bucket: &str) {
         eprintln!(
             "review row {}/{} accepted label={} source_bucket={} accepted_real={} accepted_corrected={} rejected={}",
-            self.seen,
+            row_index,
             self.total,
             label,
             source_bucket,
@@ -664,10 +796,10 @@ impl ReviewProgress {
         );
     }
 
-    fn log_rejected(&self, reason: &str) {
+    fn log_rejected(&self, row_index: usize, reason: &str) {
         eprintln!(
             "review row {}/{} rejected reason={} accepted_real={} accepted_corrected={} rejected={}",
-            self.seen,
+            row_index,
             self.total,
             reason,
             self.accepted_real,
@@ -881,17 +1013,7 @@ fn training_row(
             "workflow_state": capture.get("workflow_state").cloned().unwrap_or(Value::Null),
             "available_tools": capture.get("available_tools").cloned().unwrap_or_else(|| json!([])),
             "candidate_call": candidate_call,
-            "metadata": {
-                "scenario_family": capture
-                    .get("proxy_trace")
-                    .and_then(|trace| trace.get("domain"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("forge_dataset"),
-                "requires_transform": label == "wrong_arguments_semantic",
-                "requires_synthesis": false,
-                "requires_all_tool_facts": false,
-                "must_acknowledge_missing_data": label == "needs_clarification"
-            }
+            "metadata": training_metadata(capture)
         },
         "label": label,
         "review": {
@@ -923,6 +1045,20 @@ fn training_row(
         }
     }
     row
+}
+
+fn training_metadata(capture: &Value) -> Value {
+    json!({
+        "scenario_family": capture
+            .get("proxy_trace")
+            .and_then(|trace| trace.get("domain"))
+            .and_then(Value::as_str)
+            .unwrap_or("forge_dataset"),
+        "requires_transform": false,
+        "requires_synthesis": false,
+        "requires_all_tool_facts": false,
+        "must_acknowledge_missing_data": false
+    })
 }
 
 fn propose_targeted_alternatives(capture: &Value) -> Vec<AlternativeProposal> {
@@ -1554,6 +1690,16 @@ fn append_reject(
     )
 }
 
+fn append_reject_record(path: &Path, record: &RejectRecord) -> Result<(), String> {
+    append_reject(
+        path,
+        &record.reason,
+        &record.detail,
+        &record.capture,
+        record.raw_response.clone(),
+    )
+}
+
 fn append_jsonl_path(path: &Path, row: &Value) -> Result<(), String> {
     let line = serde_json::to_string(row).map_err(|err| err.to_string())?;
     let mut file = OpenOptions::new()
@@ -1743,6 +1889,55 @@ mod tests {
     }
 
     #[test]
+    fn training_row_metadata_does_not_encode_label() {
+        let review = ReviewDecision {
+            label: "wrong_arguments_semantic".to_string(),
+            confidence: 0.9,
+            rationale: "bad argument".to_string(),
+            corrected_candidate_call: None,
+            raw: json!({}),
+        };
+        let verifier = VerifierDecision {
+            accepted: true,
+            rationale: "accepted".to_string(),
+            raw: json!({}),
+        };
+        let capture = capture_row();
+
+        let wrong_args_row = training_row(
+            &capture,
+            capture["candidate_call"].clone(),
+            "wrong_arguments_semantic",
+            "targeted_alternative",
+            &review,
+            &verifier,
+            None,
+        );
+        let clarification_row = training_row(
+            &capture,
+            capture["candidate_call"].clone(),
+            "needs_clarification",
+            "targeted_alternative",
+            &review,
+            &verifier,
+            None,
+        );
+
+        assert_eq!(
+            wrong_args_row["input"]["metadata"]["scenario_family"],
+            "shopping"
+        );
+        assert_eq!(
+            wrong_args_row["input"]["metadata"]["requires_transform"],
+            false
+        );
+        assert_eq!(
+            clarification_row["input"]["metadata"]["must_acknowledge_missing_data"],
+            false
+        );
+    }
+
+    #[test]
     fn resume_state_tracks_streamed_real_rows() {
         let review = ReviewDecision {
             label: "valid".to_string(),
@@ -1908,6 +2103,7 @@ mod tests {
             verifier_api_key: None,
             max_alternatives_per_group: 2,
             max_alternative_ratio: 1.0 / 3.0,
+            concurrency: 1,
             resume: false,
         };
         let env_file = EnvFile {
@@ -1948,6 +2144,7 @@ mod tests {
             verifier_api_key: None,
             max_alternatives_per_group: 2,
             max_alternative_ratio: 1.0 / 3.0,
+            concurrency: 1,
             resume: false,
         };
         let env_file = EnvFile {

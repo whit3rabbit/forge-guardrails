@@ -1,5 +1,7 @@
 //! Private dataset capture and review tool for Forge tool-call verifier rows.
 
+mod agent_logs;
+mod assemble;
 mod capture;
 mod cli;
 mod prompts;
@@ -31,6 +33,8 @@ async fn main() {
         Command::Prompts(cli) => prompts::run(cli),
         Command::Capture(cli) => capture::run(cli).await,
         Command::Review(cli) => review::run(*cli).await,
+        Command::AgentLogs(cli) => agent_logs::run(*cli),
+        Command::Assemble(cli) => assemble::run(cli),
         Command::Validate(cli) => validate::run(cli),
     };
 

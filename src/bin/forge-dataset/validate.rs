@@ -6,13 +6,14 @@ use serde_json::Value;
 
 use crate::cli::ValidateCli;
 use crate::schema::{
-    is_allowed_label, validate_candidate_call, CAPTURE_SCHEMA_VERSION,
-    TRAINING_INPUT_SCHEMA_VERSION, TRAINING_SCHEMA_VERSION,
+    is_training_label, validate_candidate_call, CAPTURE_SCHEMA_VERSION,
+    TRAINING_INPUT_SCHEMA_VERSION, TRAINING_INPUT_SCHEMA_VERSION_V1, TRAINING_SCHEMA_VERSION,
 };
 
 const PROMPT_SCHEMA_VERSION: &str = "forge-dataset-tool-prompt/v1";
 const PROXY_CAPTURE_SCHEMA_VERSION: &str = "forge-proxy-training-capture/v1";
 const REJECT_SCHEMA_VERSION: &str = "forge-dataset-review-reject/v1";
+const ASSEMBLE_CONFLICT_SCHEMA_VERSION: &str = "forge-dataset-assemble-conflict/v1";
 
 pub(crate) fn run(cli: ValidateCli) -> Result<(), String> {
     let mut errors = Vec::new();
@@ -101,6 +102,7 @@ fn validate_row(row: &Value) -> Result<&str, String> {
         CAPTURE_SCHEMA_VERSION => validate_capture_row(row)?,
         TRAINING_SCHEMA_VERSION => validate_training_row(row)?,
         REJECT_SCHEMA_VERSION => validate_reject_row(row)?,
+        ASSEMBLE_CONFLICT_SCHEMA_VERSION => validate_conflict_row(row)?,
         other => return Err(format!("unknown schema_version '{other}'")),
     }
     Ok(schema)
@@ -148,9 +150,12 @@ fn validate_proxy_capture_row(row: &Value) -> Result<(), String> {
 
 fn validate_training_row(row: &Value) -> Result<(), String> {
     let input = required_object(row, "input")?;
-    if required_str(input, "schema_version")? != TRAINING_INPUT_SCHEMA_VERSION {
+    let input_schema = required_str(input, "schema_version")?;
+    if input_schema != TRAINING_INPUT_SCHEMA_VERSION
+        && input_schema != TRAINING_INPUT_SCHEMA_VERSION_V1
+    {
         return Err(format!(
-            "input.schema_version must be {TRAINING_INPUT_SCHEMA_VERSION}"
+            "input.schema_version must be {TRAINING_INPUT_SCHEMA_VERSION} or {TRAINING_INPUT_SCHEMA_VERSION_V1}"
         ));
     }
     required_str(input, "user_request")?;
@@ -159,13 +164,14 @@ fn validate_training_row(row: &Value) -> Result<(), String> {
     let candidate_call = required_object_value(input, "candidate_call")?;
     validate_candidate_call(available_tools, candidate_call)?;
     let label = required_str(row, "label")?;
-    if !is_allowed_label(label) {
+    if !is_training_label(label) {
         return Err(format!("unsupported label '{label}'"));
     }
     let review = required_object(row, "review")?;
     required_str(review, "source")?;
-    required_str(review, "source_bucket")?;
-    required_str(review, "example_group_id")?;
+    if review.get("example_group_id").is_none() && review.get("task_group_id").is_none() {
+        return Err("review must include example_group_id or task_group_id".to_string());
+    }
     if let Some(corrected) = row
         .get("corrected_positive")
         .and_then(|value| value.get("candidate_call"))
@@ -181,6 +187,13 @@ fn validate_reject_row(row: &Value) -> Result<(), String> {
     if let Some(capture) = row.get("capture") {
         validate_capture_row(capture)?;
     }
+    Ok(())
+}
+
+fn validate_conflict_row(row: &Value) -> Result<(), String> {
+    required_str(row, "scorer_input")?;
+    required_object(row, "kept")?;
+    required_object(row, "conflict")?;
     Ok(())
 }
 

@@ -86,6 +86,62 @@ def test_generate_no_api_outputs_private_positive_and_quarantine(tmp_path):
     assert quarantine["reason"] == "needs_llm_review_for_failed_tool"
 
 
+def test_generate_tool_calls_only_skips_final_response_candidates(tmp_path):
+    codex_root = tmp_path / ".codex"
+    session = codex_root / "sessions" / "2026" / "05" / "01" / "s.jsonl"
+    write_jsonl(
+        session,
+        [
+            {"timestamp": "2026-05-01T00:00:00Z", "type": "session_meta", "payload": {"id": "s1", "cwd": "/Users/alice/repo"}},
+            {
+                "timestamp": "2026-05-01T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "List files"}]},
+            },
+            {
+                "timestamp": "2026-05-01T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "arguments": json.dumps({"command": ["zsh", "-lc", "ls"], "workdir": "/Users/alice/repo"}),
+                    "call_id": "ok",
+                },
+            },
+            {
+                "timestamp": "2026-05-01T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "ok",
+                    "output": json.dumps({"output": "README.md", "metadata": {"exit_code": 0}}),
+                },
+            },
+            {
+                "timestamp": "2026-05-01T00:00:04Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "README.md exists."}]},
+            },
+        ],
+    )
+    out = tmp_path / "out"
+    manifest = generate(
+        GenerateOptions(
+            out=out,
+            include_codex=True,
+            include_claude=False,
+            no_api=True,
+            provider="none",
+            codex_root=codex_root,
+            claude_root=tmp_path / ".claude",
+            tool_calls_only=True,
+        )
+    )
+    assert manifest["counts"]["tool_rows"] == 1
+    assert manifest["counts"]["final_response_rows"] == 0
+    assert manifest["counts"]["quarantine"] == 0
+
+
 def test_dedupe_conflicts_on_same_input_different_label():
     input_obj = {
         "schema_version": TOOLCALL_INPUT_SCHEMA_VERSION_V1,

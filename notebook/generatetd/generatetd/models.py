@@ -118,4 +118,5 @@ class GenerateOptions:
     synthetic_missing_argument: int = 0
     synthetic_wrong_tool: int = 0
     synthetic_tool_not_needed: int = 0
+    tool_calls_only: bool = False
     progress: bool = True

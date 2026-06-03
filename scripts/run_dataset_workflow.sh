@@ -7,9 +7,11 @@ DEFAULT_BACKEND_PORT="8080"
 DEFAULT_MODEL="test-model"
 DEFAULT_PROVIDER="auto"
 DEFAULT_VERIFIER_PROVIDER="same"
+DEFAULT_REVIEW_CONCURRENCY="1"
 DEFAULT_MAX_TURNS="4"
 DEFAULT_RUNS="1"
 DEFAULT_DOMAINS="repo_docs,shopping,calendar,support"
+DEFAULT_COMBINED_OUTPUT="training.toolcall.combined.jsonl"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -20,11 +22,16 @@ BACKEND_PORT="${FORGE_BACKEND_PORT:-${BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 MODEL="${FORGE_DATASET_MODEL:-$DEFAULT_MODEL}"
 PROVIDER="${FORGE_DATASET_REVIEW_PROVIDER:-$DEFAULT_PROVIDER}"
 VERIFIER_PROVIDER="${FORGE_DATASET_VERIFIER_PROVIDER:-$DEFAULT_VERIFIER_PROVIDER}"
+REVIEW_CONCURRENCY="${FORGE_DATASET_REVIEW_CONCURRENCY:-$DEFAULT_REVIEW_CONCURRENCY}"
 MAX_TURNS="${FORGE_DATASET_MAX_TURNS:-$DEFAULT_MAX_TURNS}"
 RUNS="${FORGE_DATASET_RUNS:-$DEFAULT_RUNS}"
 DOMAINS="${FORGE_DATASET_DOMAINS:-$DEFAULT_DOMAINS}"
+AGENT_LOG_LIMIT="${FORGE_DATASET_AGENT_LOG_LIMIT:-}"
+AGENT_LOG_SYNTHETIC_BALANCED="${FORGE_DATASET_AGENT_LOG_SYNTHETIC_BALANCED:-0}"
+COMBINED_OUTPUT="${FORGE_DATASET_COMBINED_OUTPUT:-$DEFAULT_COMBINED_OUTPUT}"
 GGUF_PATH_ARG="${GGUF_PATH:-${FORGE_GGUF:-${GGUF:-}}}"
 CAPTURE_ONLY=0
+INCLUDE_AGENT_LOGS=0
 
 usage() {
   cat <<EOF
@@ -41,12 +48,18 @@ Options:
                                 Review provider (default: auto)
   --verifier-provider same|auto|minimax|openrouter
                                 Verifier provider (default: same)
+  --review-concurrency N        Parallel capture reviews (default: $DEFAULT_REVIEW_CONCURRENCY)
   --max-turns N                 Capture turns per scenario (default: $DEFAULT_MAX_TURNS)
   --runs N                      Scenario repetitions (default: $DEFAULT_RUNS)
   --domains CSV                 Dataset domains (default: $DEFAULT_DOMAINS; also supports forge_eval)
   --proxy-port PORT             Forge proxy port (default: $DEFAULT_PROXY_PORT)
   --backend-port PORT           Managed llama-server port (default: $DEFAULT_BACKEND_PORT)
   --capture-only                Skip review
+  --include-agent-logs          Also mine sanitized Codex/Claude logs through forge-dataset
+  --agent-log-limit N           Limit agent-log candidates
+  --agent-log-synthetic-balanced N
+                                Add bounded synthetic agent-log negatives
+  --combined-output NAME        Combined output file name (default: $DEFAULT_COMBINED_OUTPUT)
   -h, --help                    Show this help
 
 Environment:
@@ -98,6 +111,10 @@ while [[ $# -gt 0 ]]; do
       VERIFIER_PROVIDER="${2:?--verifier-provider requires a value}"
       shift 2
       ;;
+    --review-concurrency)
+      REVIEW_CONCURRENCY="${2:?--review-concurrency requires a value}"
+      shift 2
+      ;;
     --max-turns)
       MAX_TURNS="${2:?--max-turns requires a value}"
       shift 2
@@ -121,6 +138,22 @@ while [[ $# -gt 0 ]]; do
     --capture-only)
       CAPTURE_ONLY=1
       shift
+      ;;
+    --include-agent-logs)
+      INCLUDE_AGENT_LOGS=1
+      shift
+      ;;
+    --agent-log-limit)
+      AGENT_LOG_LIMIT="${2:?--agent-log-limit requires a value}"
+      shift 2
+      ;;
+    --agent-log-synthetic-balanced)
+      AGENT_LOG_SYNTHETIC_BALANCED="${2:?--agent-log-synthetic-balanced requires a value}"
+      shift 2
+      ;;
+    --combined-output)
+      COMBINED_OUTPUT="${2:?--combined-output requires a value}"
+      shift 2
       ;;
     --)
       shift
@@ -146,8 +179,13 @@ valid_port "$PROXY_PORT" || die "invalid proxy port: $PROXY_PORT"
 valid_port "$BACKEND_PORT" || die "invalid backend port: $BACKEND_PORT"
 [[ "$PROVIDER" =~ ^(auto|minimax|openrouter|none)$ ]] || die "--provider must be auto|minimax|openrouter|none"
 [[ "$VERIFIER_PROVIDER" =~ ^(same|auto|minimax|openrouter)$ ]] || die "--verifier-provider must be same|auto|minimax|openrouter"
+[[ "$REVIEW_CONCURRENCY" =~ ^[0-9]+$ ]] && (( REVIEW_CONCURRENCY >= 1 && REVIEW_CONCURRENCY <= 32 )) || die "--review-concurrency must be an integer from 1 to 32"
 [[ "$MAX_TURNS" =~ ^[0-9]+$ ]] && (( MAX_TURNS > 0 )) || die "--max-turns must be a positive integer"
 [[ "$RUNS" =~ ^[0-9]+$ ]] && (( RUNS > 0 )) || die "--runs must be a positive integer"
+if [[ -n "$AGENT_LOG_LIMIT" ]]; then
+  [[ "$AGENT_LOG_LIMIT" =~ ^[0-9]+$ ]] || die "--agent-log-limit must be a non-negative integer"
+fi
+[[ "$AGENT_LOG_SYNTHETIC_BALANCED" =~ ^[0-9]+$ ]] || die "--agent-log-synthetic-balanced must be a non-negative integer"
 
 mkdir -p "$OUT_DIR"
 PROMPTS_JSONL="$OUT_DIR/tool_prompts.jsonl"
@@ -155,6 +193,9 @@ CAPTURE_JSONL="$OUT_DIR/capture.jsonl"
 PROXY_CAPTURE_JSONL="$OUT_DIR/proxy_training_capture.jsonl"
 TRAINING_JSONL="$OUT_DIR/training.toolcall.jsonl"
 TRAINING_REJECTS_JSONL="$OUT_DIR/training.toolcall.rejects.jsonl"
+AGENT_LOGS_DIR="$OUT_DIR/agent_logs"
+AGENT_LOGS_TOOL_JSONL="$AGENT_LOGS_DIR/tool_call_training.jsonl"
+COMBINED_JSONL="$OUT_DIR/$COMBINED_OUTPUT"
 
 pid_listening_on_port() {
   local port
@@ -216,6 +257,10 @@ printf 'Output: %s\n' "$OUT_DIR"
 printf 'Prompt payloads: %s\n' "$PROMPTS_JSONL"
 printf 'Capture rows: %s\n' "$CAPTURE_JSONL"
 printf 'Proxy capture rows: %s\n' "$PROXY_CAPTURE_JSONL"
+if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
+  printf 'Agent log rows: %s\n' "$AGENT_LOGS_TOOL_JSONL"
+  printf 'Combined rows: %s\n' "$COMBINED_JSONL"
+fi
 
 env \
   FORGE_PROXY_PORT="$PROXY_PORT" \
@@ -265,11 +310,36 @@ cargo run --bin forge-dataset -- review \
   --input "$CAPTURE_JSONL" \
   --output "$TRAINING_JSONL" \
   --provider "$PROVIDER" \
-  --verifier-provider "$VERIFIER_PROVIDER"
+  --verifier-provider "$VERIFIER_PROVIDER" \
+  --concurrency "$REVIEW_CONCURRENCY"
 
 cargo run --bin forge-dataset -- validate --input "$TRAINING_JSONL"
 if [[ -f "$TRAINING_REJECTS_JSONL" ]]; then
   cargo run --bin forge-dataset -- validate --input "$TRAINING_REJECTS_JSONL"
 fi
 
+if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
+  AGENT_LOG_ARGS=(
+    --out "$AGENT_LOGS_DIR"
+    --provider "$PROVIDER"
+    --verifier-provider "$VERIFIER_PROVIDER"
+  )
+  if [[ -n "$AGENT_LOG_LIMIT" ]]; then
+    AGENT_LOG_ARGS+=(--limit "$AGENT_LOG_LIMIT")
+  fi
+  if (( AGENT_LOG_SYNTHETIC_BALANCED > 0 )); then
+    AGENT_LOG_ARGS+=(--synthetic-balanced "$AGENT_LOG_SYNTHETIC_BALANCED")
+  fi
+  cargo run --bin forge-dataset -- agent-logs "${AGENT_LOG_ARGS[@]}"
+  cargo run --bin forge-dataset -- assemble \
+    --input "$TRAINING_JSONL" \
+    --input "$AGENT_LOGS_TOOL_JSONL" \
+    --out-dir "$OUT_DIR" \
+    --combined-output "$COMBINED_OUTPUT"
+  cargo run --bin forge-dataset -- validate --input "$COMBINED_JSONL"
+fi
+
 printf 'Training rows: %s\n' "$TRAINING_JSONL"
+if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
+  printf 'Combined training rows: %s\n' "$COMBINED_JSONL"
+fi

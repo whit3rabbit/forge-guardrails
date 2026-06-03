@@ -159,7 +159,9 @@ Dataset creation for tool-call verifier training:
 - Use `src/bin/forge-dataset/` and `scripts/run_dataset_workflow.sh` to create
   private reviewed JSONL. Do not generate dataset rows through shell tools.
   The dataset tool uses harmless deterministic stub registries and real model
-  tool calls through the Forge proxy.
+  tool calls through the Forge proxy. `forge-dataset` is also the canonical
+  user-facing wrapper for sanitized agent-log mining; `notebook/generatetd` is
+  a transitional backend, not the normal entrypoint.
 - The one-command local workflow starts managed `llama-server`, starts the
   Forge proxy, writes prompt/capture JSONL, reviews with MiniMax/OpenRouter,
   and writes `toolcall-verifier-training/v1` rows:
@@ -177,6 +179,29 @@ scripts/run_dataset_workflow.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf
   `repo_docs,shopping,calendar,support,forge_eval`, there are 17 prompt rows
   per run; `--runs 75` creates 1275 prompt contexts and usually lands near a
   2k-4k reviewed private addendum after reviewer/verifier rejects.
+- To merge proxy-captured rows with sanitized local Codex/Claude log rows, opt
+  in to the backend wrapper and assembler:
+
+```bash
+scripts/run_dataset_workflow.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf \
+  --provider openrouter \
+  --verifier-provider minimax \
+  --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 75 \
+  --include-agent-logs \
+  --agent-log-limit 1000 \
+  --agent-log-synthetic-balanced 250 \
+  --out-dir target/dataset/forge-eval-merged
+```
+
+- `forge-dataset agent-logs` wraps `notebook/generatetd generate
+  --tool-calls-only --serializer v2`; final-response rows remain a
+  direct-`generatetd` debug/future workflow. `forge-dataset assemble` accepts
+  repeated `toolcall-verifier-training/v1` inputs, keeps first-input precedence,
+  quarantines invalid/private-policy rows, writes conflicts for duplicate
+  serialized inputs with different labels, and emits
+  `training.toolcall.combined.jsonl`, `agent_training.notebook.jsonl`,
+  `dataset_manifest.json`, `quarantine.jsonl`, and `conflicts.jsonl`.
 - Reviewer and verifier keys are read from explicit flags first, then the shell
   environment, then `notebook/generatetd/.env`. Supported providers are
   `minimax` and `openrouter`; `--verifier-provider same` reuses the reviewer.
@@ -204,10 +229,11 @@ cargo run --bin forge-dataset -- validate \
   --input target/dataset/forge-eval-3k/training.toolcall.jsonl
 ```
 
-- `training.toolcall.jsonl` is the canonical notebook input. The Colab
-  notebook's private-HF default filename is `agent_training.notebook.jsonl`, so
-  upload the generated file under that name or set
-  `FORGE_AGENT_HF_DATASET_FILE`.
+- `training.toolcall.jsonl` is the canonical proxy-only notebook input.
+  `training.toolcall.combined.jsonl` is the canonical merged input when
+  `--include-agent-logs` is used. The Colab notebook's private-HF default
+  filename is `agent_training.notebook.jsonl`, so upload the generated adapter
+  under that name or set `FORGE_AGENT_HF_DATASET_FILE`.
 - Keep generated dataset outputs under `target/dataset/` private and do not
   commit them. Use `docs/DATASET_WORKFLOW.md` for the full contract, including
   capture-only mode, provider overrides, rejects, and validation details.

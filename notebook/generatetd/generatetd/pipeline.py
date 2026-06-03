@@ -148,24 +148,27 @@ def generate(options: GenerateOptions) -> dict[str, Any]:
         tool_rows.append(row)
         progress(options, f"accepted tool {idx}/{len(tool_candidates)} label={row['label']}")
 
-    remaining = None if options.limit is None else max(0, options.limit - len(tool_rows) - len(quarantine))
-    final_candidates = _limited(extraction.final_observations, remaining)
-    for idx, obs in enumerate(final_candidates, 1):
-        progress(options, f"reviewing final response {idx}/{len(final_candidates)} source={obs.source}")
-        try:
-            row = build_final_response_row(obs, options, client, verifier_client)
-        except Quarantine as exc:
-            quarantine.append(exc.record)
-            progress(
-                options,
-                (
-                    f"quarantined final response {idx}/{len(final_candidates)} "
-                    f"reason={exc.record['reason']}{quarantine_detail_suffix(exc.record)}"
-                ),
-            )
-            continue
-        final_rows.append(row)
-        progress(options, f"accepted final response {idx}/{len(final_candidates)} label={row['label']}")
+    if options.tool_calls_only:
+        progress(options, "skipping final-response rows by --tool-calls-only")
+    else:
+        remaining = None if options.limit is None else max(0, options.limit - len(tool_rows) - len(quarantine))
+        final_candidates = _limited(extraction.final_observations, remaining)
+        for idx, obs in enumerate(final_candidates, 1):
+            progress(options, f"reviewing final response {idx}/{len(final_candidates)} source={obs.source}")
+            try:
+                row = build_final_response_row(obs, options, client, verifier_client)
+            except Quarantine as exc:
+                quarantine.append(exc.record)
+                progress(
+                    options,
+                    (
+                        f"quarantined final response {idx}/{len(final_candidates)} "
+                        f"reason={exc.record['reason']}{quarantine_detail_suffix(exc.record)}"
+                    ),
+                )
+                continue
+            final_rows.append(row)
+            progress(options, f"accepted final response {idx}/{len(final_candidates)} label={row['label']}")
 
     synthetic_rows = generate_synthetic_tool_rows(tool_rows, options)
     if synthetic_rows:
