@@ -12,17 +12,20 @@ const PROMPT_SCHEMA_VERSION: &str = "forge-dataset-tool-prompt/v1";
 pub(crate) fn run(cli: PromptsCli) -> Result<(), String> {
     ensure_parent_dir(&cli.output)?;
     let registries = registries_for_domains(&cli.domains)?;
-    for registry in &registries {
-        for scenario in &registry.scenarios {
-            let row = prompt_row(
-                &cli.model,
-                registry.domain,
-                scenario.id,
-                scenario.user_request,
-                Value::Array(request_tools(registry)),
-                Value::Array(available_tools_for_training(registry)),
-            );
-            append_jsonl(&cli.output, &row)?;
+    for run_index in 0..cli.runs {
+        for registry in &registries {
+            for scenario in &registry.scenarios {
+                let row = prompt_row(
+                    &cli.model,
+                    run_index,
+                    registry.domain,
+                    scenario.id,
+                    scenario.user_request,
+                    Value::Array(request_tools(registry)),
+                    Value::Array(available_tools_for_training(registry)),
+                );
+                append_jsonl(&cli.output, &row)?;
+            }
         }
     }
     Ok(())
@@ -30,6 +33,7 @@ pub(crate) fn run(cli: PromptsCli) -> Result<(), String> {
 
 fn prompt_row(
     model: &str,
+    run_index: usize,
     domain: &str,
     scenario: &str,
     user_request: &str,
@@ -40,6 +44,7 @@ fn prompt_row(
         "schema_version": PROMPT_SCHEMA_VERSION,
         "domain": domain,
         "scenario": scenario,
+        "run_index": run_index,
         "user_request": user_request,
         "request": {
             "model": model,
@@ -57,7 +62,8 @@ fn prompt_row(
         "metadata": {
             "private_agent_log": true,
             "public_export_allowed": false,
-            "source": "forge-dataset"
+            "source": "forge-dataset",
+            "run_index": run_index
         }
     })
 }
@@ -96,6 +102,7 @@ mod tests {
         let scenario = registry.scenarios.first().expect("scenario");
         let row = prompt_row(
             "test-model",
+            0,
             registry.domain,
             scenario.id,
             scenario.user_request,
@@ -105,8 +112,32 @@ mod tests {
 
         assert_eq!(row["schema_version"], PROMPT_SCHEMA_VERSION);
         assert_eq!(row["request"]["model"], "test-model");
+        assert_eq!(row["run_index"], 0);
         assert_eq!(row["request"]["tools"][0]["type"], "function");
         assert_eq!(row["metadata"]["private_agent_log"], true);
         assert_eq!(row["metadata"]["public_export_allowed"], false);
+    }
+
+    #[test]
+    fn prompts_runs_expand_scenario_payloads() {
+        let output = std::env::temp_dir().join(format!(
+            "forge-dataset-prompts-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        run(PromptsCli {
+            model: "test-model".to_string(),
+            output: output.display().to_string(),
+            domains: vec!["forge_eval".to_string()],
+            runs: 2,
+        })
+        .expect("run");
+
+        let lines = std::fs::read_to_string(&output).expect("read");
+        assert_eq!(lines.lines().count(), 10);
+        std::fs::remove_file(output).expect("remove");
     }
 }

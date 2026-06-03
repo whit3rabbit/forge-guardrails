@@ -13,7 +13,9 @@ forge-dataset capture
 forge-dataset review
   -> MiniMax/OpenRouter reviewer
   -> MiniMax/OpenRouter verifier
-  -> toolcall-verifier-training/v1 JSONL
+  -> streaming toolcall-verifier-training/v1 JSONL
+forge-dataset validate
+  -> JSONL/schema sanity checks
 ```
 
 Generated rows are private by default:
@@ -32,6 +34,7 @@ scripts/run_dataset_workflow.sh \
   /path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf \
   --provider openrouter \
   --verifier-provider same \
+  --runs 1 \
   --out-dir target/dataset/openrouter-run
 ```
 
@@ -54,6 +57,7 @@ Generate inspectable prompt payloads without starting a model:
 cargo run --bin forge-dataset -- prompts \
   --model test-model \
   --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 1 \
   --output target/dataset/tool_prompts.jsonl
 ```
 
@@ -97,6 +101,7 @@ Terminal 2:
 cargo run --bin forge-dataset -- capture \
   --proxy-base-url http://127.0.0.1:8081/v1 \
   --model test-model \
+  --runs 1 \
   --output target/dataset/capture.jsonl
 ```
 
@@ -122,10 +127,41 @@ cargo run --bin forge-dataset -- review \
   --verifier-provider same
 ```
 
+`review` appends verifier-approved rows as soon as each row is accepted. It no
+longer keeps all accepted rows in memory until the end of the run. If review is
+interrupted, resume against the same capture/output/reject files:
+
+```bash
+cargo run --bin forge-dataset -- review \
+  --input target/dataset/capture.jsonl \
+  --output target/dataset/training.toolcall.jsonl \
+  --provider openrouter \
+  --verifier-provider minimax \
+  --resume
+```
+
+`--resume` skips capture candidates already present in either
+`training.toolcall.jsonl` or the sibling rejects file. To retry previously
+rejected reviewer/verifier failures with a different provider, use a fresh
+output path or move the rejects file aside.
+
+Validate JSONL files:
+
+```bash
+cargo run --bin forge-dataset -- validate \
+  --input target/dataset/tool_prompts.jsonl \
+  --input target/dataset/capture.jsonl \
+  --input target/dataset/proxy_training_capture.jsonl \
+  --input target/dataset/training.toolcall.jsonl
+```
+
 ## Provider Configuration
 
 `forge-dataset review` loads `notebook/generatetd/.env` by default, matching
-the Python `generatetd` workflow. Shell environment variables override the file.
+the Python `generatetd` workflow. Model precedence is role-specific
+`--reviewer-model`/`--verifier-model`, then provider-specific
+`--openrouter-model`/`--minimax-model`, then shell environment, then the env
+file, then built-in defaults.
 
 Supported keys:
 
@@ -133,7 +169,7 @@ Supported keys:
 MINIMAX_API_KEY=
 OPENROUTER_API_KEY=
 GENERATETD_MINIMAX_MODEL=MiniMax-M2.7
-GENERATETD_OPENROUTER_MODEL=deepseek/deepseek-v4-flash:free
+GENERATETD_OPENROUTER_MODEL=openrouter/free
 ```
 
 Provider selection:
@@ -146,6 +182,10 @@ Provider selection:
   first, then fallback without `response_format` if the selected route rejects
   strict structured output.
 - `--verifier-provider same`: reuse the reviewer endpoint/model.
+- For free OpenRouter review, prefer `openrouter/free` or a specific free model
+  whose OpenRouter model metadata includes `structured_outputs`. Free models
+  without `response_format`/`structured_outputs`, such as some Poolside routes,
+  will reject strict schema routing and fall back to plain JSON prompting.
 
 Manual OpenAI-compatible endpoints are still possible:
 
@@ -190,6 +230,26 @@ enough to keep public data as the backbone under the existing
 `FORGE_AGENT_HF_DATASET_WEIGHT=1` and
 `FORGE_AGENT_HF_TRAIN_FRACTION_TARGET=0.25` settings.
 
+`--runs` repeats every selected scenario with a new `example_group_id` per
+scenario/run. Defaults stay smoke-sized:
+
+```text
+default domains: 12 prompt rows per run
+with forge_eval: 17 prompt rows per run
+```
+
+Training rows are model- and review-dependent. A practical estimate for all
+five domains is `30` to `45` accepted training rows per run after review,
+including real positives, real bad calls, corrected positives, and capped
+reviewed alternatives. For roughly `3000` rows, start with:
+
+```text
+--runs 75
+```
+
+Then inspect `training.toolcall.jsonl` and rerun with a higher or lower count if
+the verifier reject rate is unusual.
+
 Recommended capture command:
 
 ```bash
@@ -197,6 +257,7 @@ scripts/run_dataset_workflow.sh /path/to/mistralai_Ministral-3-8B-Instruct-2512-
   --provider openrouter \
   --verifier-provider minimax \
   --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 75 \
   --out-dir target/dataset/forge-eval-reviewed
 ```
 

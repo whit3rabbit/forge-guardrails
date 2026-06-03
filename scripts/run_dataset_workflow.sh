@@ -8,6 +8,7 @@ DEFAULT_MODEL="test-model"
 DEFAULT_PROVIDER="auto"
 DEFAULT_VERIFIER_PROVIDER="same"
 DEFAULT_MAX_TURNS="4"
+DEFAULT_RUNS="1"
 DEFAULT_DOMAINS="repo_docs,shopping,calendar,support"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -20,6 +21,7 @@ MODEL="${FORGE_DATASET_MODEL:-$DEFAULT_MODEL}"
 PROVIDER="${FORGE_DATASET_REVIEW_PROVIDER:-$DEFAULT_PROVIDER}"
 VERIFIER_PROVIDER="${FORGE_DATASET_VERIFIER_PROVIDER:-$DEFAULT_VERIFIER_PROVIDER}"
 MAX_TURNS="${FORGE_DATASET_MAX_TURNS:-$DEFAULT_MAX_TURNS}"
+RUNS="${FORGE_DATASET_RUNS:-$DEFAULT_RUNS}"
 DOMAINS="${FORGE_DATASET_DOMAINS:-$DEFAULT_DOMAINS}"
 GGUF_PATH_ARG="${GGUF_PATH:-${FORGE_GGUF:-${GGUF:-}}}"
 CAPTURE_ONLY=0
@@ -40,6 +42,7 @@ Options:
   --verifier-provider same|auto|minimax|openrouter
                                 Verifier provider (default: same)
   --max-turns N                 Capture turns per scenario (default: $DEFAULT_MAX_TURNS)
+  --runs N                      Scenario repetitions (default: $DEFAULT_RUNS)
   --domains CSV                 Dataset domains (default: $DEFAULT_DOMAINS; also supports forge_eval)
   --proxy-port PORT             Forge proxy port (default: $DEFAULT_PROXY_PORT)
   --backend-port PORT           Managed llama-server port (default: $DEFAULT_BACKEND_PORT)
@@ -99,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       MAX_TURNS="${2:?--max-turns requires a value}"
       shift 2
       ;;
+    --runs)
+      RUNS="${2:?--runs requires a value}"
+      shift 2
+      ;;
     --domains)
       DOMAINS="${2:?--domains requires a value}"
       shift 2
@@ -140,12 +147,14 @@ valid_port "$BACKEND_PORT" || die "invalid backend port: $BACKEND_PORT"
 [[ "$PROVIDER" =~ ^(auto|minimax|openrouter|none)$ ]] || die "--provider must be auto|minimax|openrouter|none"
 [[ "$VERIFIER_PROVIDER" =~ ^(same|auto|minimax|openrouter)$ ]] || die "--verifier-provider must be same|auto|minimax|openrouter"
 [[ "$MAX_TURNS" =~ ^[0-9]+$ ]] && (( MAX_TURNS > 0 )) || die "--max-turns must be a positive integer"
+[[ "$RUNS" =~ ^[0-9]+$ ]] && (( RUNS > 0 )) || die "--runs must be a positive integer"
 
 mkdir -p "$OUT_DIR"
 PROMPTS_JSONL="$OUT_DIR/tool_prompts.jsonl"
 CAPTURE_JSONL="$OUT_DIR/capture.jsonl"
 PROXY_CAPTURE_JSONL="$OUT_DIR/proxy_training_capture.jsonl"
 TRAINING_JSONL="$OUT_DIR/training.toolcall.jsonl"
+TRAINING_REJECTS_JSONL="$OUT_DIR/training.toolcall.rejects.jsonl"
 
 pid_listening_on_port() {
   local port
@@ -232,6 +241,7 @@ MANAGED_BACKEND_PID="$(pid_listening_on_port "$BACKEND_PORT" || true)"
 cargo run --bin forge-dataset -- prompts \
   --model "$MODEL" \
   --domains "$DOMAINS" \
+  --runs "$RUNS" \
   --output "$PROMPTS_JSONL"
 
 cargo run --bin forge-dataset -- capture \
@@ -239,7 +249,12 @@ cargo run --bin forge-dataset -- capture \
   --model "$MODEL" \
   --domains "$DOMAINS" \
   --max-turns "$MAX_TURNS" \
+  --runs "$RUNS" \
   --output "$CAPTURE_JSONL"
+
+cargo run --bin forge-dataset -- validate \
+  --input "$PROMPTS_JSONL" \
+  --input "$CAPTURE_JSONL"
 
 if [[ "$CAPTURE_ONLY" == "1" || "$PROVIDER" == "none" ]]; then
   printf 'Skipping review. Capture-only workflow complete.\n'
@@ -251,5 +266,10 @@ cargo run --bin forge-dataset -- review \
   --output "$TRAINING_JSONL" \
   --provider "$PROVIDER" \
   --verifier-provider "$VERIFIER_PROVIDER"
+
+cargo run --bin forge-dataset -- validate --input "$TRAINING_JSONL"
+if [[ -f "$TRAINING_REJECTS_JSONL" ]]; then
+  cargo run --bin forge-dataset -- validate --input "$TRAINING_REJECTS_JSONL"
+fi
 
 printf 'Training rows: %s\n' "$TRAINING_JSONL"

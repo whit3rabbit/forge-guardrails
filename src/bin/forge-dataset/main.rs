@@ -6,6 +6,7 @@ mod prompts;
 mod review;
 mod schema;
 mod stub_tools;
+mod validate;
 
 use std::env;
 
@@ -30,6 +31,7 @@ async fn main() {
         Command::Prompts(cli) => prompts::run(cli),
         Command::Capture(cli) => capture::run(cli).await,
         Command::Review(cli) => review::run(*cli).await,
+        Command::Validate(cli) => validate::run(cli),
     };
 
     if let Err(err) = result {

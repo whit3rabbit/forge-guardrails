@@ -3,6 +3,7 @@ pub(crate) enum Command {
     Prompts(PromptsCli),
     Capture(CaptureCli),
     Review(Box<ReviewCli>),
+    Validate(ValidateCli),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +11,7 @@ pub(crate) struct PromptsCli {
     pub(crate) model: String,
     pub(crate) output: String,
     pub(crate) domains: Vec<String>,
+    pub(crate) runs: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +21,7 @@ pub(crate) struct CaptureCli {
     pub(crate) output: String,
     pub(crate) max_turns: usize,
     pub(crate) domains: Vec<String>,
+    pub(crate) runs: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +41,12 @@ pub(crate) struct ReviewCli {
     pub(crate) verifier_api_key: Option<String>,
     pub(crate) max_alternatives_per_group: usize,
     pub(crate) max_alternative_ratio: f64,
+    pub(crate) resume: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidateCli {
+    pub(crate) inputs: Vec<String>,
 }
 
 const DEFAULT_PROXY_BASE_URL: &str = "http://127.0.0.1:8081/v1";
@@ -47,7 +56,7 @@ const DEFAULT_REVIEW_OUTPUT: &str = "target/dataset/training.toolcall.jsonl";
 const DEFAULT_DOMAINS: &str = "repo_docs,shopping,calendar,support";
 const DEFAULT_ENV_FILE: &str = "notebook/generatetd/.env";
 const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M2.7";
-const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash:free";
+const DEFAULT_OPENROUTER_MODEL: &str = "openrouter/free";
 
 pub(crate) fn parse_args<I>(args: I) -> Result<Command, String>
 where
@@ -62,6 +71,7 @@ where
         "prompts" => parse_prompts(&values[1..]),
         "capture" => parse_capture(&values[1..]),
         "review" => parse_review(&values[1..]),
+        "validate" => parse_validate(&values[1..]),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -71,6 +81,7 @@ fn parse_prompts(values: &[String]) -> Result<Command, String> {
         model: "test-model".to_string(),
         output: DEFAULT_PROMPTS_OUTPUT.to_string(),
         domains: parse_domains(DEFAULT_DOMAINS)?,
+        runs: 1,
     };
 
     let mut index = 0;
@@ -82,6 +93,7 @@ fn parse_prompts(values: &[String]) -> Result<Command, String> {
             "--domains" => {
                 cli.domains = parse_domains(&take_one(values, &mut index, "--domains")?)?;
             }
+            "--runs" => cli.runs = take_usize(values, &mut index, "--runs")?,
             flag if flag.starts_with("--") => return Err(format!("unknown prompts flag: {flag}")),
             value => return Err(format!("unexpected prompts argument: {value}")),
         }
@@ -90,6 +102,9 @@ fn parse_prompts(values: &[String]) -> Result<Command, String> {
 
     if cli.model.trim().is_empty() {
         return Err("--model must not be empty".to_string());
+    }
+    if cli.runs == 0 {
+        return Err("--runs must be at least 1".to_string());
     }
     Ok(Command::Prompts(cli))
 }
@@ -101,6 +116,7 @@ fn parse_capture(values: &[String]) -> Result<Command, String> {
         output: DEFAULT_CAPTURE_OUTPUT.to_string(),
         max_turns: 4,
         domains: parse_domains(DEFAULT_DOMAINS)?,
+        runs: 1,
     };
 
     let mut index = 0;
@@ -118,6 +134,7 @@ fn parse_capture(values: &[String]) -> Result<Command, String> {
             "--domains" => {
                 cli.domains = parse_domains(&take_one(values, &mut index, "--domains")?)?;
             }
+            "--runs" => cli.runs = take_usize(values, &mut index, "--runs")?,
             flag if flag.starts_with("--") => return Err(format!("unknown capture flag: {flag}")),
             value => return Err(format!("unexpected capture argument: {value}")),
         }
@@ -130,6 +147,9 @@ fn parse_capture(values: &[String]) -> Result<Command, String> {
     if cli.max_turns == 0 {
         return Err("--max-turns must be at least 1".to_string());
     }
+    if cli.runs == 0 {
+        return Err("--runs must be at least 1".to_string());
+    }
     Ok(Command::Capture(cli))
 }
 
@@ -140,8 +160,8 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
         env_file: DEFAULT_ENV_FILE.to_string(),
         provider: "auto".to_string(),
         verifier_provider: "same".to_string(),
-        minimax_model: DEFAULT_MINIMAX_MODEL.to_string(),
-        openrouter_model: DEFAULT_OPENROUTER_MODEL.to_string(),
+        minimax_model: String::new(),
+        openrouter_model: String::new(),
         reviewer_base_url: String::new(),
         reviewer_model: String::new(),
         reviewer_api_key: None,
@@ -150,6 +170,7 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
         verifier_api_key: None,
         max_alternatives_per_group: 2,
         max_alternative_ratio: 1.0 / 3.0,
+        resume: false,
     };
 
     let mut index = 0;
@@ -195,6 +216,7 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
                 cli.max_alternative_ratio =
                     take_f64(values, &mut index, "--max-alternative-ratio")?;
             }
+            "--resume" => cli.resume = true,
             flag if flag.starts_with("--") => return Err(format!("unknown review flag: {flag}")),
             value => return Err(format!("unexpected review argument: {value}")),
         }
@@ -216,6 +238,26 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
     }
 
     Ok(Command::Review(Box::new(cli)))
+}
+
+fn parse_validate(values: &[String]) -> Result<Command, String> {
+    let mut cli = ValidateCli { inputs: Vec::new() };
+
+    let mut index = 0;
+    while index < values.len() {
+        match values[index].as_str() {
+            "--help" | "-h" => return Err("__help__".to_string()),
+            "--input" => cli.inputs.push(take_one(values, &mut index, "--input")?),
+            flag if flag.starts_with("--") => return Err(format!("unknown validate flag: {flag}")),
+            value => cli.inputs.push(value.to_string()),
+        }
+        index += 1;
+    }
+
+    if cli.inputs.is_empty() {
+        return Err("validate requires at least one input path".to_string());
+    }
+    Ok(Command::Validate(cli))
 }
 
 fn validate_provider_flag(flag: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
@@ -275,17 +317,20 @@ pub(crate) fn print_help() {
          Usage:\n\
            forge-dataset prompts [options]\n\
            forge-dataset capture --model MODEL [options]\n\
-           forge-dataset review --provider auto|minimax|openrouter [options]\n\n\
+           forge-dataset review --provider auto|minimax|openrouter [options]\n\
+           forge-dataset validate --input PATH [--input PATH ...]\n\n\
          Prompt options:\n\
            --model MODEL (default: test-model)\n\
            --output PATH (default: target/dataset/tool_prompts.jsonl)\n\
-          --domains CSV (default: repo_docs,shopping,calendar,support; also supports forge_eval)\n\n\
+           --runs N (default: 1)\n\
+           --domains CSV (default: repo_docs,shopping,calendar,support; also supports forge_eval)\n\n\
          Capture options:\n\
            --proxy-base-url URL (default: http://127.0.0.1:8081/v1)\n\
            --model MODEL\n\
            --output PATH (default: target/dataset/capture.jsonl)\n\
            --max-turns N (default: 4)\n\
-          --domains CSV (default: repo_docs,shopping,calendar,support; also supports forge_eval)\n\n\
+           --runs N (default: 1)\n\
+           --domains CSV (default: repo_docs,shopping,calendar,support; also supports forge_eval)\n\n\
          Review options:\n\
            --input PATH (default: target/dataset/capture.jsonl)\n\
            --output PATH (default: target/dataset/training.toolcall.jsonl)\n\
@@ -301,7 +346,10 @@ pub(crate) fn print_help() {
            --verifier-model MODEL (manual override)\n\
            --verifier-api-key KEY (or FORGE_DATASET_VERIFIER_API_KEY / OPENAI_API_KEY)\n\
            --max-alternatives-per-group N (default: 2)\n\
-           --max-alternative-ratio R (default: 0.333333)"
+           --max-alternative-ratio R (default: 0.333333)\n\
+           --resume (skip rows already present in output/rejects)\n\n\
+         Validate options:\n\
+           --input PATH (may be repeated; positional paths are also accepted)"
     );
 }
 
@@ -322,6 +370,7 @@ mod tests {
         assert_eq!(cli.proxy_base_url, DEFAULT_PROXY_BASE_URL);
         assert_eq!(cli.output, DEFAULT_CAPTURE_OUTPUT);
         assert_eq!(cli.max_turns, 4);
+        assert_eq!(cli.runs, 1);
         assert_eq!(
             cli.domains,
             vec!["repo_docs", "shopping", "calendar", "support"]
@@ -336,6 +385,7 @@ mod tests {
         };
         assert_eq!(cli.model, "test-model");
         assert_eq!(cli.output, DEFAULT_PROMPTS_OUTPUT);
+        assert_eq!(cli.runs, 1);
         assert_eq!(
             cli.domains,
             vec!["repo_docs", "shopping", "calendar", "support"]
@@ -351,6 +401,7 @@ mod tests {
         assert_eq!(cli.provider, "auto");
         assert_eq!(cli.verifier_provider, "same");
         assert_eq!(cli.env_file, DEFAULT_ENV_FILE);
+        assert!(!cli.resume);
     }
 
     #[test]
@@ -374,5 +425,39 @@ mod tests {
         assert_eq!(cli.verifier_provider, "minimax");
         assert_eq!(cli.max_alternatives_per_group, 3);
         assert_eq!(cli.max_alternative_ratio, 0.25);
+    }
+
+    #[test]
+    fn review_parses_resume() {
+        let command = parse(&["review", "--resume"]).expect("parse");
+        let Command::Review(cli) = command else {
+            panic!("expected review");
+        };
+        assert!(cli.resume);
+    }
+
+    #[test]
+    fn validate_accepts_repeated_inputs_and_positionals() {
+        let command =
+            parse(&["validate", "--input", "target/a.jsonl", "target/b.jsonl"]).expect("parse");
+        let Command::Validate(cli) = command else {
+            panic!("expected validate");
+        };
+        assert_eq!(cli.inputs, vec!["target/a.jsonl", "target/b.jsonl"]);
+    }
+
+    #[test]
+    fn parses_runs_for_prompt_and_capture() {
+        let command = parse(&["prompts", "--runs", "3"]).expect("parse");
+        let Command::Prompts(cli) = command else {
+            panic!("expected prompts");
+        };
+        assert_eq!(cli.runs, 3);
+
+        let command = parse(&["capture", "--model", "test-model", "--runs", "4"]).expect("parse");
+        let Command::Capture(cli) = command else {
+            panic!("expected capture");
+        };
+        assert_eq!(cli.runs, 4);
     }
 }

@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -15,7 +15,6 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
     ensure_parent_dir(&cli.output)?;
     let reject_path = rejects_path(&cli.output);
     ensure_parent_dir_path(&reject_path)?;
-    let captures = read_jsonl(&cli.input)?;
     let env_file = EnvFile::load(&cli.env_file);
     let reviewer_config = resolve_provider_config(&cli, &env_file, ReviewRole::Reviewer)?;
     let verifier_config = if cli.verifier_provider == "same"
@@ -32,18 +31,67 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
         };
         resolve_provider_config_for(&cli, &env_file, ReviewRole::Verifier, &verifier_provider)?
     };
+    let reviewer_label = format!("{}:{}", reviewer_config.provider, reviewer_config.model);
+    let verifier_label = format!("{}:{}", verifier_config.provider, verifier_config.model);
     let reviewer = JsonLlmClient::new(reviewer_config);
     let verifier = JsonLlmClient::new(verifier_config);
 
-    let mut accepted_real_rows = Vec::new();
-    let mut accepted_corrected_rows = Vec::new();
+    let mut resume_state = if cli.resume {
+        ResumeState::load(&cli.output, &reject_path)?
+    } else {
+        ResumeState::default()
+    };
     let mut alternative_proposals = Vec::new();
+    let total_captures = count_jsonl_rows(&cli.input)?;
+    let mut progress = ReviewProgress::new(total_captures);
+    eprintln!(
+        "review start input={} output={} rejects={} reviewer={} verifier={} resume={} captures={}",
+        cli.input,
+        cli.output,
+        reject_path.display(),
+        reviewer_label,
+        verifier_label,
+        cli.resume,
+        total_captures
+    );
+    if cli.resume {
+        eprintln!(
+            "review resume state processed_captures={} accepted_real={} accepted_alternatives={}",
+            resume_state.processed_capture_keys.len(),
+            resume_state.accepted_real_count,
+            resume_state.accepted_alternative_count
+        );
+    }
 
-    for capture in captures {
+    let file =
+        File::open(&cli.input).map_err(|err| format!("failed to read {}: {err}", cli.input))?;
+    for (line_index, line) in BufReader::new(file).lines().enumerate() {
+        progress.seen += 1;
+        let line =
+            line.map_err(|err| format!("{}:{} read error: {err}", cli.input, line_index + 1))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let capture = serde_json::from_str::<Value>(trimmed)
+            .map_err(|err| format!("{}:{} invalid JSONL row: {err}", cli.input, line_index + 1))?;
+        let capture_key = capture_key(&capture);
+        if resume_state.processed_capture_keys.contains(&capture_key) {
+            progress.skipped += 1;
+            progress.log_skip_if_needed();
+            if resume_state.valid_real_capture_keys.contains(&capture_key) {
+                alternative_proposals.extend(propose_targeted_alternatives(&capture));
+            }
+            continue;
+        }
+
+        progress.log_reviewing(&capture);
         let decision = match review_capture(&reviewer, &capture).await {
             Ok(decision) => decision,
             Err(err) => {
                 append_reject(&reject_path, "reviewer_rejected", &err, &capture, None)?;
+                progress.rejected += 1;
+                progress.log_rejected("reviewer_rejected");
                 continue;
             }
         };
@@ -57,6 +105,8 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                     &capture,
                     Some(decision.raw.clone()),
                 )?;
+                progress.rejected += 1;
+                progress.log_rejected("invalid_corrected_candidate_call");
                 continue;
             }
         }
@@ -80,6 +130,8 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                     &capture,
                     None,
                 )?;
+                progress.rejected += 1;
+                progress.log_rejected("verifier_invalid_response");
                 continue;
             }
         };
@@ -91,6 +143,8 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                 &capture,
                 Some(verifier_decision.raw),
             )?;
+            progress.rejected += 1;
+            progress.log_rejected("verifier_rejected");
             continue;
         }
 
@@ -99,7 +153,7 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
             .as_ref()
             .filter(|_| decision.label != "valid")
             .map(|call| json!({"candidate_call": call}));
-        accepted_real_rows.push(training_row(
+        let real_row = training_row(
             &capture,
             candidate_call,
             &decision.label,
@@ -107,8 +161,15 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
             &decision,
             &verifier_decision,
             corrected_positive,
-        ));
+        );
+        append_jsonl(&cli.output, &real_row)?;
+        resume_state.record_training_row(&real_row);
+        progress.accepted_real += 1;
+        progress.log_accepted(&decision.label, "real_model_call");
         if decision.label == "valid" {
+            resume_state
+                .valid_real_capture_keys
+                .insert(capture_key.clone());
             alternative_proposals.extend(propose_targeted_alternatives(&capture));
         }
 
@@ -132,6 +193,8 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                             &capture,
                             None,
                         )?;
+                        progress.rejected += 1;
+                        progress.log_rejected("corrected_positive_verifier_invalid_response");
                         continue;
                     }
                 };
@@ -143,7 +206,7 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                         corrected_candidate_call: None,
                         raw: decision.raw.clone(),
                     };
-                    accepted_corrected_rows.push(training_row(
+                    let corrected_row = training_row(
                         &capture,
                         corrected.clone(),
                         "valid",
@@ -151,7 +214,11 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                         &corrected_decision,
                         &corrected_verifier,
                         None,
-                    ));
+                    );
+                    append_jsonl(&cli.output, &corrected_row)?;
+                    resume_state.record_training_row(&corrected_row);
+                    progress.accepted_corrected += 1;
+                    progress.log_accepted("valid", "reviewer_corrected_positive");
                 } else {
                     append_reject(
                         &reject_path,
@@ -160,29 +227,48 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
                         &capture,
                         Some(corrected_verifier.raw),
                     )?;
+                    progress.rejected += 1;
+                    progress.log_rejected("corrected_positive_verifier_rejected");
                 }
             }
         }
     }
 
-    let alternative_cap = alternative_cap(accepted_real_rows.len(), cli.max_alternative_ratio);
-    let accepted_alternatives = verify_alternatives(
+    eprintln!(
+        "review capture pass complete seen={} skipped={} accepted_real={} accepted_corrected={} rejected={} proposed_alternatives={}",
+        progress.seen,
+        progress.skipped,
+        progress.accepted_real,
+        progress.accepted_corrected,
+        progress.rejected,
+        alternative_proposals.len()
+    );
+    let alternative_cap =
+        alternative_cap(resume_state.accepted_real_count, cli.max_alternative_ratio);
+    let remaining_alternative_cap =
+        alternative_cap.saturating_sub(resume_state.accepted_alternative_count);
+    verify_alternatives(
         &reviewer,
         &verifier,
         alternative_proposals,
-        alternative_cap,
+        remaining_alternative_cap,
         cli.max_alternatives_per_group,
         &reject_path,
+        &cli.output,
+        &mut resume_state,
+        &mut progress,
     )
     .await?;
-
-    for row in accepted_real_rows
-        .into_iter()
-        .chain(accepted_corrected_rows)
-        .chain(accepted_alternatives)
-    {
-        append_jsonl(&cli.output, &row)?;
-    }
+    eprintln!(
+        "review complete seen={} skipped={} accepted_real={} accepted_corrected={} accepted_alternatives={} rejected={} output={}",
+        progress.seen,
+        progress.skipped,
+        progress.accepted_real,
+        progress.accepted_corrected,
+        progress.accepted_alternatives,
+        progress.rejected,
+        cli.output
+    );
 
     Ok(())
 }
@@ -280,17 +366,42 @@ async fn verify_alternatives(
     alternative_cap: usize,
     max_per_group: usize,
     reject_path: &Path,
-) -> Result<Vec<Value>, String> {
-    let mut accepted = Vec::new();
-    let mut per_group: HashMap<String, usize> = HashMap::new();
+    output_path: &str,
+    resume_state: &mut ResumeState,
+    progress: &mut ReviewProgress,
+) -> Result<usize, String> {
+    let mut accepted = 0;
+    eprintln!(
+        "review alternatives start proposed={} remaining_cap={} max_per_group={}",
+        proposals.len(),
+        alternative_cap,
+        max_per_group
+    );
     for proposal in proposals {
-        if accepted.len() >= alternative_cap {
+        if accepted >= alternative_cap {
             break;
         }
-        let group_count = *per_group.get(&proposal.example_group_id).unwrap_or(&0);
-        if group_count >= max_per_group {
+        progress.alternatives_seen += 1;
+        let row_key = row_key(
+            &proposal.example_group_id,
+            "targeted_alternative",
+            &proposal.candidate_call,
+        );
+        if resume_state.processed_row_keys.contains(&row_key) {
+            progress.alternatives_skipped += 1;
+            progress.log_alternative_skip_if_needed();
             continue;
         }
+        let group_count = *resume_state
+            .alternatives_per_group
+            .get(&proposal.example_group_id)
+            .unwrap_or(&0);
+        if group_count >= max_per_group {
+            progress.alternatives_skipped += 1;
+            progress.log_alternative_skip_if_needed();
+            continue;
+        }
+        progress.log_alternative_reviewing(&proposal);
         let reviewer_decision = match review_generated_alternative(reviewer, &proposal).await {
             Ok(decision) => decision,
             Err(err) => {
@@ -301,6 +412,8 @@ async fn verify_alternatives(
                     &proposal.capture,
                     None,
                 )?;
+                progress.rejected += 1;
+                progress.log_alternative_rejected("targeted_alternative_reviewer_invalid_response");
                 continue;
             }
         };
@@ -315,6 +428,8 @@ async fn verify_alternatives(
                 &proposal.capture,
                 Some(reviewer_decision.raw),
             )?;
+            progress.rejected += 1;
+            progress.log_alternative_rejected("targeted_alternative_reviewer_rejected_label");
             continue;
         }
         if reviewer_decision.corrected_candidate_call.is_some() {
@@ -325,6 +440,8 @@ async fn verify_alternatives(
                 &proposal.capture,
                 Some(reviewer_decision.raw),
             )?;
+            progress.rejected += 1;
+            progress.log_alternative_rejected("targeted_alternative_reviewer_returned_correction");
             continue;
         }
         let verifier_decision = match verify_label(
@@ -345,11 +462,13 @@ async fn verify_alternatives(
                     &proposal.capture,
                     None,
                 )?;
+                progress.rejected += 1;
+                progress.log_alternative_rejected("targeted_alternative_verifier_invalid_response");
                 continue;
             }
         };
         if verifier_decision.accepted {
-            accepted.push(training_row(
+            let row = training_row(
                 &proposal.capture,
                 proposal.candidate_call,
                 &proposal.label,
@@ -357,10 +476,12 @@ async fn verify_alternatives(
                 &reviewer_decision,
                 &verifier_decision,
                 None,
-            ));
-            *per_group
-                .entry(proposal.example_group_id.clone())
-                .or_insert(0) += 1;
+            );
+            append_jsonl(output_path, &row)?;
+            resume_state.record_training_row(&row);
+            accepted += 1;
+            progress.accepted_alternatives += 1;
+            progress.log_alternative_accepted(&proposal.label);
         } else {
             append_reject(
                 reject_path,
@@ -369,8 +490,14 @@ async fn verify_alternatives(
                 &proposal.capture,
                 Some(verifier_decision.raw),
             )?;
+            progress.rejected += 1;
+            progress.log_alternative_rejected("targeted_alternative_verifier_rejected");
         }
     }
+    eprintln!(
+        "review alternatives complete seen={} skipped={} accepted={} rejected_total={}",
+        progress.alternatives_seen, progress.alternatives_skipped, accepted, progress.rejected
+    );
     Ok(accepted)
 }
 
@@ -396,6 +523,133 @@ struct AlternativeProposal {
     example_group_id: String,
     candidate_call: Value,
     label: String,
+}
+
+#[derive(Debug)]
+struct ReviewProgress {
+    total: usize,
+    seen: usize,
+    skipped: usize,
+    accepted_real: usize,
+    accepted_corrected: usize,
+    accepted_alternatives: usize,
+    rejected: usize,
+    alternatives_seen: usize,
+    alternatives_skipped: usize,
+}
+
+impl ReviewProgress {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            seen: 0,
+            skipped: 0,
+            accepted_real: 0,
+            accepted_corrected: 0,
+            accepted_alternatives: 0,
+            rejected: 0,
+            alternatives_seen: 0,
+            alternatives_skipped: 0,
+        }
+    }
+
+    fn log_skip_if_needed(&self) {
+        if self.skipped == 1 || self.skipped % 250 == 0 {
+            eprintln!(
+                "review resume skipped={} seen={}/{}",
+                self.skipped, self.seen, self.total
+            );
+        }
+    }
+
+    fn log_reviewing(&self, capture: &Value) {
+        eprintln!(
+            "review row {}/{} group={} domain={} scenario={} tool={}",
+            self.seen,
+            self.total,
+            value_str(capture.get("example_group_id")),
+            trace_str(capture, "domain"),
+            trace_str(capture, "scenario"),
+            candidate_tool(capture.get("candidate_call"))
+        );
+    }
+
+    fn log_accepted(&self, label: &str, source_bucket: &str) {
+        eprintln!(
+            "review row {}/{} accepted label={} source_bucket={} accepted_real={} accepted_corrected={} rejected={}",
+            self.seen,
+            self.total,
+            label,
+            source_bucket,
+            self.accepted_real,
+            self.accepted_corrected,
+            self.rejected
+        );
+    }
+
+    fn log_rejected(&self, reason: &str) {
+        eprintln!(
+            "review row {}/{} rejected reason={} accepted_real={} accepted_corrected={} rejected={}",
+            self.seen,
+            self.total,
+            reason,
+            self.accepted_real,
+            self.accepted_corrected,
+            self.rejected
+        );
+    }
+
+    fn log_alternative_skip_if_needed(&self) {
+        if self.alternatives_skipped == 1 || self.alternatives_skipped % 250 == 0 {
+            eprintln!(
+                "review alternative skipped={} seen={}",
+                self.alternatives_skipped, self.alternatives_seen
+            );
+        }
+    }
+
+    fn log_alternative_reviewing(&self, proposal: &AlternativeProposal) {
+        eprintln!(
+            "review alternative {} group={} label={} tool={}",
+            self.alternatives_seen,
+            proposal.example_group_id,
+            proposal.label,
+            candidate_tool(Some(&proposal.candidate_call))
+        );
+    }
+
+    fn log_alternative_accepted(&self, label: &str) {
+        eprintln!(
+            "review alternative {} accepted label={} accepted_alternatives={} rejected={}",
+            self.alternatives_seen, label, self.accepted_alternatives, self.rejected
+        );
+    }
+
+    fn log_alternative_rejected(&self, reason: &str) {
+        eprintln!(
+            "review alternative {} rejected reason={} accepted_alternatives={} rejected={}",
+            self.alternatives_seen, reason, self.accepted_alternatives, self.rejected
+        );
+    }
+}
+
+fn value_str(value: Option<&Value>) -> &str {
+    value.and_then(Value::as_str).unwrap_or("unknown")
+}
+
+fn trace_str<'a>(capture: &'a Value, key: &str) -> &'a str {
+    capture
+        .get("proxy_trace")
+        .and_then(|trace| trace.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+fn candidate_tool(candidate: Option<&Value>) -> &str {
+    candidate
+        .and_then(|candidate| candidate.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 fn parse_reviewer_decision(raw: Value) -> Result<ReviewDecision, String> {
@@ -468,6 +722,13 @@ fn training_row(
     verifier: &VerifierDecision,
     corrected_positive: Option<Value>,
 ) -> Value {
+    let example_group_id = capture
+        .get("example_group_id")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let example_group_id_str = example_group_id.as_str().unwrap_or("unknown-group");
+    let capture_key = capture_key(capture);
+    let row_key = row_key(example_group_id_str, source_bucket, &candidate_call);
     let mut row = json!({
         "schema_version": TRAINING_SCHEMA_VERSION,
         "input": {
@@ -492,7 +753,9 @@ fn training_row(
         "review": {
             "source": "forge-dataset",
             "source_bucket": source_bucket,
-            "example_group_id": capture.get("example_group_id").cloned().unwrap_or(Value::Null),
+            "example_group_id": example_group_id,
+            "capture_key": capture_key,
+            "row_key": row_key,
             "capture_schema_version": capture.get("schema_version").cloned().unwrap_or(Value::Null),
             "reviewer": {
                 "label": review.label,
@@ -629,6 +892,88 @@ fn alternative_cap(real_row_count: usize, ratio: f64) -> usize {
     ((real_row_count as f64 * ratio) + 1e-9).floor() as usize
 }
 
+#[derive(Debug, Default)]
+struct ResumeState {
+    processed_capture_keys: HashSet<String>,
+    processed_row_keys: HashSet<String>,
+    valid_real_capture_keys: HashSet<String>,
+    alternatives_per_group: HashMap<String, usize>,
+    accepted_real_count: usize,
+    accepted_alternative_count: usize,
+}
+
+impl ResumeState {
+    fn load(output_path: &str, reject_path: &Path) -> Result<Self, String> {
+        let mut state = Self::default();
+        state.load_training_output(output_path)?;
+        state.load_rejects(reject_path)?;
+        Ok(state)
+    }
+
+    fn load_training_output(&mut self, path: &str) -> Result<(), String> {
+        if !Path::new(path).exists() {
+            return Ok(());
+        }
+        for row in read_jsonl(path)? {
+            self.record_training_row(&row);
+        }
+        Ok(())
+    }
+
+    fn load_rejects(&mut self, path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            return Ok(());
+        }
+        for row in read_jsonl_path(path)? {
+            if let Some(capture_key) = row.get("capture_key").and_then(Value::as_str) {
+                self.processed_capture_keys.insert(capture_key.to_string());
+            } else if let Some(capture) = row.get("capture") {
+                self.processed_capture_keys.insert(capture_key(capture));
+            }
+        }
+        Ok(())
+    }
+
+    fn record_training_row(&mut self, row: &Value) {
+        let review = row.get("review").unwrap_or(&Value::Null);
+        let source_bucket = review
+            .get("source_bucket")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if let Some(row_key) = review.get("row_key").and_then(Value::as_str) {
+            self.processed_row_keys.insert(row_key.to_string());
+        } else if let (Some(example_group_id), Some(candidate_call)) = (
+            review.get("example_group_id").and_then(Value::as_str),
+            row.get("input")
+                .and_then(|input| input.get("candidate_call")),
+        ) {
+            self.processed_row_keys.insert(row_key(
+                example_group_id,
+                source_bucket,
+                candidate_call,
+            ));
+        }
+        if let Some(capture_key) = review.get("capture_key").and_then(Value::as_str) {
+            if source_bucket == "real_model_call" {
+                self.processed_capture_keys.insert(capture_key.to_string());
+                self.accepted_real_count += 1;
+                if row.get("label").and_then(Value::as_str) == Some("valid") {
+                    self.valid_real_capture_keys.insert(capture_key.to_string());
+                }
+            }
+        }
+        if source_bucket == "targeted_alternative" {
+            self.accepted_alternative_count += 1;
+            if let Some(group_id) = review.get("example_group_id").and_then(Value::as_str) {
+                *self
+                    .alternatives_per_group
+                    .entry(group_id.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReviewRole {
     Reviewer,
@@ -689,15 +1034,23 @@ impl JsonLlmClient {
     }
 
     fn request_body(&self, system: &str, user: &str) -> Value {
-        json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
             "temperature": 0,
-            "max_completion_tokens": 1200
-        })
+        });
+        if let Some(obj) = body.as_object_mut() {
+            let token_key = if self.provider == "openrouter" {
+                "max_tokens"
+            } else {
+                "max_completion_tokens"
+            };
+            obj.insert(token_key.to_string(), json!(1200));
+        }
+        body
     }
 
     async fn post_chat(&self, body: &Value) -> Result<Value, String> {
@@ -864,21 +1217,19 @@ fn resolve_provider_config_for(
                 provider: "minimax".to_string(),
                 chat_url: "https://api.minimax.io/v1/chat/completions".to_string(),
                 model: if manual_model.trim().is_empty() {
-                    lookup_env(
-                        env_file,
-                        &[
-                            "FORGE_DATASET_MINIMAX_MODEL",
-                            "GENERATETD_MINIMAX_MODEL",
-                            "MINIMAX_MODEL",
-                        ],
-                    )
-                    .unwrap_or_else(|| {
-                        if cli.minimax_model.trim().is_empty() {
-                            default_minimax_model().to_string()
-                        } else {
-                            cli.minimax_model.clone()
-                        }
-                    })
+                    if cli.minimax_model.trim().is_empty() {
+                        lookup_env(
+                            env_file,
+                            &[
+                                "FORGE_DATASET_MINIMAX_MODEL",
+                                "GENERATETD_MINIMAX_MODEL",
+                                "MINIMAX_MODEL",
+                            ],
+                        )
+                        .unwrap_or_else(|| default_minimax_model().to_string())
+                    } else {
+                        cli.minimax_model.clone()
+                    }
                 } else {
                     manual_model.to_string()
                 },
@@ -895,21 +1246,19 @@ fn resolve_provider_config_for(
                 provider: "openrouter".to_string(),
                 chat_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
                 model: if manual_model.trim().is_empty() {
-                    lookup_env(
-                        env_file,
-                        &[
-                            "FORGE_DATASET_OPENROUTER_MODEL",
-                            "GENERATETD_OPENROUTER_MODEL",
-                            "OPENROUTER_MODEL",
-                        ],
-                    )
-                    .unwrap_or_else(|| {
-                        if cli.openrouter_model.trim().is_empty() {
-                            default_openrouter_model().to_string()
-                        } else {
-                            cli.openrouter_model.clone()
-                        }
-                    })
+                    if cli.openrouter_model.trim().is_empty() {
+                        lookup_env(
+                            env_file,
+                            &[
+                                "FORGE_DATASET_OPENROUTER_MODEL",
+                                "GENERATETD_OPENROUTER_MODEL",
+                                "OPENROUTER_MODEL",
+                            ],
+                        )
+                        .unwrap_or_else(|| default_openrouter_model().to_string())
+                    } else {
+                        cli.openrouter_model.clone()
+                    }
                 } else {
                     manual_model.to_string()
                 },
@@ -998,8 +1347,24 @@ fn unquote_env_value(raw: &str) -> String {
 }
 
 fn read_jsonl(path: &str) -> Result<Vec<Value>, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|err| format!("failed to read {path}: {err}"))?;
+    read_jsonl_path(Path::new(path))
+}
+
+fn count_jsonl_rows(path: &str) -> Result<usize, String> {
+    let file = File::open(path).map_err(|err| format!("failed to read {path}: {err}"))?;
+    let mut count = 0;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|err| format!("{path}:{} read error: {err}", index + 1))?;
+        if !line.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn read_jsonl_path(path: &Path) -> Result<Vec<Value>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     let mut rows = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let trimmed = line.trim();
@@ -1007,7 +1372,7 @@ fn read_jsonl(path: &str) -> Result<Vec<Value>, String> {
             continue;
         }
         let row = serde_json::from_str::<Value>(trimmed)
-            .map_err(|err| format!("{path}:{} invalid JSONL row: {err}", index + 1))?;
+            .map_err(|err| format!("{}:{} invalid JSONL row: {err}", path.display(), index + 1))?;
         rows.push(row);
     }
     Ok(rows)
@@ -1030,6 +1395,7 @@ fn append_reject(
     capture: &Value,
     raw_response: Option<Value>,
 ) -> Result<(), String> {
+    let capture_key = capture_key(capture);
     append_jsonl_path(
         path,
         &json!({
@@ -1037,6 +1403,7 @@ fn append_reject(
             "reason": reason,
             "detail": detail,
             "example_group_id": capture.get("example_group_id").cloned().unwrap_or(Value::Null),
+            "capture_key": capture_key,
             "capture": capture,
             "raw_response": raw_response.unwrap_or(Value::Null),
         }),
@@ -1063,6 +1430,34 @@ fn rejects_path(output: &str) -> PathBuf {
         _ => format!("{output}.rejects.jsonl"),
     };
     path.with_file_name(file_name)
+}
+
+fn capture_key(capture: &Value) -> String {
+    let group = capture
+        .get("example_group_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-group");
+    let trace = capture.get("proxy_trace").unwrap_or(&Value::Null);
+    let turn = trace
+        .get("turn")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown-turn".to_string());
+    let call_index = trace
+        .get("call_index")
+        .and_then(Value::as_u64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown-call".to_string());
+    let tool_call_id = trace
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-tool-call");
+    format!("{group}:turn-{turn}:call-{call_index}:tool-call-{tool_call_id}")
+}
+
+fn row_key(example_group_id: &str, source_bucket: &str, candidate_call: &Value) -> String {
+    let candidate = serde_json::to_string(candidate_call).unwrap_or_else(|_| "null".to_string());
+    format!("{example_group_id}:{source_bucket}:{candidate}")
 }
 
 fn ensure_parent_dir(path: &str) -> Result<(), String> {
@@ -1192,7 +1587,52 @@ mod tests {
             TRAINING_INPUT_SCHEMA_VERSION
         );
         assert_eq!(row["review"]["example_group_id"], "group-1");
+        assert!(row["review"]["capture_key"]
+            .as_str()
+            .expect("capture key")
+            .contains("group-1"));
+        assert!(row["review"]["row_key"]
+            .as_str()
+            .expect("row key")
+            .contains("real_model_call"));
         assert_eq!(row["label"], "valid");
+    }
+
+    #[test]
+    fn resume_state_tracks_streamed_real_rows() {
+        let review = ReviewDecision {
+            label: "valid".to_string(),
+            confidence: 0.9,
+            rationale: "ok".to_string(),
+            corrected_candidate_call: None,
+            raw: json!({}),
+        };
+        let verifier = VerifierDecision {
+            accepted: true,
+            rationale: "accepted".to_string(),
+            raw: json!({}),
+        };
+        let capture = capture_row();
+        let row = training_row(
+            &capture,
+            capture["candidate_call"].clone(),
+            "valid",
+            "real_model_call",
+            &review,
+            &verifier,
+            None,
+        );
+
+        let mut state = ResumeState::default();
+        state.record_training_row(&row);
+
+        assert_eq!(state.accepted_real_count, 1);
+        assert!(state
+            .processed_capture_keys
+            .contains(row["review"]["capture_key"].as_str().expect("capture key")));
+        assert!(state
+            .valid_real_capture_keys
+            .contains(row["review"]["capture_key"].as_str().expect("capture key")));
     }
 
     #[test]
@@ -1229,5 +1669,111 @@ mod tests {
             rejects_path("target/dataset/training.toolcall.jsonl"),
             PathBuf::from("target/dataset/training.toolcall.rejects.jsonl")
         );
+    }
+
+    #[test]
+    fn openrouter_request_uses_supported_token_parameter() {
+        let client = JsonLlmClient::new(ProviderConfig {
+            provider: "openrouter".to_string(),
+            chat_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            model: "openrouter/free".to_string(),
+            api_key: None,
+        });
+        let body = client.request_body("system", "user");
+        assert_eq!(body["max_tokens"], 1200);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn minimax_request_keeps_openai_compatible_token_parameter() {
+        let client = JsonLlmClient::new(ProviderConfig {
+            provider: "minimax".to_string(),
+            chat_url: "https://api.minimax.io/v1/chat/completions".to_string(),
+            model: "MiniMax-M2.7".to_string(),
+            api_key: None,
+        });
+        let body = client.request_body("system", "user");
+        assert_eq!(body["max_completion_tokens"], 1200);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn openrouter_model_flag_overrides_env_file_model() {
+        let cli = ReviewCli {
+            input: "capture.jsonl".to_string(),
+            output: "training.jsonl".to_string(),
+            env_file: ".env".to_string(),
+            provider: "openrouter".to_string(),
+            verifier_provider: "same".to_string(),
+            minimax_model: String::new(),
+            openrouter_model: "openrouter/free".to_string(),
+            reviewer_base_url: String::new(),
+            reviewer_model: String::new(),
+            reviewer_api_key: None,
+            verifier_base_url: String::new(),
+            verifier_model: String::new(),
+            verifier_api_key: None,
+            max_alternatives_per_group: 2,
+            max_alternative_ratio: 1.0 / 3.0,
+            resume: false,
+        };
+        let env_file = EnvFile {
+            values: HashMap::from([
+                (
+                    "OPENROUTER_API_KEY".to_string(),
+                    "test-openrouter-key".to_string(),
+                ),
+                (
+                    "GENERATETD_OPENROUTER_MODEL".to_string(),
+                    "openrouter/owl-alpha".to_string(),
+                ),
+            ]),
+        };
+
+        let config =
+            resolve_provider_config_for(&cli, &env_file, ReviewRole::Reviewer, "openrouter")
+                .expect("config");
+
+        assert_eq!(config.model, "openrouter/free");
+    }
+
+    #[test]
+    fn openrouter_env_file_model_is_used_when_flag_is_absent() {
+        let cli = ReviewCli {
+            input: "capture.jsonl".to_string(),
+            output: "training.jsonl".to_string(),
+            env_file: ".env".to_string(),
+            provider: "openrouter".to_string(),
+            verifier_provider: "same".to_string(),
+            minimax_model: String::new(),
+            openrouter_model: String::new(),
+            reviewer_base_url: String::new(),
+            reviewer_model: String::new(),
+            reviewer_api_key: None,
+            verifier_base_url: String::new(),
+            verifier_model: String::new(),
+            verifier_api_key: None,
+            max_alternatives_per_group: 2,
+            max_alternative_ratio: 1.0 / 3.0,
+            resume: false,
+        };
+        let env_file = EnvFile {
+            values: HashMap::from([
+                (
+                    "OPENROUTER_API_KEY".to_string(),
+                    "test-openrouter-key".to_string(),
+                ),
+                (
+                    "GENERATETD_OPENROUTER_MODEL".to_string(),
+                    "openrouter/owl-alpha".to_string(),
+                ),
+            ]),
+        };
+
+        let config =
+            resolve_provider_config_for(&cli, &env_file, ReviewRole::Reviewer, "openrouter")
+                .expect("config");
+
+        assert_eq!(config.model, "openrouter/owl-alpha");
     }
 }

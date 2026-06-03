@@ -18,9 +18,11 @@ pub(crate) async fn run(cli: CaptureCli) -> Result<(), String> {
     let client = reqwest::Client::new();
     let chat_url = normalize_chat_completions_url(&cli.proxy_base_url);
 
-    for registry in &registries {
-        for scenario in &registry.scenarios {
-            capture_scenario(&client, &chat_url, &cli, registry, scenario).await?;
+    for run_index in 0..cli.runs {
+        for registry in &registries {
+            for scenario in &registry.scenarios {
+                capture_scenario(&client, &chat_url, &cli, registry, scenario, run_index).await?;
+            }
         }
     }
     Ok(())
@@ -32,11 +34,13 @@ async fn capture_scenario(
     cli: &CaptureCli,
     registry: &StubRegistry,
     scenario: &StubScenario,
+    run_index: usize,
 ) -> Result<(), String> {
     let example_group_id = format!(
-        "forge-dataset-{}-{}-{}",
+        "forge-dataset-{}-{}-run-{:05}-{}",
         registry.domain,
         scenario.id,
+        run_index,
         unix_ms()
     );
     let request_tools = request_tools(registry);
@@ -86,6 +90,7 @@ async fn capture_scenario(
                 &example_group_id,
                 registry,
                 scenario,
+                run_index,
                 turn,
                 call_index,
                 &parsed.call_id,
@@ -121,6 +126,7 @@ pub(crate) fn capture_row(
     example_group_id: &str,
     registry: &StubRegistry,
     scenario: &StubScenario,
+    run_index: usize,
     turn: usize,
     call_index: usize,
     tool_call_id: &str,
@@ -147,6 +153,7 @@ pub(crate) fn capture_row(
         "proxy_trace": {
             "domain": registry.domain,
             "scenario": scenario.id,
+            "run_index": run_index,
             "turn": turn,
             "call_index": call_index,
             "tool_call_id": tool_call_id,
@@ -168,6 +175,7 @@ pub(crate) fn capture_row(
                 "captured_at_unix_ms": unix_ms(),
                 "domain": registry.domain,
                 "scenario": scenario.id,
+                "run_index": run_index,
             }
         }
     })
@@ -318,6 +326,7 @@ mod tests {
             scenario,
             0,
             0,
+            0,
             "call-1",
             &Value::Array(available_tools_for_training(&registry)),
             workflow_state(&[], &[]),
@@ -331,6 +340,7 @@ mod tests {
         assert_eq!(row["example_group_id"], "group-1");
         assert_eq!(row["source_bucket"], "real_model_call");
         assert_eq!(row["proxy_trace"]["domain"], "shopping");
+        assert_eq!(row["proxy_trace"]["run_index"], 0);
         assert_eq!(row["metadata"]["private_agent_log"], true);
         assert_eq!(row["metadata"]["public_export_allowed"], false);
     }

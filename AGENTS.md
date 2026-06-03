@@ -154,6 +154,64 @@ Verifier model training:
 - Do not commit ONNX classifier artifacts, downloaded model snapshots, Colab
   workdirs, Hugging Face caches, or generated `target/local-eval` outputs.
 
+Dataset creation for tool-call verifier training:
+
+- Use `src/bin/forge-dataset/` and `scripts/run_dataset_workflow.sh` to create
+  private reviewed JSONL. Do not generate dataset rows through shell tools.
+  The dataset tool uses harmless deterministic stub registries and real model
+  tool calls through the Forge proxy.
+- The one-command local workflow starts managed `llama-server`, starts the
+  Forge proxy, writes prompt/capture JSONL, reviews with MiniMax/OpenRouter,
+  and writes `toolcall-verifier-training/v1` rows:
+
+```bash
+scripts/run_dataset_workflow.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf \
+  --provider openrouter \
+  --verifier-provider minimax \
+  --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 75 \
+  --out-dir target/dataset/forge-eval-3k
+```
+
+- `--runs` repeats every selected scenario. With
+  `repo_docs,shopping,calendar,support,forge_eval`, there are 17 prompt rows
+  per run; `--runs 75` creates 1275 prompt contexts and usually lands near a
+  2k-4k reviewed private addendum after reviewer/verifier rejects.
+- Reviewer and verifier keys are read from explicit flags first, then the shell
+  environment, then `notebook/generatetd/.env`. Supported providers are
+  `minimax` and `openrouter`; `--verifier-provider same` reuses the reviewer.
+  For free OpenRouter review, prefer `openrouter/free` or a specific free model
+  whose OpenRouter model metadata includes `structured_outputs`.
+- `forge-dataset review` streams accepted rows as they are approved. If review
+  is interrupted, resume against the same capture/output/reject files:
+
+```bash
+cargo run --bin forge-dataset -- review \
+  --input target/dataset/forge-eval-3k/capture.jsonl \
+  --output target/dataset/forge-eval-3k/training.toolcall.jsonl \
+  --provider openrouter \
+  --verifier-provider minimax \
+  --resume
+```
+
+- Validate generated JSONL before using it for training:
+
+```bash
+cargo run --bin forge-dataset -- validate \
+  --input target/dataset/forge-eval-3k/tool_prompts.jsonl \
+  --input target/dataset/forge-eval-3k/capture.jsonl \
+  --input target/dataset/forge-eval-3k/proxy_training_capture.jsonl \
+  --input target/dataset/forge-eval-3k/training.toolcall.jsonl
+```
+
+- `training.toolcall.jsonl` is the canonical notebook input. The Colab
+  notebook's private-HF default filename is `agent_training.notebook.jsonl`, so
+  upload the generated file under that name or set
+  `FORGE_AGENT_HF_DATASET_FILE`.
+- Keep generated dataset outputs under `target/dataset/` private and do not
+  commit them. Use `docs/DATASET_WORKFLOW.md` for the full contract, including
+  capture-only mode, provider overrides, rejects, and validation details.
+
 Local managed llama-server proxy launcher:
 
 ```bash
