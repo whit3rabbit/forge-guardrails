@@ -315,7 +315,7 @@ fn apply_dictionary_filter(
             let best = [lzw, repair]
                 .into_iter()
                 .flatten()
-                .filter(|candidate| candidate.len() < current.len())
+                .filter(|candidate| candidate_has_token_savings(&current, candidate))
                 .min_by_key(String::len);
 
             match best {
@@ -350,12 +350,16 @@ fn apply_candidate_if_smaller(
     strategies: &mut Vec<String>,
     candidate: String,
 ) -> String {
-    if candidate.len() < current.len() {
+    if candidate_has_token_savings(&current, &candidate) {
         strategies.push(strategy.to_string());
         candidate
     } else {
         current
     }
+}
+
+fn candidate_has_token_savings(current: &str, candidate: &str) -> bool {
+    candidate.len() <= current.len() && estimate_tokens(candidate) < estimate_tokens(current)
 }
 
 struct CompressionResultInput {

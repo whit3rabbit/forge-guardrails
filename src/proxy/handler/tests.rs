@@ -502,6 +502,7 @@ impl LLMClient for IsolatedUsageClient {
             usage: Some(TokenUsage::new(prompt_tokens, 10, prompt_tokens + 10)),
             usage_details: None,
             call_info: None,
+            provider_response: None,
         })
     }
 
@@ -1489,6 +1490,7 @@ async fn anthropic_messages_includes_cache_usage_details() {
         cache_creation_prompt_tokens: Some(5),
         cache_read_input_tokens: Some(13),
         cache_creation_input_tokens: Some(5),
+        anthropic_thinking_output_tokens: Some(4),
         ..Default::default()
     };
     let client = Arc::new(MockOptionsClient::new_with_details(
@@ -1504,6 +1506,7 @@ async fn anthropic_messages_includes_cache_usage_details() {
             assert_eq!(v["usage"]["output_tokens"], 7);
             assert_eq!(v["usage"]["cache_read_input_tokens"], 13);
             assert_eq!(v["usage"]["cache_creation_input_tokens"], 5);
+            assert_eq!(v["usage"]["output_tokens_details"]["thinking_tokens"], 4);
         }
         _ => panic!("expected Response"),
     }
@@ -1552,6 +1555,88 @@ async fn anthropic_messages_clean_path_preserves_cache_control_to_backend() {
             assert_eq!(v["content"][0]["text"], "ok");
             assert_eq!(v["usage"]["input_tokens"], 3);
             assert_eq!(v["usage"]["output_tokens"], 1);
+        }
+        _ => panic!("expected Response"),
+    }
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn anthropic_messages_preserves_signed_thinking_blocks_for_valid_tool_call() {
+    let mut server = mockito::Server::new_async().await;
+    let raw = json!({
+        "model": "claude-3",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "search"}],
+        "tools": [{
+            "name": "search",
+            "description": "Search",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        }]
+    });
+    let mut expected = raw.clone();
+    expected["tools"].as_array_mut().expect("tools").push(
+        crate::clients::anthropic::convert::convert_tools(&[crate::tools::respond::respond_spec()])
+            [0]
+        .clone(),
+    );
+    let upstream = json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-3",
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "private summary",
+                "signature": "sig_abc"
+            },
+            {
+                "type": "redacted_thinking",
+                "data": "redacted_blob"
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu_search",
+                "name": "search",
+                "input": {"query": "docs"}
+            }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {
+            "input_tokens": 3,
+            "output_tokens": 9,
+            "output_tokens_details": {"thinking_tokens": 4}
+        }
+    });
+    let mock = server
+        .mock("POST", "/messages")
+        .match_body(mockito::Matcher::Json(expected))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(upstream.to_string())
+        .create_async()
+        .await;
+    let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+    let client = Arc::new(
+        AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0),
+    );
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+    let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true).await;
+
+    match result.unwrap() {
+        AnthropicHandlerResult::Response(v) => {
+            assert_eq!(v["content"][0]["type"], "thinking");
+            assert_eq!(v["content"][0]["signature"], "sig_abc");
+            assert_eq!(v["content"][1]["type"], "redacted_thinking");
+            assert_eq!(v["content"][2]["id"], "toolu_search");
+            assert_eq!(v["usage"]["output_tokens_details"]["thinking_tokens"], 4);
         }
         _ => panic!("expected Response"),
     }
@@ -1674,6 +1759,75 @@ async fn anthropic_messages_streaming_preserves_cache_control_to_backend() {
     let body = crate::proxy::server::format_anthropic_sse_body(events.as_slice());
     assert!(body.contains("ok"));
     assert!(!body.contains("[DONE]"));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn anthropic_messages_streaming_preserves_thinking_and_signature_events() {
+    let mut server = mockito::Server::new_async().await;
+    let raw = json!({
+        "model": "claude-3",
+        "max_tokens": 64,
+        "stream": true,
+        "messages": [{"role": "user", "content": "search"}],
+        "tools": [{
+            "name": "search",
+            "description": "Search",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        }]
+    });
+    let mut expected = raw.clone();
+    expected["tools"].as_array_mut().expect("tools").push(
+        crate::clients::anthropic::convert::convert_tools(&[crate::tools::respond::respond_spec()])
+            [0]
+        .clone(),
+    );
+    let sse = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":null}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"private summary\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_abc\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_search\",\"name\":\"search\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"docs\\\"}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":9,\"output_tokens_details\":{\"thinking_tokens\":4}}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let mock = server
+        .mock("POST", "/messages")
+        .match_body(mockito::Matcher::Json(expected))
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse)
+        .create_async()
+        .await;
+    let body: MessageCreateRequest = serde_json::from_value(raw.clone()).expect("request");
+    let client = Arc::new(
+        AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+            .with_base_url(server.url())
+            .with_timeout(5.0),
+    );
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+    let result = handle_anthropic_messages(&body, &raw, &client, &ctx, 3, true)
+        .await
+        .expect("handler result");
+
+    let events = match result {
+        AnthropicHandlerResult::StreamBody(stream) => {
+            collect_anthropic_events(stream).await.expect("events")
+        }
+        other => panic!("expected StreamBody, got {other:?}"),
+    };
+    let body = crate::proxy::server::format_anthropic_sse_body(events.as_slice());
+    assert!(body.contains("thinking_delta"));
+    assert!(body.contains("signature_delta"));
+    assert!(body.contains("sig_abc"));
+    assert!(body.contains("toolu_search"));
     mock.assert_async().await;
 }
 

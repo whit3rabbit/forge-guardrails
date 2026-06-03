@@ -12,7 +12,6 @@ struct AnthropicToolBlock {
     args_json: String,
 }
 
-#[derive(Default)]
 pub(super) struct AnthropicStreamState {
     accumulated_text: String,
     tool_blocks: Vec<AnthropicToolBlock>,
@@ -21,6 +20,30 @@ pub(super) struct AnthropicStreamState {
     usage_output: i64,
     usage_cache_creation: Option<i64>,
     usage_cache_read: Option<i64>,
+    usage_thinking_output: Option<i64>,
+    preserve_provider_response: bool,
+}
+
+impl AnthropicStreamState {
+    pub(super) fn new(preserve_provider_response: bool) -> Self {
+        Self {
+            accumulated_text: String::new(),
+            tool_blocks: Vec::new(),
+            current_tool_idx: None,
+            usage_input: 0,
+            usage_output: 0,
+            usage_cache_creation: None,
+            usage_cache_read: None,
+            usage_thinking_output: None,
+            preserve_provider_response,
+        }
+    }
+}
+
+impl Default for AnthropicStreamState {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 pub(super) fn process_anthropic_sse_line(
@@ -28,16 +51,20 @@ pub(super) fn process_anthropic_sse_line(
     state: &mut AnthropicStreamState,
     last_usage: &Arc<Mutex<Option<TokenUsage>>>,
     last_usage_details: &Arc<Mutex<Option<LLMUsageDetails>>>,
-) -> Result<Option<StreamChunk>, StreamError> {
+) -> Result<Vec<StreamChunk>, StreamError> {
     let Some(data) = line.strip_prefix("data:") else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let data = data.trim_start();
     if data == "[DONE]" {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let evt: Value = serde_json::from_str(data)
         .map_err(|err| StreamError::new(format!("Malformed Anthropic SSE data: {err}")))?;
+    let mut chunks = Vec::new();
+    if state.preserve_provider_response {
+        chunks.push(StreamChunk::new(ChunkType::ProviderEvent).with_provider_event(evt.clone()));
+    }
 
     match evt.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "content_block_start" => {
@@ -69,9 +96,7 @@ pub(super) fn process_anthropic_sse_line(
                     "text_delta" => {
                         if let Some(text) = delta.get("text").and_then(Value::as_str) {
                             state.accumulated_text.push_str(text);
-                            return Ok(Some(
-                                StreamChunk::new(ChunkType::TextDelta).with_content(text),
-                            ));
+                            chunks.push(StreamChunk::new(ChunkType::TextDelta).with_content(text));
                         }
                     }
                     "input_json_delta" => {
@@ -81,10 +106,10 @@ pub(super) fn process_anthropic_sse_line(
                                 if let Some(block) = state.tool_blocks.get_mut(idx) {
                                     block.args_json.push_str(partial);
                                 }
-                                return Ok(Some(
+                                chunks.push(
                                     StreamChunk::new(ChunkType::ToolCallDelta)
                                         .with_content(partial),
-                                ));
+                                );
                             }
                         }
                     }
@@ -109,6 +134,8 @@ pub(super) fn process_anthropic_sse_line(
                     .or(state.usage_cache_creation);
                 state.usage_cache_read =
                     usage_i64(Some(usage), "cache_read_input_tokens").or(state.usage_cache_read);
+                state.usage_thinking_output =
+                    thinking_output_tokens(usage).or(state.usage_thinking_output);
             }
         }
         "message_start" => {
@@ -123,6 +150,7 @@ pub(super) fn process_anthropic_sse_line(
                     .unwrap_or(0);
                 state.usage_cache_creation = usage_i64(Some(usage), "cache_creation_input_tokens");
                 state.usage_cache_read = usage_i64(Some(usage), "cache_read_input_tokens");
+                state.usage_thinking_output = thinking_output_tokens(usage);
             }
         }
         "message_stop" => {
@@ -134,8 +162,11 @@ pub(super) fn process_anthropic_sse_line(
                 state.usage_output,
                 prompt_total + state.usage_output,
             );
-            let usage_details =
-                anthropic_usage_details(state.usage_cache_creation, state.usage_cache_read);
+            let usage_details = anthropic_usage_details(
+                state.usage_cache_creation,
+                state.usage_cache_read,
+                state.usage_thinking_output,
+            );
             if let Ok(mut guard) = last_usage.lock() {
                 *guard = Some(usage.clone());
             }
@@ -177,14 +208,21 @@ pub(super) fn process_anthropic_sse_line(
                     &state.accumulated_text,
                 ))
             };
-            return Ok(Some(
+            chunks.push(
                 StreamChunk::new(ChunkType::Final)
                     .with_response(final_resp)
                     .with_metadata(Some(usage), usage_details, None),
-            ));
+            );
         }
         _ => {}
     }
 
-    Ok(None)
+    Ok(chunks)
+}
+
+fn thinking_output_tokens(usage: &Value) -> Option<i64> {
+    usage
+        .get("output_tokens_details")
+        .and_then(|details| details.get("thinking_tokens"))
+        .and_then(Value::as_i64)
 }

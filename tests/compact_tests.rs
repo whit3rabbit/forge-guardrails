@@ -206,6 +206,63 @@ fn tiered_phase1_truncates_long_tool_results() {
     }
 }
 
+#[test]
+fn tiered_phase1_compresses_eligible_tool_results_before_truncating() {
+    let structured = r#"[
+  {
+    "status": "passed",
+    "duration_ms": 10,
+    "file": "src/a.rs"
+  },
+  {
+    "status": "failed",
+    "duration_ms": 20,
+    "file": "src/b.rs"
+  },
+  {
+    "status": "passed",
+    "duration_ms": 30,
+    "file": "src/c.rs"
+  }
+]"#;
+    assert!(structured.chars().count() > 200);
+
+    let mut msgs = vec![sys_msg("sys"), user_msg("usr")];
+    for step in 0..3 {
+        msgs.push(tool_call_msg(step, "call").with_tool_calls(vec![
+            forge_guardrails::ToolCallInfo::new("run", None, format!("call_{step}")),
+        ]));
+        msgs.push(
+            tool_result_msg(step, structured)
+                .with_tool_name("run")
+                .with_tool_call_id(format!("call_{step}")),
+        );
+    }
+
+    let strategy = TieredCompact::new(1).with_phase_thresholds([0.0, 100.0, 100.0]);
+    let (result, phase) = strategy.compact(&msgs, 100, None);
+
+    assert_eq!(phase, 1);
+    let eligible = result
+        .iter()
+        .find(|msg| {
+            msg.metadata.msg_type == MessageType::ToolResult && msg.metadata.step_index == Some(0)
+        })
+        .expect("eligible result");
+    assert!(eligible.content.starts_with(r#"[{"status":"passed""#));
+    assert!(!eligible.content.contains("Truncated"));
+    assert_eq!(eligible.tool_call_id.as_deref(), Some("call_0"));
+
+    let protected = result
+        .iter()
+        .find(|msg| {
+            msg.metadata.msg_type == MessageType::ToolResult && msg.metadata.step_index == Some(2)
+        })
+        .expect("protected result");
+    assert_eq!(protected.content, structured);
+    assert_eq!(protected.tool_call_id.as_deref(), Some("call_2"));
+}
+
 // ts-021: Tiered Phase 1 preserves text_response messages.
 #[test]
 fn tiered_phase1_preserves_text_response() {

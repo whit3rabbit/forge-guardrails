@@ -48,9 +48,28 @@ pub(super) fn parse_anthropic_body(
     ensure_body_size(body)?;
     let raw: Value =
         serde_json::from_slice(body).map_err(|err| bad_request_response(err.to_string()))?;
+    let parsed_value = anthropic_parse_compat_body(&raw);
     let parsed =
-        serde_json::from_value(raw.clone()).map_err(|err| bad_request_response(err.to_string()))?;
+        serde_json::from_value(parsed_value).map_err(|err| bad_request_response(err.to_string()))?;
     Ok(ParsedAnthropicRequest { raw, parsed })
+}
+
+fn anthropic_parse_compat_body(raw: &Value) -> Value {
+    let mut value = raw.clone();
+    let Some(obj) = value.as_object_mut() else {
+        return value;
+    };
+    let Some(thinking) = obj.get("thinking") else {
+        return value;
+    };
+    let Some(kind) = thinking.get("type").and_then(Value::as_str) else {
+        return value;
+    };
+
+    if kind != "enabled" && kind != "disabled" {
+        obj.remove("thinking");
+    }
+    value
 }
 
 pub(super) fn openai_handler_http_result(
@@ -61,6 +80,10 @@ pub(super) fn openai_handler_http_result(
             OpenAiHttpResult::Json(JsonHttpResponse::json(200, value.to_string()))
         }
         Ok(HandlerResult::StreamBody(events)) => OpenAiHttpResult::Stream(events),
+        Ok(HandlerResult::AnthropicResponse(_))
+        | Ok(HandlerResult::AnthropicStreamBody(_)) => OpenAiHttpResult::Json(
+            internal_error_response("internal response shape mismatch".to_string()),
+        ),
         Err(HandlerError::BadRequest(err)) => OpenAiHttpResult::Json(bad_request_response(err)),
         Err(HandlerError::Upstream(err)) => OpenAiHttpResult::Json(upstream_error_response(err)),
     }

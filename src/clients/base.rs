@@ -15,6 +15,8 @@ pub enum ChunkType {
     TextDelta,
     /// Tool call update.
     ToolCallDelta,
+    /// Provider-native stream event metadata.
+    ProviderEvent,
     /// Final response containing complete results.
     Final,
     /// Nudge or retry instruction chunk.
@@ -27,6 +29,7 @@ impl ChunkType {
         match self {
             Self::TextDelta => "text_delta",
             Self::ToolCallDelta => "tool_call_delta",
+            Self::ProviderEvent => "provider_event",
             Self::Final => "final",
             Self::Retry => "retry",
         }
@@ -117,6 +120,8 @@ pub struct StreamChunk {
     pub usage_details: Option<LLMUsageDetails>,
     /// Provider-routing and accounting metadata reported for this stream.
     pub call_info: Option<LLMCallInfo>,
+    /// Provider-native stream event, when a proxy endpoint must preserve it.
+    pub provider_event: Option<Value>,
 }
 
 impl StreamChunk {
@@ -129,6 +134,7 @@ impl StreamChunk {
             usage: None,
             usage_details: None,
             call_info: None,
+            provider_event: None,
         }
     }
 
@@ -154,6 +160,12 @@ impl StreamChunk {
         self.usage = usage;
         self.usage_details = usage_details;
         self.call_info = call_info;
+        self
+    }
+
+    /// Attaches a provider-native stream event to this chunk.
+    pub fn with_provider_event(mut self, event: Value) -> Self {
+        self.provider_event = Some(event);
         self
     }
 }
@@ -261,6 +273,8 @@ pub struct LLMUsageDetails {
     pub prompt_cache_hit_tokens: Option<i64>,
     /// DeepSeek `prompt_cache_miss_tokens`.
     pub prompt_cache_miss_tokens: Option<i64>,
+    /// Anthropic `usage.output_tokens_details.thinking_tokens`.
+    pub anthropic_thinking_output_tokens: Option<i64>,
 }
 
 impl LLMUsageDetails {
@@ -273,6 +287,7 @@ impl LLMUsageDetails {
             && self.cache_creation_input_tokens.is_none()
             && self.prompt_cache_hit_tokens.is_none()
             && self.prompt_cache_miss_tokens.is_none()
+            && self.anthropic_thinking_output_tokens.is_none()
     }
 }
 
@@ -287,6 +302,8 @@ pub struct LLMResponseEnvelope {
     pub usage_details: Option<LLMUsageDetails>,
     /// Provider-routing and accounting metadata reported for this call.
     pub call_info: Option<LLMCallInfo>,
+    /// Provider-native response body, when a proxy endpoint must preserve it.
+    pub provider_response: Option<Value>,
 }
 
 impl LLMResponseEnvelope {
@@ -297,6 +314,7 @@ impl LLMResponseEnvelope {
             usage: None,
             usage_details: None,
             call_info: None,
+            provider_response: None,
         }
     }
 
@@ -310,6 +328,12 @@ impl LLMResponseEnvelope {
         self.usage = usage;
         self.usage_details = usage_details;
         self.call_info = call_info;
+        self
+    }
+
+    /// Attach a provider-native response body.
+    pub fn with_provider_response(mut self, response: Value) -> Self {
+        self.provider_response = Some(response);
         self
     }
 }
@@ -339,6 +363,10 @@ pub struct LLMRequestOptions {
     pub inbound_anthropic_body: Option<Arc<Value>>,
     /// Initial translated OpenAI messages matching `inbound_anthropic_body`.
     pub initial_openai_messages: Option<Arc<[Value]>>,
+    /// Safe Anthropic headers to forward to a direct Anthropic upstream.
+    pub anthropic_headers: Option<Vec<(String, String)>>,
+    /// Preserve provider-native responses/events for compatible proxy endpoints.
+    pub preserve_provider_response: bool,
 }
 
 impl LLMRequestOptions {
@@ -349,6 +377,8 @@ impl LLMRequestOptions {
             passthrough: None,
             inbound_anthropic_body: None,
             initial_openai_messages: None,
+            anthropic_headers: None,
+            preserve_provider_response: false,
         }
     }
 
@@ -358,6 +388,8 @@ impl LLMRequestOptions {
             && self.passthrough.is_none()
             && self.inbound_anthropic_body.is_none()
             && self.initial_openai_messages.is_none()
+            && self.anthropic_headers.is_none()
+            && !self.preserve_provider_response
     }
 }
 

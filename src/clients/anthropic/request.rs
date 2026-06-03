@@ -103,6 +103,12 @@ fn apply_rebuilt_anthropic_passthrough(
     if let Some(user) = passthrough.get("user").and_then(Value::as_str) {
         obj.insert("metadata".to_string(), serde_json::json!({"user_id": user}));
     }
+    if let Some(thinking) = passthrough.get("thinking") {
+        obj.insert("thinking".to_string(), thinking.clone());
+    }
+    if let Some(output_config) = passthrough.get("output_config") {
+        obj.insert("output_config".to_string(), output_config.clone());
+    }
 }
 
 fn openai_tool_choice_to_anthropic(value: &Value) -> Option<Value> {

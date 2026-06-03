@@ -180,6 +180,7 @@ impl LLMClient for AnyLlmRuntimeClient {
             usage: Some(token_usage),
             usage_details,
             call_info: Some(call_info),
+            provider_response: None,
         })
     }
 

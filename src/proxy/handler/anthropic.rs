@@ -144,6 +144,42 @@ pub async fn handle_anthropic_messages_with_scorers_and_tool_controls<C: LLMClie
     tool_output_state: Option<Arc<ToolOutputCompressionState>>,
     default_tool_call_policy: ToolCallPolicyConfig,
 ) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
+    handle_anthropic_messages_with_scorers_tool_controls_and_headers(
+        body,
+        raw_body,
+        client,
+        context_manager,
+        max_retries,
+        rescue_enabled,
+        scorer,
+        final_response_scorer,
+        default_tool_output_compression,
+        tool_output_state,
+        default_tool_call_policy,
+        None,
+    )
+    .await
+}
+
+/// Handle /v1/messages with optional scorers, tool-output compression, tool-call policy,
+/// and safe Anthropic header passthrough.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_anthropic_messages_with_scorers_tool_controls_and_headers<
+    C: LLMClient + 'static,
+>(
+    body: &MessageCreateRequest,
+    raw_body: &Value,
+    client: &Arc<C>,
+    context_manager: &Arc<Mutex<ContextManager>>,
+    max_retries: i32,
+    rescue_enabled: bool,
+    scorer: Option<Arc<dyn ToolCallScorer>>,
+    final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
+    default_tool_output_compression: ToolOutputCompressionConfig,
+    tool_output_state: Option<Arc<ToolOutputCompressionState>>,
+    default_tool_call_policy: ToolCallPolicyConfig,
+    anthropic_headers: Option<Vec<(String, String)>>,
+) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
     let config = anyllm_translate::TranslationConfig::default();
     let openai_req = anyllm_translate::translate_request(body, &config)
         .map_err(|e| AnthropicHandlerError::BadRequest(e.to_string()))?;
@@ -164,6 +200,7 @@ pub async fn handle_anthropic_messages_with_scorers_and_tool_controls<C: LLMClie
         max_retries,
         rescue_enabled,
         Some(raw_body.clone()),
+        anthropic_headers,
         scorer,
         final_response_scorer,
         default_tool_output_compression,
@@ -186,6 +223,10 @@ pub async fn handle_anthropic_messages_with_scorers_and_tool_controls<C: LLMClie
         HandlerResult::StreamBody(openai_events) => Ok(AnthropicHandlerResult::StreamBody(
             anthropic_events_stream(openai_events, body.model.clone()),
         )),
+        HandlerResult::AnthropicResponse(value) => Ok(AnthropicHandlerResult::Response(value)),
+        HandlerResult::AnthropicStreamBody(events) => {
+            Ok(AnthropicHandlerResult::StreamBody(events))
+        }
     }
 }
 
@@ -212,5 +253,11 @@ fn apply_anthropic_usage_details(value: &mut Value, details: Option<&LLMUsageDet
     }
     if let Some(created) = details.cache_creation_input_tokens {
         usage.insert("cache_creation_input_tokens".to_string(), json!(created));
+    }
+    if let Some(thinking) = details.anthropic_thinking_output_tokens {
+        usage.insert(
+            "output_tokens_details".to_string(),
+            json!({"thinking_tokens": thinking}),
+        );
     }
 }

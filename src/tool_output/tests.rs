@@ -164,6 +164,42 @@ fn standard_routes_grep_output_by_file() {
 }
 
 #[test]
+fn standard_grep_handles_windows_paths_and_column_fields() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "\
+C:\\repo\\src\\a.rs:10:5:fn alpha()
+C:\\repo\\src\\a.rs:11:fn beta()
+target\\debug\\noise.rs:1:ignored
+";
+
+    let result = compress_tool_output("grep", None, raw, &config, None);
+
+    assert!(result.output.contains("C:\\repo\\src\\a.rs:"));
+    assert!(result.output.contains("10: fn alpha()"));
+    assert!(result.output.contains("11: fn beta()"));
+    assert!(!result.output.contains("target\\debug\\noise.rs"));
+}
+
+#[test]
+fn standard_grep_preserves_diagnostics_with_matches() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
+    let raw = "\
+rg: warning: skipped hidden file
+src/a.rs:10:needle alpha
+src/a.rs:11:needle beta
+src/a.rs:12:needle gamma
+target/noise.rs:1:needle ignored
+";
+
+    let result = compress_tool_output("grep", None, raw, &config, None);
+
+    assert!(result.output.contains("diagnostics:"));
+    assert!(result.output.contains("rg: warning: skipped hidden file"));
+    assert!(result.output.contains("src/a.rs:"));
+    assert!(!result.output.contains("target/noise.rs"));
+}
+
+#[test]
 fn standard_grep_unknown_output_is_preserved() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "rg: regex parse error:\n    (?:\n    ^\nerror: unclosed group\n";
@@ -381,12 +417,106 @@ fn aggressive_converts_json_array_to_tabular_form_when_smaller() {
 
     let result = compress_tool_output("bash", None, raw, &config, None);
 
-    assert!(result.output.starts_with("[3 rows]\n"));
     assert!(result
         .output
-        .contains("long_status_name\tlong_duration_ms\tlong_file_path"));
-    assert!(result.output.contains("failed\t20\tsrc/b.rs"));
+        .starts_with("[3]{long_status_name:string,long_duration_ms:int,long_file_path:string}\n"));
+    assert!(result.output.contains("failed,20,src/b.rs"));
     assert!(result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_converts_sparse_json_array_to_nullable_schema_table() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_status":"passed"},
+  {"long_identifier":2,"long_owner":"alice"},
+  {"long_identifier":3,"long_status":"failed","long_owner":"bob"}
+]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(result
+        .output
+        .starts_with("[3]{long_identifier:int,long_status:string?,long_owner:string?}\n"));
+    assert!(result.output.contains("1,passed,"));
+    assert!(result.output.contains("2,,alice"));
+    assert!(result.output.contains("3,failed,bob"));
+    assert!(result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_quotes_csv_strings() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_message":"alice, lead"},
+  {"long_identifier":2,"long_message":"she said \"hi\""},
+  {"long_identifier":3,"long_message":"plain"}
+]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(result.output.contains(r#""alice, lead""#));
+    assert!(result.output.contains(r#""she said ""hi""""#));
+    assert!(result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_records_scalar_types() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_score":1.5,"long_ok":true,"long_name":"alpha"},
+  {"long_identifier":2,"long_score":2.25,"long_ok":false,"long_name":"beta"},
+  {"long_identifier":3,"long_score":3.75,"long_ok":true,"long_name":"gamma"}
+]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(result
+        .output
+        .starts_with("[3]{long_identifier:int,long_score:float,long_ok:bool,long_name:string}\n"));
+    assert!(result.output.contains("2,2.25,false,beta"));
+    assert!(result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_skips_nested_values() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_payload":{"nested":true}},
+  {"long_identifier":2,"long_payload":{"nested":false}},
+  {"long_identifier":3,"long_payload":{"nested":true}}
+]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(!result.output.starts_with("[3]{"));
+    assert!(!result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_skips_mixed_arrays() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_status":"passed"},
+  2,
+  {"long_identifier":3,"long_status":"failed"}
+]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(!result.output.starts_with("[3]{"));
+    assert!(!result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_skips_small_inputs() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[{"a":1},{"a":2}]"#;
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert_eq!(result.output, raw);
+    assert!(!result.strategies.contains(&"toon_table".to_string()));
 }
 
 #[test]

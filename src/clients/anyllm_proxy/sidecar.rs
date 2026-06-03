@@ -206,6 +206,7 @@ impl LLMClient for AnyLlmProxyClient {
             usage: Some(usage),
             usage_details,
             call_info: Some(call_info),
+            provider_response: None,
         })
     }
 

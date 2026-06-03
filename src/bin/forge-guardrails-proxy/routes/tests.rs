@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use futures_util::StreamExt;
 use serde_json::json;
 use tokio::sync::Mutex as TokioMutex;
@@ -91,6 +92,8 @@ struct BinaryChannelStreamClient {
         std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<Result<StreamChunk, StreamError>>>>,
 }
 
+struct StaticTextClient;
+
 impl BinaryChannelStreamClient {
     fn new(receiver: tokio::sync::mpsc::Receiver<Result<StreamChunk, StreamError>>) -> Self {
         Self {
@@ -139,6 +142,34 @@ impl forge_guardrails::LLMClient for BinaryChannelStreamClient {
                 yield chunk;
             }
         }))
+    }
+
+    async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
+        Ok(Some(4096))
+    }
+}
+
+impl forge_guardrails::LLMClient for StaticTextClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+
+    async fn send(
+        &self,
+        _messages: Vec<serde_json::Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, BackendError> {
+        Ok(LLMResponse::Text(TextResponse::new("ok")))
+    }
+
+    async fn send_stream(
+        &self,
+        _messages: Vec<serde_json::Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, StreamError> {
+        Err(StreamError::new("stream should not be used"))
     }
 
     async fn get_context_length(&self) -> Result<Option<i64>, ContextDiscoveryError> {
@@ -216,7 +247,12 @@ async fn binary_openai_missing_model_returns_400_without_explicit_default() {
 
 #[tokio::test]
 async fn binary_anthropic_invalid_json_returns_400() {
-    let response = anthropic_messages(State(test_state()), Bytes::from_static(b"not json")).await;
+    let response = anthropic_messages(
+        State(test_state()),
+        HeaderMap::new(),
+        Bytes::from_static(b"not json"),
+    )
+    .await;
 
     assert_eq!(response.status().as_u16(), 400);
 }
@@ -225,11 +261,35 @@ async fn binary_anthropic_invalid_json_returns_400() {
 async fn binary_anthropic_typed_parse_failure_returns_400() {
     let response = anthropic_messages(
         State(test_state()),
+        HeaderMap::new(),
         Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
     )
     .await;
 
     assert_eq!(response.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn binary_anthropic_adaptive_thinking_request_is_accepted() {
+    let body = Bytes::from(
+        json!({
+            "model": "claude-opus-4-8",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "adaptive", "display": "summarized"},
+            "output_config": {"effort": "xhigh"}
+        })
+        .to_string(),
+    );
+    let response = anthropic_messages_with_client(
+        test_config(),
+        Arc::new(TokioMutex::new(())),
+        Arc::new(StaticTextClient),
+        body,
+    )
+    .await;
+
+    assert_eq!(response.status().as_u16(), 200);
 }
 
 #[tokio::test]

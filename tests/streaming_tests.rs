@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 fn chunk_type_values() {
     assert_eq!(ChunkType::TextDelta.as_str(), "text_delta");
     assert_eq!(ChunkType::ToolCallDelta.as_str(), "tool_call_delta");
+    assert_eq!(ChunkType::ProviderEvent.as_str(), "provider_event");
     assert_eq!(ChunkType::Final.as_str(), "final");
     assert_eq!(ChunkType::Retry.as_str(), "retry");
 }

@@ -413,6 +413,9 @@ pub(crate) fn usage_to_openai_json_with_details(
         if let Some(miss) = details.prompt_cache_miss_tokens {
             value["prompt_cache_miss_tokens"] = json!(miss);
         }
+        if let Some(thinking) = details.anthropic_thinking_output_tokens {
+            value["completion_tokens_details"] = json!({"reasoning_tokens": thinking});
+        }
     }
 
     value

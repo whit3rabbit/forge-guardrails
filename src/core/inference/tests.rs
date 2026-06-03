@@ -27,6 +27,8 @@ fn inference_result_fields() {
         usage: None,
         usage_details: None,
         call_info: None,
+        provider_response: None,
+        provider_events: None,
         new_messages: vec![],
         tool_call_counter: 5,
         attempts: 1,

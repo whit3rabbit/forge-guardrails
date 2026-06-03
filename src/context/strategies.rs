@@ -1,7 +1,10 @@
 //! Compaction strategies for context window management.
 
 use crate::context::hardware::estimate_tokens_heuristic;
-use crate::core::message::MessageType;
+use crate::core::message::{Message, MessageType};
+use crate::tool_output::{
+    compress_tool_output, ToolOutputCompressionConfig, ToolOutputCompressionMode,
+};
 
 /// Trait for compaction strategies that compress message history.
 ///
@@ -219,10 +222,7 @@ fn find_protected_window(
 }
 
 /// Phase 1: drop nudge messages from eligible zone, truncate long tool results.
-fn apply_phase1(
-    messages: &[crate::core::message::Message],
-    keep_recent: i64,
-) -> Vec<crate::core::message::Message> {
+fn apply_phase1(messages: &[Message], keep_recent: i64) -> Vec<Message> {
     let header = &messages[..2];
     let rest = &messages[2..];
     let protected = find_protected_window(rest, keep_recent);
@@ -243,23 +243,39 @@ fn apply_phase1(
             }
             // Truncate long tool results.
             MessageType::ToolResult => {
-                let content_len = msg.content.chars().count();
+                let mut new_msg = compact_tool_result_for_phase1(msg);
+                let content_len = new_msg.content.chars().count();
                 if content_len > TRUNCATION_LIMIT {
-                    let truncated: String = msg.content.chars().take(TRUNCATION_LIMIT).collect();
+                    let truncated: String =
+                        new_msg.content.chars().take(TRUNCATION_LIMIT).collect();
                     let removed = content_len - TRUNCATION_LIMIT;
-                    let mut new_msg = msg.clone();
                     new_msg.content =
                         format!("{}\n[Truncated — {} chars removed]", truncated, removed);
-                    result.push(new_msg);
-                } else {
-                    result.push(msg.clone());
                 }
+                result.push(new_msg);
             }
             // Everything else passes through.
             _ => result.push(msg.clone()),
         }
     }
     result
+}
+
+fn compact_tool_result_for_phase1(msg: &Message) -> Message {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        enable_dedup: false,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let tool_name = msg.tool_name.as_deref().unwrap_or("generic");
+    let compressed = compress_tool_output(tool_name, None, &msg.content, &config, None);
+    if compressed.output == msg.content {
+        msg.clone()
+    } else {
+        let mut new_msg = msg.clone();
+        new_msg.content = compressed.output;
+        new_msg
+    }
 }
 
 /// Phase 2: Phase 1 + drop all tool_result messages from eligible zone.

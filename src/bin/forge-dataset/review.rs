@@ -147,6 +147,23 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
             progress.log_rejected("verifier_rejected");
             continue;
         }
+        if let Some(reason) = post_review_quality_reject(
+            &capture,
+            &candidate_call,
+            &decision.label,
+            "real_model_call",
+        ) {
+            append_reject(
+                &reject_path,
+                "post_review_quality_rejected",
+                &reason,
+                &capture,
+                Some(decision.raw.clone()),
+            )?;
+            progress.rejected += 1;
+            progress.log_rejected("post_review_quality_rejected");
+            continue;
+        }
 
         let corrected_positive = decision
             .corrected_candidate_call
@@ -175,6 +192,23 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
 
         if decision.label != "valid" {
             if let Some(corrected) = decision.corrected_candidate_call.as_ref() {
+                if let Some(reason) = post_review_quality_reject(
+                    &capture,
+                    corrected,
+                    "valid",
+                    "reviewer_corrected_positive",
+                ) {
+                    append_reject(
+                        &reject_path,
+                        "post_review_corrected_positive_quality_rejected",
+                        &reason,
+                        &capture,
+                        Some(decision.raw.clone()),
+                    )?;
+                    progress.rejected += 1;
+                    progress.log_rejected("post_review_corrected_positive_quality_rejected");
+                    continue;
+                }
                 let corrected_verifier = match verify_label(
                     &verifier,
                     &capture,
@@ -247,17 +281,17 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
         alternative_cap(resume_state.accepted_real_count, cli.max_alternative_ratio);
     let remaining_alternative_cap =
         alternative_cap.saturating_sub(resume_state.accepted_alternative_count);
-    verify_alternatives(
-        &reviewer,
-        &verifier,
-        alternative_proposals,
-        remaining_alternative_cap,
-        cli.max_alternatives_per_group,
-        &reject_path,
-        &cli.output,
-        &mut resume_state,
-        &mut progress,
-    )
+    verify_alternatives(AlternativeReviewRun {
+        reviewer: &reviewer,
+        verifier: &verifier,
+        proposals: alternative_proposals,
+        alternative_cap: remaining_alternative_cap,
+        max_per_group: cli.max_alternatives_per_group,
+        reject_path: &reject_path,
+        output_path: &cli.output,
+        resume_state: &mut resume_state,
+        progress: &mut progress,
+    })
     .await?;
     eprintln!(
         "review complete seen={} skipped={} accepted_real={} accepted_corrected={} accepted_alternatives={} rejected={} output={}",
@@ -277,7 +311,15 @@ async fn review_capture(client: &JsonLlmClient, capture: &Value) -> Result<Revie
     let system = concat!(
         "You label Forge tool-call verifier examples. Return only JSON. ",
         "Allowed labels are valid, wrong_tool_semantic, wrong_arguments_semantic, ",
-        "tool_not_needed, needs_clarification. Do not use classifier telemetry as truth."
+        "tool_not_needed, needs_clarification. Do not use classifier telemetry as truth. ",
+        "Judge the candidate call in the current workflow state, not from a generic ideal plan. ",
+        "A successful tool result is evidence that the call is plausible. Do not mark a tool wrong ",
+        "just because another read/inspect tool could also have been used. Terminal tools indicate ",
+        "how to answer after tool work is done; they do not forbid a still-useful non-terminal tool. ",
+        "If the same non-terminal tool has already completed and there are no pending steps, another ",
+        "call to that tool is usually tool_not_needed, not valid. For shopping compare workflows, ",
+        "search_products followed by compare_products with product IDs from the search result is valid; ",
+        "do not invent a required get_product step unless the user specifically asked for product details."
     );
     let user = format!(
         "Review this captured candidate call and return JSON with \
@@ -301,7 +343,12 @@ async fn verify_label(
     let system = concat!(
         "You verify a proposed Forge tool-call verifier label. ",
         "Return only JSON with accepted boolean and rationale string. ",
-        "Do not invent a different label."
+        "Do not invent a different label. Verify the proposed label against the actual ",
+        "user request, workflow state, available tools, candidate call, and tool result. ",
+        "Reject labels that over-penalize normal multi-step tool use. A successful ",
+        "search_products then compare_products sequence is valid for a comparison request. ",
+        "If a candidate repeats an already completed non-terminal tool with no pending work, ",
+        "the valid label should be rejected."
     );
     let user = json!({
         "task": "Accept or reject the proposed label. Do not relabel.",
@@ -359,17 +406,18 @@ async fn review_generated_alternative(
     )
 }
 
-async fn verify_alternatives(
-    reviewer: &JsonLlmClient,
-    verifier: &JsonLlmClient,
-    proposals: Vec<AlternativeProposal>,
-    alternative_cap: usize,
-    max_per_group: usize,
-    reject_path: &Path,
-    output_path: &str,
-    resume_state: &mut ResumeState,
-    progress: &mut ReviewProgress,
-) -> Result<usize, String> {
+async fn verify_alternatives(run: AlternativeReviewRun<'_>) -> Result<usize, String> {
+    let AlternativeReviewRun {
+        reviewer,
+        verifier,
+        proposals,
+        alternative_cap,
+        max_per_group,
+        reject_path,
+        output_path,
+        resume_state,
+        progress,
+    } = run;
     let mut accepted = 0;
     eprintln!(
         "review alternatives start proposed={} remaining_cap={} max_per_group={}",
@@ -399,6 +447,23 @@ async fn verify_alternatives(
         if group_count >= max_per_group {
             progress.alternatives_skipped += 1;
             progress.log_alternative_skip_if_needed();
+            continue;
+        }
+        if let Some(reason) = post_review_quality_reject(
+            &proposal.capture,
+            &proposal.candidate_call,
+            &proposal.label,
+            "targeted_alternative",
+        ) {
+            append_reject(
+                reject_path,
+                "targeted_alternative_quality_rejected",
+                &reason,
+                &proposal.capture,
+                None,
+            )?;
+            progress.rejected += 1;
+            progress.log_alternative_rejected("targeted_alternative_quality_rejected");
             continue;
         }
         progress.log_alternative_reviewing(&proposal);
@@ -525,6 +590,18 @@ struct AlternativeProposal {
     label: String,
 }
 
+struct AlternativeReviewRun<'a> {
+    reviewer: &'a JsonLlmClient,
+    verifier: &'a JsonLlmClient,
+    proposals: Vec<AlternativeProposal>,
+    alternative_cap: usize,
+    max_per_group: usize,
+    reject_path: &'a Path,
+    output_path: &'a str,
+    resume_state: &'a mut ResumeState,
+    progress: &'a mut ReviewProgress,
+}
+
 #[derive(Debug)]
 struct ReviewProgress {
     total: usize,
@@ -554,7 +631,7 @@ impl ReviewProgress {
     }
 
     fn log_skip_if_needed(&self) {
-        if self.skipped == 1 || self.skipped % 250 == 0 {
+        if self.skipped == 1 || self.skipped.is_multiple_of(250) {
             eprintln!(
                 "review resume skipped={} seen={}/{}",
                 self.skipped, self.seen, self.total
@@ -600,7 +677,7 @@ impl ReviewProgress {
     }
 
     fn log_alternative_skip_if_needed(&self) {
-        if self.alternatives_skipped == 1 || self.alternatives_skipped % 250 == 0 {
+        if self.alternatives_skipped == 1 || self.alternatives_skipped.is_multiple_of(250) {
             eprintln!(
                 "review alternative skipped={} seen={}",
                 self.alternatives_skipped, self.alternatives_seen
@@ -650,6 +727,73 @@ fn candidate_tool(candidate: Option<&Value>) -> &str {
         .and_then(|candidate| candidate.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
+}
+
+fn post_review_quality_reject(
+    capture: &Value,
+    candidate_call: &Value,
+    label: &str,
+    source_bucket: &str,
+) -> Option<String> {
+    if label == "valid" && repeats_completed_non_terminal_tool(capture, candidate_call) {
+        return Some(format!(
+            "{source_bucket} proposed valid for an already-completed non-terminal tool with no pending workflow steps"
+        ));
+    }
+
+    if label == "wrong_tool_semantic" && looks_like_wrong_tool_overreach(capture, candidate_call) {
+        return Some(
+            "candidate uses a semantically matching tool for the request; if arguments are bad, this should be wrong_arguments_semantic, not wrong_tool_semantic"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+fn repeats_completed_non_terminal_tool(capture: &Value, candidate_call: &Value) -> bool {
+    let Some(name) = candidate_call.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    if name == "respond" {
+        return false;
+    }
+    let Some(workflow_state) = capture.get("workflow_state") else {
+        return false;
+    };
+    let pending_empty = workflow_state
+        .get("pending_steps")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if !pending_empty {
+        return false;
+    }
+    workflow_state
+        .get("completed_steps")
+        .and_then(Value::as_array)
+        .is_some_and(|completed| completed.iter().any(|step| step.as_str() == Some(name)))
+}
+
+fn looks_like_wrong_tool_overreach(capture: &Value, candidate_call: &Value) -> bool {
+    let Some(name) = candidate_call.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    let request = capture
+        .get("user_request")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if request.contains("compare") && name == "compare_products" {
+        return true;
+    }
+    if request.contains("list") && name == "list_files" {
+        return true;
+    }
+    if request.contains("look up") && name == "lookup_ticket" {
+        return true;
+    }
+    false
 }
 
 fn parse_reviewer_decision(raw: Value) -> Result<ReviewDecision, String> {
@@ -1633,6 +1777,55 @@ mod tests {
         assert!(state
             .valid_real_capture_keys
             .contains(row["review"]["capture_key"].as_str().expect("capture key")));
+    }
+
+    #[test]
+    fn quality_filter_rejects_completed_tool_valid_positive() {
+        let mut capture = capture_row();
+        capture["workflow_state"]["completed_steps"] = json!(["compare_products"]);
+        capture["workflow_state"]["pending_steps"] = json!([]);
+
+        let reason = post_review_quality_reject(
+            &capture,
+            &capture["candidate_call"],
+            "valid",
+            "real_model_call",
+        )
+        .expect("quality rejection");
+
+        assert!(reason.contains("already-completed"));
+    }
+
+    #[test]
+    fn quality_filter_rejects_wrong_tool_for_semantically_matching_compare_tool() {
+        let capture = capture_row();
+
+        let reason = post_review_quality_reject(
+            &capture,
+            &capture["candidate_call"],
+            "wrong_tool_semantic",
+            "real_model_call",
+        )
+        .expect("quality rejection");
+
+        assert!(reason.contains("wrong_arguments_semantic"));
+    }
+
+    #[test]
+    fn quality_filter_allows_real_competing_wrong_tool() {
+        let capture = capture_row();
+        let candidate = json!({
+            "name": "add_to_cart",
+            "arguments": {"product_id": "SKU-1", "quantity": 1}
+        });
+
+        assert!(post_review_quality_reject(
+            &capture,
+            &candidate,
+            "wrong_tool_semantic",
+            "targeted_alternative",
+        )
+        .is_none());
     }
 
     #[test]

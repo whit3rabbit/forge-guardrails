@@ -29,6 +29,10 @@ pub struct InferenceResult {
     pub usage_details: Option<LLMUsageDetails>,
     /// Provider-routing and accounting metadata for the accepted attempt.
     pub call_info: Option<LLMCallInfo>,
+    /// Provider-native response body for the accepted attempt.
+    pub provider_response: Option<Value>,
+    /// Provider-native stream events for the accepted attempt.
+    pub provider_events: Option<Vec<Value>>,
     /// Any new messages generated during the inference process (e.g. nudges).
     pub new_messages: Vec<Message>,
     /// The running count of tool calls processed.
@@ -284,8 +288,15 @@ async fn run_inference_with_options_inner<C: LLMClient>(
             let mut final_usage = None;
             let mut final_usage_details = None;
             let mut final_call_info = None;
+            let mut provider_events = Vec::new();
             while let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result.map_err(ForgeError::from)?;
+                if chunk.chunk_type == ChunkType::ProviderEvent {
+                    if let Some(event) = chunk.provider_event {
+                        provider_events.push(event);
+                    }
+                    continue;
+                }
                 if let Some(ref cb) = on_chunk {
                     cb(&chunk);
                 }
@@ -301,11 +312,15 @@ async fn run_inference_with_options_inner<C: LLMClient>(
                     "Stream ended without FINAL chunk - the client adapter may be malformed or the connection was interrupted",
                 ))
             })?;
-            LLMResponseEnvelope::from_response(response).with_metadata(
+            let mut envelope = LLMResponseEnvelope::from_response(response).with_metadata(
                 final_usage.or_else(|| client.last_usage()),
                 final_usage_details.or_else(|| client.last_usage_details()),
                 final_call_info.or_else(|| client.last_call_info()),
-            )
+            );
+            if !provider_events.is_empty() {
+                envelope.provider_response = Some(Value::Array(provider_events));
+            }
+            envelope
         } else {
             client
                 .send_envelope_with_options(wire, tools_opt.clone(), request_options)
@@ -317,7 +332,16 @@ async fn run_inference_with_options_inner<C: LLMClient>(
             usage,
             usage_details,
             call_info,
+            provider_response,
         } = envelope;
+        let provider_events = provider_response.as_ref().and_then(|value| match value {
+            Value::Array(events) => Some(events.clone()),
+            _ => None,
+        });
+        let provider_response = match provider_response {
+            Some(Value::Array(_)) => None,
+            other => other,
+        };
 
         // Sync token count: prefer real usage from client, fall back to heuristic.
         let observed_tokens = if let Some(usage) = usage.as_ref() {
@@ -329,6 +353,8 @@ async fn run_inference_with_options_inner<C: LLMClient>(
 
         // Validate response.
         let validation = validator.validate(&response);
+        let preserve_provider_response =
+            matches!(response, LLMResponse::ToolCalls(_)) && !validation.needs_retry;
 
         if validation.needs_retry {
             error_tracker.record_retry();
@@ -448,6 +474,16 @@ async fn run_inference_with_options_inner<C: LLMClient>(
             usage,
             usage_details,
             call_info,
+            provider_response: if preserve_provider_response {
+                provider_response
+            } else {
+                None
+            },
+            provider_events: if preserve_provider_response {
+                provider_events
+            } else {
+                None
+            },
             new_messages,
             tool_call_counter: *tool_call_counter,
             attempts,

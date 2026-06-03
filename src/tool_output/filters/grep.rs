@@ -14,6 +14,7 @@ struct GrepMatch {
 pub(in crate::tool_output) fn filter_grep_output(output: &str) -> String {
     let lines = output.lines().collect::<Vec<_>>();
     let mut matches: IndexMap<String, Vec<String>> = IndexMap::new();
+    let mut diagnostics = Vec::new();
 
     for line in lines {
         if let Some(parsed) = parse_rg_json_line(line) {
@@ -31,6 +32,10 @@ pub(in crate::tool_output) fn filter_grep_output(output: &str) -> String {
         }
         if let Some(parsed) = parse_grep_line(line) {
             push_match(&mut matches, parsed.file, parsed.line_num, parsed.content);
+            continue;
+        }
+        if is_grep_diagnostic(line) && diagnostics.len() < MAX_MATCHES_PER_FILE {
+            diagnostics.push(line.trim().to_string());
         }
     }
 
@@ -39,7 +44,18 @@ pub(in crate::tool_output) fn filter_grep_output(output: &str) -> String {
     }
 
     let match_count = matches.values().map(Vec::len).sum::<usize>();
-    let mut result = format!("{} files, {match_count} matches:\n\n", matches.len());
+    let mut result = String::new();
+    if !diagnostics.is_empty() {
+        result.push_str("diagnostics:\n");
+        for diagnostic in diagnostics {
+            result.push_str(&format!("  {diagnostic}\n"));
+        }
+        result.push('\n');
+    }
+    result.push_str(&format!(
+        "{} files, {match_count} matches:\n\n",
+        matches.len()
+    ));
     for (file, file_matches) in matches {
         result.push_str(&format!("{file}:\n"));
         for line in &file_matches {
@@ -51,6 +67,15 @@ pub(in crate::tool_output) fn filter_grep_output(output: &str) -> String {
         result.push('\n');
     }
     result.trim_end().to_string()
+}
+
+fn is_grep_diagnostic(line: &str) -> bool {
+    let trimmed = line.trim_start().to_ascii_lowercase();
+    trimmed.starts_with("error")
+        || trimmed.starts_with("warning")
+        || trimmed.starts_with("fatal")
+        || trimmed.starts_with("rg:")
+        || trimmed.starts_with("grep:")
 }
 
 fn is_rg_json_event(line: &str) -> bool {
@@ -106,23 +131,32 @@ fn parse_rg_json_line(line: &str) -> Option<GrepMatch> {
 }
 
 fn parse_grep_line(line: &str) -> Option<GrepMatch> {
-    let (file, rest) = line.split_once(':')?;
-    let (line_num, rest) = rest.split_once(':')?;
-    if line_num.parse::<usize>().is_err() {
-        return None;
-    }
-    let content = if let Some((column, content)) = rest.split_once(':') {
-        if column.parse::<usize>().is_ok() {
-            content
-        } else {
-            rest
+    for (idx, _) in line.match_indices(':') {
+        let file = &line[..idx];
+        if file.is_empty() {
+            continue;
         }
-    } else {
-        rest
-    };
-    Some(GrepMatch {
-        file: file.to_string(),
-        line_num: line_num.to_string(),
-        content: content.to_string(),
-    })
+        let rest = &line[idx + 1..];
+        let Some((line_num, after_line)) = rest.split_once(':') else {
+            continue;
+        };
+        if line_num.parse::<usize>().is_err() {
+            continue;
+        }
+        let content = if let Some((column, content)) = after_line.split_once(':') {
+            if column.parse::<usize>().is_ok() {
+                content
+            } else {
+                after_line
+            }
+        } else {
+            after_line
+        };
+        return Some(GrepMatch {
+            file: file.to_string(),
+            line_num: line_num.to_string(),
+            content: content.to_string(),
+        });
+    }
+    None
 }

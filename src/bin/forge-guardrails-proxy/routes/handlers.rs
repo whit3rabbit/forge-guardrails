@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::Response;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as TokioMutex;
 
 use forge_guardrails::{
-    handle_anthropic_messages_with_scorers_and_tool_controls,
+    handle_anthropic_messages_with_scorers_tool_controls_and_headers,
     handle_chat_completions_with_scorers_and_tool_controls, ContextManager, FinalResponseScorer,
     LLMClient, NoCompact, ToolCallScorer, ToolOutputCompressionState,
 };
@@ -106,7 +107,11 @@ pub async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Res
 }
 
 /// Handler for the `/v1/messages` endpoint.
-pub async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> Response {
+pub async fn anthropic_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let request = match request_http::parse_anthropic_body(body.as_ref()) {
         Ok(request) => request,
         Err(response) => return build_http_response(response),
@@ -124,6 +129,7 @@ pub async fn anthropic_messages(State(state): State<AppState>, body: Bytes) -> R
         state.tool_output_state,
         client,
         request,
+        safe_anthropic_extra_headers(&headers),
     )
     .await
 }
@@ -147,10 +153,12 @@ pub(crate) async fn anthropic_messages_with_client<C: LLMClient + 'static>(
         Arc::new(ToolOutputCompressionState::new()),
         client,
         request,
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     config: Arc<ProxyConfig>,
     request_mutex: Arc<TokioMutex<()>>,
@@ -159,6 +167,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     tool_output_state: Arc<ToolOutputCompressionState>,
     client: Arc<C>,
     request: request_http::ParsedAnthropicRequest,
+    anthropic_headers: Option<Vec<(String, String)>>,
 ) -> Response {
     let context_manager = Arc::new(TokioMutex::new(ContextManager::new(
         Box::new(NoCompact),
@@ -175,7 +184,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
     };
 
     match request_http::anthropic_handler_http_result(
-        handle_anthropic_messages_with_scorers_and_tool_controls(
+        handle_anthropic_messages_with_scorers_tool_controls_and_headers(
             &request.parsed,
             &request.raw,
             &client,
@@ -187,6 +196,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
             config.tool_output_compression.clone(),
             Some(tool_output_state),
             config.tool_call_policy.clone(),
+            anthropic_headers,
         )
         .await,
     ) {
@@ -194,6 +204,23 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
         request_http::AnthropicHttpResult::Stream(events) => {
             build_anthropic_sse_response(events, guard)
         }
+    }
+}
+
+fn safe_anthropic_extra_headers(headers: &HeaderMap) -> Option<Vec<(String, String)>> {
+    let values: Vec<(String, String)> = ["x-claude-code-session-id", "anthropic-beta"]
+        .iter()
+        .filter_map(|&name| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
     }
 }
 

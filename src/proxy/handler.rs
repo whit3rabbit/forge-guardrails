@@ -43,6 +43,7 @@ pub use anthropic::{
     handle_anthropic_messages_with_scorers,
     handle_anthropic_messages_with_scorers_and_tool_controls,
     handle_anthropic_messages_with_scorers_and_tool_output_compression,
+    handle_anthropic_messages_with_scorers_tool_controls_and_headers,
 };
 use compression::{compress_proxy_tool_results, patch_anthropic_tool_results};
 use nudge::{
@@ -100,6 +101,10 @@ pub enum HandlerResult {
     Response(Value),
     /// Streaming: OpenAI response chunk objects.
     StreamBody(OpenAiEventStream),
+    /// Non-streaming provider-native Anthropic response object.
+    AnthropicResponse(Value),
+    /// Streaming provider-native Anthropic events.
+    AnthropicStreamBody(AnthropicEventStream),
 }
 
 const PROXY_STEP_INDEX: i64 = 0;
@@ -109,6 +114,12 @@ impl fmt::Debug for HandlerResult {
         match self {
             Self::Response(value) => f.debug_tuple("Response").field(value).finish(),
             Self::StreamBody(_) => f.write_str("StreamBody(<openai event stream>)"),
+            Self::AnthropicResponse(value) => {
+                f.debug_tuple("AnthropicResponse").field(value).finish()
+            }
+            Self::AnthropicStreamBody(_) => {
+                f.write_str("AnthropicStreamBody(<anthropic event stream>)")
+            }
         }
     }
 }
@@ -310,6 +321,7 @@ pub async fn handle_chat_completions_with_scorers_and_tool_controls<C: LLMClient
         max_retries,
         rescue_enabled,
         None,
+        None,
         scorer,
         final_response_scorer,
         default_tool_output_compression,
@@ -327,6 +339,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     max_retries: i32,
     rescue_enabled: bool,
     inbound_anthropic_body: Option<Value>,
+    anthropic_headers: Option<Vec<(String, String)>>,
     scorer: Option<Arc<dyn ToolCallScorer>>,
     final_response_scorer: Option<Arc<dyn FinalResponseScorer>>,
     default_tool_output_compression: ToolOutputCompressionConfig,
@@ -366,7 +379,10 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     let tool_call_policy = extract_tool_call_policy_config(body, &default_tool_call_policy)?;
 
     let sampling = extract_sampling(body);
-    let passthrough = extract_passthrough(body);
+    let mut passthrough = extract_passthrough(body);
+    if let Some(raw) = inbound_anthropic_body.as_ref() {
+        preserve_rebuilt_anthropic_fields(raw, &mut passthrough);
+    }
     let mut request_options = LLMRequestOptions {
         sampling,
         passthrough,
@@ -374,6 +390,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             .map(strip_forge_extension_from_body)
             .map(Arc::new),
         initial_openai_messages: None,
+        anthropic_headers,
+        preserve_provider_response: false,
     };
 
     // Convert inbound OpenAI messages to internal format.
@@ -396,6 +414,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         }
     }
     if request_options.inbound_anthropic_body.is_some() {
+        request_options.preserve_provider_response = true;
         request_options.initial_openai_messages = Some(Arc::from(
             crate::core::inference::fold_and_serialize(
                 &internal_msgs,
@@ -460,6 +479,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
     let mut accepted_usage = None;
     let mut accepted_usage_details = None;
+    let mut accepted_provider_response = None;
+    let mut accepted_provider_events = None;
     let mut tool_call_policy_state = ToolCallPolicyRequestState::new();
     let response = loop {
         let step_hint = step_enforcer
@@ -512,6 +533,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
         let result_usage = result.usage;
         let result_usage_details = result.usage_details;
+        let result_provider_response = result.provider_response;
+        let result_provider_events = result.provider_events;
         let response = result.response;
         let Some(enforcer) = step_enforcer.as_mut() else {
             match response {
@@ -572,6 +595,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     }
                     accepted_usage = result_usage;
                     accepted_usage_details = result_usage_details;
+                    accepted_provider_response = result_provider_response;
+                    accepted_provider_events = result_provider_events;
                     break LLMResponse::ToolCalls(tool_calls);
                 }
                 LLMResponse::Text(text) => {
@@ -594,6 +619,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     }
                     accepted_usage = result_usage;
                     accepted_usage_details = result_usage_details;
+                    accepted_provider_response = result_provider_response;
+                    accepted_provider_events = result_provider_events;
                     break LLMResponse::Text(text);
                 }
             }
@@ -672,6 +699,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 }
                 accepted_usage = result_usage;
                 accepted_usage_details = result_usage_details;
+                accepted_provider_response = result_provider_response;
+                accepted_provider_events = result_provider_events;
                 break LLMResponse::ToolCalls(tool_calls);
             }
             LLMResponse::Text(text) => {
@@ -710,6 +739,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 }
                 accepted_usage = result_usage;
                 accepted_usage_details = result_usage_details;
+                accepted_provider_response = result_provider_response;
+                accepted_provider_events = result_provider_events;
                 break LLMResponse::Text(text);
             }
         }
@@ -717,6 +748,8 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
 
     let usage = accepted_usage;
     let usage_details = accepted_usage_details;
+    let provider_response = accepted_provider_response;
+    let provider_events = accepted_provider_events;
 
     let handler_result = match response {
         LLMResponse::Text(ref text) => text_response_result(
@@ -747,6 +780,32 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     usage.as_ref(),
                     usage_details.as_ref(),
                 )
+            } else if respond_text.is_none() {
+                if stream {
+                    if let Some(events) = provider_events {
+                        anthropic_stream_result(events)
+                    } else {
+                        tool_calls_result(
+                            &real_calls,
+                            model_name,
+                            stream,
+                            stream_include_usage,
+                            usage.as_ref(),
+                            usage_details.as_ref(),
+                        )
+                    }
+                } else if let Some(value) = provider_response {
+                    HandlerResult::AnthropicResponse(value)
+                } else {
+                    tool_calls_result(
+                        &real_calls,
+                        model_name,
+                        stream,
+                        stream_include_usage,
+                        usage.as_ref(),
+                        usage_details.as_ref(),
+                    )
+                }
             } else {
                 // Real tool calls: return only those calls and drop respond.
                 tool_calls_result(
@@ -762,6 +821,23 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     };
 
     Ok(handler_result)
+}
+
+fn preserve_rebuilt_anthropic_fields(
+    raw: &Value,
+    passthrough: &mut Option<serde_json::Map<String, Value>>,
+) {
+    let mut insert = |key: &str| {
+        let Some(value) = raw.get(key) else {
+            return;
+        };
+        passthrough
+            .get_or_insert_with(serde_json::Map::new)
+            .entry(key.to_string())
+            .or_insert_with(|| value.clone());
+    };
+    insert("thinking");
+    insert("output_config");
 }
 
 /// Remove respond() calls, keeping only real tool calls.
@@ -783,6 +859,20 @@ pub fn process_response(response: &LLMResponse, model_name: &str, stream: bool) 
             text_response_result(text, model_name, stream, false, None, None)
         }
     }
+}
+
+fn anthropic_stream_result(events: Vec<Value>) -> HandlerResult {
+    HandlerResult::AnthropicStreamBody(Box::pin(async_stream::stream! {
+        for event in events {
+            match serde_json::from_value::<StreamEvent>(event) {
+                Ok(event) => yield Ok(event),
+                Err(err) => {
+                    yield Err(StreamError::new(err.to_string()));
+                    return;
+                }
+            }
+        }
+    }))
 }
 
 #[cfg(test)]

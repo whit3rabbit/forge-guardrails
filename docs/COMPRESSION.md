@@ -51,7 +51,7 @@ default for that request.
 | `disabled` | yes | No mutation. |
 | `safe` | no | Redact secrets, strip ANSI, suppress binary output, cap oversized output. |
 | `standard` | no | `safe` plus JSON/table cleanup, tool-family filters, repeated-line folding, whitespace cleanup. |
-| `aggressive` | no | `standard` plus lossy log normalization, JSON-array tabular conversion, and dictionary compression. |
+| `aggressive` | no | `standard` plus lossy log normalization, schema-table JSON-array conversion, and dictionary compression. |
 
 Use `safe` when the main goal is to remove dangerous or noisy output while
 keeping the transcript close to original. Use `standard` for normal proxy
@@ -150,9 +150,21 @@ When enabled, Forge applies transforms in this order:
    if a `session_id` is set, repeated compressed output can be replaced with a
    bounded duplicate marker.
 
-Standard and aggressive candidate transforms are kept only when they reduce
-output size. Safe filters can still replace dangerous or oversized content even
-when the replacement is not smaller.
+Standard and aggressive candidate transforms are kept only when they reduce the
+heuristic token estimate without growing the byte size. Safe filters can still
+replace dangerous or oversized content even when the replacement is not
+smaller.
+
+The aggressive JSON-array table transform is lossless for arrays of scalar
+objects. It skips small inputs, nested values, and mixed arrays. Accepted output
+uses a schema line followed by CSV-escaped rows:
+
+```text
+[3]{id:int,status:string,path:string}
+1,passed,src/a.rs
+2,failed,src/b.rs
+3,passed,src/c.rs
+```
 
 ## Dictionary Compression
 

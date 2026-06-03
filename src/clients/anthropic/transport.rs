@@ -10,6 +10,19 @@ use crate::clients::base::{
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
 
+fn apply_anthropic_extra_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: Option<&[(String, String)]>,
+) -> reqwest::RequestBuilder {
+    let Some(headers) = headers else {
+        return req;
+    };
+    for (name, value) in headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    req
+}
+
 impl LLMClient for AnthropicClient {
     fn api_format(&self) -> ApiFormat {
         ApiFormat::OpenAI
@@ -51,6 +64,7 @@ impl LLMClient for AnthropicClient {
         tools: Option<Vec<ToolSpec>>,
         options: LLMRequestOptions,
     ) -> Result<LLMResponseEnvelope, BackendError> {
+        let preserve_provider_response = options.preserve_provider_response;
         let sampling = options.sampling.clone();
         if let Some(sp) = &sampling {
             log::debug!(
@@ -59,6 +73,7 @@ impl LLMClient for AnthropicClient {
             );
         }
 
+        let extra_headers = options.anthropic_headers.clone();
         let body = self.build_body_with_options(messages, tools, options, false);
 
         let mut req = self
@@ -72,6 +87,7 @@ impl LLMClient for AnthropicClient {
         if let Some(ref key) = self.api_key {
             req = req.header("x-api-key", key.as_str());
         }
+        req = apply_anthropic_extra_headers(req, extra_headers.as_deref());
 
         let resp = req
             .send()
@@ -91,12 +107,17 @@ impl LLMClient for AnthropicClient {
 
         self.record_usage(&response_json);
         let (usage, usage_details) = usage_from_response(&response_json);
-        Ok(LLMResponseEnvelope {
+        let mut envelope = LLMResponseEnvelope {
             response: convert::parse_response(&response_json),
             usage: Some(usage),
             usage_details,
             call_info: None,
-        })
+            provider_response: None,
+        };
+        if preserve_provider_response {
+            envelope.provider_response = Some(response_json);
+        }
+        Ok(envelope)
     }
 
     async fn send_stream(
@@ -115,6 +136,7 @@ impl LLMClient for AnthropicClient {
         tools: Option<Vec<ToolSpec>>,
         options: LLMRequestOptions,
     ) -> Result<ChunkStream, StreamError> {
+        let preserve_provider_response = options.preserve_provider_response;
         let sampling = options.sampling.clone();
         if let Some(sp) = &sampling {
             log::debug!(
@@ -123,6 +145,7 @@ impl LLMClient for AnthropicClient {
             );
         }
 
+        let extra_headers = options.anthropic_headers.clone();
         let body = self.build_body_with_options(messages, tools, options, true);
 
         let mut req = self
@@ -136,6 +159,7 @@ impl LLMClient for AnthropicClient {
         if let Some(ref key) = self.api_key {
             req = req.header("x-api-key", key.as_str());
         }
+        req = apply_anthropic_extra_headers(req, extra_headers.as_deref());
 
         let resp = req
             .send()
@@ -167,7 +191,7 @@ impl LLMClient for AnthropicClient {
             let mut line_buf = String::new();
             let mut inner = Box::pin(byte_stream);
 
-            let mut state = AnthropicStreamState::default();
+            let mut state = AnthropicStreamState::new(preserve_provider_response);
 
             loop {
                 match inner.next().await {
@@ -191,14 +215,15 @@ impl LLMClient for AnthropicClient {
                         &last_usage,
                         &last_usage_details,
                     ) {
-                        Ok(Some(chunk)) => {
-                            let is_final = chunk.chunk_type == ChunkType::Final;
-                            yield Ok(chunk);
-                            if is_final {
-                                return;
+                        Ok(chunks) => {
+                            for chunk in chunks {
+                                let is_final = chunk.chunk_type == ChunkType::Final;
+                                yield Ok(chunk);
+                                if is_final {
+                                    return;
+                                }
                             }
                         }
-                        Ok(None) => {}
                         Err(err) => {
                             yield Err(err);
                             return;
@@ -215,11 +240,12 @@ impl LLMClient for AnthropicClient {
                     &last_usage,
                     &last_usage_details,
                 ) {
-                    Ok(Some(chunk)) => {
-                        yield Ok(chunk);
+                    Ok(chunks) => {
+                        for chunk in chunks {
+                            yield Ok(chunk);
+                        }
                         return;
                     }
-                    Ok(None) => {}
                     Err(err) => {
                         yield Err(err);
                         return;

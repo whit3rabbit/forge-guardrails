@@ -332,6 +332,20 @@ fn record_usage_includes_cache_tokens() {
     assert_eq!(details.cache_creation_input_tokens, Some(11));
 }
 
+#[test]
+fn record_usage_includes_thinking_output_tokens() {
+    let client = AnthropicClient::new("claude-3", None);
+    client.record_usage(&json!({
+        "usage": {
+            "input_tokens": 42,
+            "output_tokens": 7,
+            "output_tokens_details": {"thinking_tokens": 5}
+        }
+    }));
+    let details = client.get_last_usage_details().expect("details");
+    assert_eq!(details.anthropic_thinking_output_tokens, Some(5));
+}
+
 #[tokio::test]
 async fn stream_usage_includes_cache_tokens() {
     let mut server = mockito::Server::new_async().await;
@@ -551,6 +565,11 @@ fn rebuilt_body_maps_passthrough_to_anthropic_fields() {
         json!({"type": "function", "function": {"name": "search"}}),
     );
     passthrough.insert("user".to_string(), json!("user-123"));
+    passthrough.insert(
+        "thinking".to_string(),
+        json!({"type": "adaptive", "display": "summarized"}),
+    );
+    passthrough.insert("output_config".to_string(), json!({"effort": "xhigh"}));
 
     let body = client.build_body_with_options(
         vec![json!({"role": "user", "content": "hi"})],
@@ -574,6 +593,8 @@ fn rebuilt_body_maps_passthrough_to_anthropic_fields() {
         json!({"type": "tool", "name": "search"})
     );
     assert_eq!(body["metadata"]["user_id"], "user-123");
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["output_config"]["effort"], "xhigh");
 }
 
 #[tokio::test]
@@ -595,7 +616,9 @@ async fn raw_anthropic_body_is_sent_verbatim_for_clean_path() {
                 "cache_control": {"type": "ephemeral"}
             }]
         }],
-        "metadata": {"user_id": "user-123"}
+        "metadata": {"user_id": "user-123"},
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "output_config": {"effort": "xhigh"}
     });
     let mock = server
         .mock("POST", "/messages")
@@ -634,6 +657,59 @@ async fn raw_anthropic_body_is_sent_verbatim_for_clean_path() {
     }
     let usage = client.last_usage().expect("usage");
     assert_eq!(usage.total_tokens, 12);
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn anthropic_extra_headers_are_forwarded() {
+    let mut server = mockito::Server::new_async().await;
+    let raw = json!({
+        "model": "claude-request",
+        "max_tokens": 128,
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+    let mock = server
+        .mock("POST", "/messages")
+        .match_header("anthropic-beta", "thinking-2024-12-20")
+        .match_header("x-claude-code-session-id", "session-1")
+        .match_body(mockito::Matcher::Json(raw.clone()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 10, "output_tokens": 2}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let client = AnthropicClient::new("fallback-model", Some("test-key".to_string()))
+        .with_base_url(server.url())
+        .with_timeout(5.0);
+    client
+        .send_with_options(
+            vec![json!({"role": "user", "content": "mutated"})],
+            None,
+            LLMRequestOptions {
+                inbound_anthropic_body: Some(Arc::new(raw)),
+                anthropic_headers: Some(vec![
+                    (
+                        "anthropic-beta".to_string(),
+                        "thinking-2024-12-20".to_string(),
+                    ),
+                    (
+                        "x-claude-code-session-id".to_string(),
+                        "session-1".to_string(),
+                    ),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("accepted");
+
     mock.assert_async().await;
 }
 
@@ -726,7 +802,9 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
                 "cache_control": {"type": "ephemeral"}
             }]
         }],
-        "metadata": {"user_id": "user-123"}
+        "metadata": {"user_id": "user-123"},
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "output_config": {"effort": "xhigh"}
     });
     let client = RetryBodyRecordingAnthropicClient::new();
     let mut messages = vec![crate::core::message::Message::new(
@@ -749,6 +827,9 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
     let mut tracker = crate::guardrails::ErrorTracker::new(3, 2);
     let mut counter = 0;
     let tools = vec![crate::tools::respond::respond_spec()];
+    let mut passthrough = serde_json::Map::new();
+    passthrough.insert("thinking".to_string(), raw["thinking"].clone());
+    passthrough.insert("output_config".to_string(), raw["output_config"].clone());
 
     let result = crate::core::inference::run_inference_with_options(
         &mut messages,
@@ -766,6 +847,7 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
         LLMRequestOptions {
             inbound_anthropic_body: Some(Arc::new(raw.clone())),
             initial_openai_messages: Some(initial_wire),
+            passthrough: Some(passthrough),
             ..Default::default()
         },
     )
@@ -788,6 +870,8 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
     assert_eq!(bodies[1]["model"], "fallback-model");
     assert!(bodies[1].get("metadata").is_none());
     assert!(bodies[1].get("system").is_none());
+    assert_eq!(bodies[1]["thinking"]["type"], "adaptive");
+    assert_eq!(bodies[1]["output_config"]["effort"], "xhigh");
     assert!(!serde_json::to_string(&bodies[1])
         .expect("body json")
         .contains("cache_control"));
