@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org/)
 [![Crates.io](https://img.shields.io/crates/v/forge-guardrails.svg)](https://crates.io/crates/forge-guardrails)
-[![CI](https://github.com/whit3rabbit/forge-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/forge-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/whit3rabbit/forge-guardrails/actions/workflows/ci.yml/badge.svg)](https://github.com/whit3rabbit/forge-guardrails/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A Rust implementation of [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge). See python version for original.
