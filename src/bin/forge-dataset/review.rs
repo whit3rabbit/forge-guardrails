@@ -94,29 +94,29 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
             capture,
         });
         if batch.len() >= cli.concurrency {
-            flush_capture_batch(
-                &mut batch,
-                &reviewer,
-                &verifier,
-                &reject_path,
-                &cli.output,
-                &mut resume_state,
-                &mut progress,
-                &mut alternative_proposals,
-            )
+            flush_capture_batch(CaptureBatchRun {
+                batch: &mut batch,
+                reviewer: &reviewer,
+                verifier: &verifier,
+                reject_path: &reject_path,
+                output_path: &cli.output,
+                resume_state: &mut resume_state,
+                progress: &mut progress,
+                alternative_proposals: &mut alternative_proposals,
+            })
             .await?;
         }
     }
-    flush_capture_batch(
-        &mut batch,
-        &reviewer,
-        &verifier,
-        &reject_path,
-        &cli.output,
-        &mut resume_state,
-        &mut progress,
-        &mut alternative_proposals,
-    )
+    flush_capture_batch(CaptureBatchRun {
+        batch: &mut batch,
+        reviewer: &reviewer,
+        verifier: &verifier,
+        reject_path: &reject_path,
+        output_path: &cli.output,
+        resume_state: &mut resume_state,
+        progress: &mut progress,
+        alternative_proposals: &mut alternative_proposals,
+    })
     .await?;
 
     eprintln!(
@@ -164,6 +164,17 @@ struct CaptureJob {
     capture: Value,
 }
 
+struct CaptureBatchRun<'a> {
+    batch: &'a mut Vec<CaptureJob>,
+    reviewer: &'a JsonLlmClient,
+    verifier: &'a JsonLlmClient,
+    reject_path: &'a Path,
+    output_path: &'a str,
+    resume_state: &'a mut ResumeState,
+    progress: &'a mut ReviewProgress,
+    alternative_proposals: &'a mut Vec<AlternativeProposal>,
+}
+
 #[derive(Debug, Default)]
 struct CaptureReviewOutcome {
     writes: Vec<CaptureWrite>,
@@ -205,16 +216,17 @@ struct RejectRecord {
     raw_response: Option<Value>,
 }
 
-async fn flush_capture_batch(
-    batch: &mut Vec<CaptureJob>,
-    reviewer: &JsonLlmClient,
-    verifier: &JsonLlmClient,
-    reject_path: &Path,
-    output_path: &str,
-    resume_state: &mut ResumeState,
-    progress: &mut ReviewProgress,
-    alternative_proposals: &mut Vec<AlternativeProposal>,
-) -> Result<(), String> {
+async fn flush_capture_batch(run: CaptureBatchRun<'_>) -> Result<(), String> {
+    let CaptureBatchRun {
+        batch,
+        reviewer,
+        verifier,
+        reject_path,
+        output_path,
+        resume_state,
+        progress,
+        alternative_proposals,
+    } = run;
     if batch.is_empty() {
         return Ok(());
     }
