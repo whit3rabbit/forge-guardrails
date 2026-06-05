@@ -753,6 +753,157 @@ rel=relevance_detection, b2s=basic_2step
         self.assertEqual(status, 1)
         self.assertIn("success regressed", stderr.getvalue())
 
+    def test_compression_compare_warns_for_regression_without_compression_event(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "disabled" / "python_oracle.jsonl"
+            compressed = Path(tmp) / "standard" / "python_oracle.jsonl"
+            baseline.parent.mkdir()
+            compressed.parent.mkdir()
+            touched = {
+                "scenario": "argument_transformation",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+                "success": True,
+                "completeness": True,
+                "accuracy": True,
+                "input_tokens": 100,
+                "output_tokens": 10,
+            }
+            untouched = {
+                "scenario": "error_recovery",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+                "success": True,
+                "completeness": True,
+                "accuracy": True,
+                "input_tokens": 100,
+                "output_tokens": 10,
+            }
+            write_jsonl(baseline, [touched, untouched])
+            compressed_touched = dict(touched)
+            compressed_touched.update({"input_tokens": 80})
+            compressed_untouched = dict(untouched)
+            compressed_untouched.update({
+                "success": False,
+                "completeness": False,
+                "accuracy": None,
+                "input_tokens": 90,
+            })
+            write_jsonl(compressed, [compressed_touched, compressed_untouched])
+            write_jsonl(
+                compressed.parent / "proxy_tool_output_compression_budget_8192.jsonl",
+                [
+                    {
+                        "kind": "tool_output_compression",
+                        "before_tokens": 100,
+                        "after_tokens": 80,
+                        "request": {
+                            "scenario": "argument_transformation",
+                            "run": 1,
+                            "stream": True,
+                            "budget_tokens": 8192,
+                        },
+                    }
+                ],
+            )
+
+            old_argv = sys.argv
+            sys.argv = [
+                "compare_compression_eval.py",
+                str(baseline),
+                str(compressed),
+                "--min-input-token-savings",
+                "1",
+            ]
+            try:
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    status = compression_eval.main()
+            finally:
+                sys.argv = old_argv
+
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "Behavior gate scope: rows with compression telemetry, paired 1/2",
+            stdout.getvalue(),
+        )
+        self.assertIn(
+            "1 behavior changes occurred outside rows with compression telemetry",
+            stdout.getvalue(),
+        )
+        self.assertIn("Compression comparison passed", stdout.getvalue())
+
+    def test_compression_compare_fails_for_regression_with_compression_event(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "disabled" / "python_oracle.jsonl"
+            compressed = Path(tmp) / "standard" / "python_oracle.jsonl"
+            baseline.parent.mkdir()
+            compressed.parent.mkdir()
+            row = {
+                "scenario": "argument_transformation",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+                "success": True,
+                "completeness": True,
+                "accuracy": True,
+                "input_tokens": 100,
+                "output_tokens": 10,
+            }
+            write_jsonl(baseline, [row])
+            compressed_row = dict(row)
+            compressed_row.update({
+                "success": False,
+                "accuracy": False,
+                "input_tokens": 80,
+            })
+            write_jsonl(compressed, [compressed_row])
+            write_jsonl(
+                compressed.parent / "proxy_tool_output_compression_budget_8192.jsonl",
+                [
+                    {
+                        "kind": "tool_output_compression",
+                        "before_tokens": 100,
+                        "after_tokens": 80,
+                        "request": {
+                            "scenario": "argument_transformation",
+                            "run": 1,
+                            "stream": True,
+                            "budget_tokens": 8192,
+                        },
+                    }
+                ],
+            )
+
+            old_argv = sys.argv
+            sys.argv = [
+                "compare_compression_eval.py",
+                str(baseline),
+                str(compressed),
+                "--min-input-token-savings",
+                "1",
+            ]
+            try:
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(stdout), \
+                        contextlib.redirect_stderr(stderr):
+                    status = compression_eval.main()
+            finally:
+                sys.argv = old_argv
+
+        self.assertEqual(status, 1)
+        self.assertIn(
+            "success regressed on rows with compression telemetry",
+            stderr.getvalue(),
+        )
+
     def test_compression_compare_warns_on_unpaired_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             baseline = Path(tmp) / "baseline.jsonl"

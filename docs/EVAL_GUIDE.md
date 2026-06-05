@@ -240,11 +240,14 @@ The available compression techniques are:
   JSON-array table conversion, and dictionary compression.
 - Aggressive dictionary methods: `lzw`, `repair`, or `auto`.
 
-The comparator fails on success, completeness, or accuracy regressions unless
-`--allow-behavior-regression` is passed through direct script use. It also
-reports unpaired rows and individual behavior changes so run shape changes and
-scenario-level regressions are visible. Treat this as a live-backend check, not
-a deterministic CI gate.
+When request-level compression telemetry is available, the comparator fails on
+success, completeness, or accuracy regressions only for rows touched by a
+compression event. Behavior changes in rows without compression telemetry are
+reported as warnings because live-backend variance can affect scenarios whose
+tool outputs were not compressed. Without request-level telemetry, behavior
+regression checks fall back to all paired rows. Pass
+`--allow-behavior-regression` through direct script use only for exploratory
+analysis. Treat this as a live-backend check, not a deterministic CI gate.
 
 ## ONNX Classifier Mode Runs
 

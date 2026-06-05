@@ -24,6 +24,12 @@ class TokenTotals:
         return self.baseline - self.compressed
 
 
+@dataclass
+class TelemetryCoverage:
+    row_keys: set[tuple[str, str, str, str]]
+    scenarios: set[str]
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open() as handle:
@@ -44,6 +50,18 @@ def row_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
         str(row.get("run", "")),
         str(row.get("stream", "")),
         str(row.get("budget_tokens", "")),
+    )
+
+
+def request_key(request: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    required = ("scenario", "run", "stream", "budget_tokens")
+    if any(field not in request for field in required):
+        return None
+    return (
+        str(request.get("scenario", "")),
+        str(request.get("run", "")),
+        str(request.get("stream", "")),
+        str(request.get("budget_tokens", "")),
     )
 
 
@@ -160,18 +178,67 @@ def telemetry_savings_by_scenario(paths: list[Path]) -> dict[str, TokenTotals]:
     }
 
 
+def telemetry_coverage(paths: list[Path]) -> TelemetryCoverage:
+    row_keys: set[tuple[str, str, str, str]] = set()
+    scenarios: set[str] = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        for row in load_jsonl(path):
+            if row.get("kind") != "tool_output_compression":
+                continue
+            request = row.get("request")
+            if not isinstance(request, dict):
+                continue
+            scenario = request.get("scenario")
+            if isinstance(scenario, str) and scenario:
+                scenarios.add(scenario)
+            key = request_key(request)
+            if key is not None:
+                row_keys.add(key)
+    return TelemetryCoverage(row_keys=row_keys, scenarios=scenarios)
+
+
+def compression_touched_pairs(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    coverage: TelemetryCoverage,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], str]:
+    if coverage.row_keys:
+        touched = [
+            (baseline, compressed)
+            for baseline, compressed in pairs
+            if row_key(baseline) in coverage.row_keys
+        ]
+        if touched:
+            return touched, "rows with compression telemetry"
+    if coverage.scenarios:
+        touched = [
+            (baseline, compressed)
+            for baseline, compressed in pairs
+            if str(baseline.get("scenario", "")) in coverage.scenarios
+        ]
+        if touched:
+            return touched, "scenarios with compression telemetry"
+    return pairs, "all paired rows"
+
+
+def has_behavior_change(
+    baseline: dict[str, Any],
+    compressed: dict[str, Any],
+) -> bool:
+    return (
+        bool(baseline.get("success")) != bool(compressed.get("success"))
+        or bool(baseline.get("completeness")) != bool(compressed.get("completeness"))
+        or baseline.get("accuracy") != compressed.get("accuracy")
+    )
+
+
 def behavior_changes(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
 ) -> list[str]:
     changes: list[str] = []
     for baseline, compressed in pairs:
-        changed = (
-            bool(baseline.get("success")) != bool(compressed.get("success"))
-            or bool(baseline.get("completeness"))
-            != bool(compressed.get("completeness"))
-            or baseline.get("accuracy") != compressed.get("accuracy")
-        )
-        if not changed:
+        if not has_behavior_change(baseline, compressed):
             continue
         key = row_key(baseline)
         compressed_class = compressed.get("proxy_failure_classification")
@@ -290,6 +357,8 @@ def main() -> int:
         telemetry_paths = default_compression_jsonl_paths(args.compressed_jsonl)
     telemetry_totals = telemetry_token_totals(telemetry_paths)
     telemetry_by_scenario = telemetry_savings_by_scenario(telemetry_paths)
+    coverage = telemetry_coverage(telemetry_paths)
+    behavior_pairs, behavior_scope = compression_touched_pairs(pairs, coverage)
 
     baseline_success = count_true(baseline_paired, "success")
     compressed_success = count_true(compressed_paired, "success")
@@ -297,6 +366,14 @@ def main() -> int:
     compressed_complete = count_true(compressed_paired, "completeness")
     baseline_accuracy_false = count_accuracy_false(baseline_paired)
     compressed_accuracy_false = count_accuracy_false(compressed_paired)
+    behavior_baseline = [baseline for baseline, _ in behavior_pairs]
+    behavior_compressed = [compressed for _, compressed in behavior_pairs]
+    behavior_baseline_success = count_true(behavior_baseline, "success")
+    behavior_compressed_success = count_true(behavior_compressed, "success")
+    behavior_baseline_complete = count_true(behavior_baseline, "completeness")
+    behavior_compressed_complete = count_true(behavior_compressed, "completeness")
+    behavior_baseline_accuracy_false = count_accuracy_false(behavior_baseline)
+    behavior_compressed_accuracy_false = count_accuracy_false(behavior_compressed)
 
     failures: list[str] = []
     warnings: list[str] = []
@@ -306,22 +383,36 @@ def main() -> int:
         warnings.append(f"{baseline_unpaired} baseline rows were not paired")
     if compressed_unpaired:
         warnings.append(f"{compressed_unpaired} compressed rows were not paired")
+    behavior_keys = {row_key(baseline) for baseline, _ in behavior_pairs}
+    untouched_changes = [
+        (baseline, compressed)
+        for baseline, compressed in pairs
+        if row_key(baseline) not in behavior_keys and has_behavior_change(baseline, compressed)
+    ]
+    if untouched_changes:
+        warnings.append(
+            f"{len(untouched_changes)} behavior changes occurred outside "
+            f"{behavior_scope}; reported but not used as compression failures"
+        )
 
     if not args.allow_behavior_regression:
-        if compressed_success < baseline_success:
+        if behavior_compressed_success < behavior_baseline_success:
             failures.append(
-                f"success regressed from {baseline_success}/{len(pairs)} "
-                f"to {compressed_success}/{len(pairs)}"
+                f"success regressed on {behavior_scope} from "
+                f"{behavior_baseline_success}/{len(behavior_pairs)} to "
+                f"{behavior_compressed_success}/{len(behavior_pairs)}"
             )
-        if compressed_complete < baseline_complete:
+        if behavior_compressed_complete < behavior_baseline_complete:
             failures.append(
-                f"completeness regressed from {baseline_complete}/{len(pairs)} "
-                f"to {compressed_complete}/{len(pairs)}"
+                f"completeness regressed on {behavior_scope} from "
+                f"{behavior_baseline_complete}/{len(behavior_pairs)} to "
+                f"{behavior_compressed_complete}/{len(behavior_pairs)}"
             )
-        if compressed_accuracy_false > baseline_accuracy_false:
+        if behavior_compressed_accuracy_false > behavior_baseline_accuracy_false:
             failures.append(
-                f"accuracy_false increased from {baseline_accuracy_false} "
-                f"to {compressed_accuracy_false}"
+                f"accuracy_false increased on {behavior_scope} from "
+                f"{behavior_baseline_accuracy_false} to "
+                f"{behavior_compressed_accuracy_false}"
             )
 
     savings_totals = input_totals if input_totals.rows else telemetry_totals
@@ -355,6 +446,10 @@ def main() -> int:
     print(
         f"  Accuracy false: baseline {baseline_accuracy_false}, "
         f"compressed {compressed_accuracy_false}"
+    )
+    print(
+        f"  Behavior gate scope: {behavior_scope}, "
+        f"paired {len(behavior_pairs)}/{len(pairs)}"
     )
     print_token_line("Input tokens", input_totals)
     print_token_line("Output tokens", output_totals)
