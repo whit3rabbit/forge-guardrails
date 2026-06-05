@@ -143,6 +143,44 @@ fn safe_caps_oversized_output() {
 }
 
 #[test]
+fn safe_caps_oversized_unicode_output_on_char_boundaries() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        max_output_bytes: 13,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = "alpha😀beta😀gamma😀delta";
+
+    let result = compress_tool_output("bash", None, raw, &config, None);
+
+    assert!(result.capped);
+    assert!(result.output.contains("Tool output capped"));
+    assert!(result.output.is_char_boundary(result.output.len()));
+    assert!(!result.output.contains('\u{fffd}'));
+}
+
+#[test]
+fn aggressive_binary_suppression_skips_later_filters() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = format!("{}{}", "abc\0def", "2026-05-28T12:34:56Z ".repeat(20));
+
+    let result = compress_tool_output("bash", None, &raw, &config, None);
+
+    assert!(result.capped);
+    assert_eq!(
+        result.output,
+        format!("[Binary output suppressed: {} bytes]", raw.len())
+    );
+    assert!(result
+        .strategies
+        .contains(&"binary_suppression".to_string()));
+    assert!(!result
+        .strategies
+        .contains(&"normalize_dynamic_log_noise".to_string()));
+    assert!(!is_dictionary_compressed_output(&result.output));
+}
+
+#[test]
 fn standard_minifies_json_when_smaller() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let result = compress_tool_output("read", None, "{\n  \"a\": 1,\n  \"b\": 2\n}", &config, None);
@@ -385,6 +423,43 @@ fn opentoken_filter_fixture_cases_match_expected_outputs() {
 }
 
 #[test]
+fn compression_golden_fixture_cases_match_expected_outputs() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/compression/golden.json"))
+            .expect("valid compression golden fixture");
+    let cases = fixture["cases"].as_array().expect("fixture cases");
+
+    for case in cases {
+        let name = case["name"].as_str().expect("case name");
+        let tool = case["tool"].as_str().expect("case tool");
+        let mode = case["mode"]
+            .as_str()
+            .expect("case mode")
+            .parse::<ToolOutputCompressionMode>()
+            .unwrap_or_else(|err| panic!("{name}: invalid mode: {err}"));
+        let input = case["input"].as_str().expect("case input");
+        let expected = case["expected_output"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: missing expected_output"));
+        let expected_strategies = case["expected_strategies"]
+            .as_array()
+            .expect("case expected_strategies")
+            .iter()
+            .map(|value| value.as_str().expect("strategy string").to_string())
+            .collect::<Vec<_>>();
+
+        let config = ToolOutputCompressionConfig::from_mode(mode);
+        let result = compress_tool_output(tool, None, input, &config, None);
+
+        assert_eq!(result.output, expected, "{name}: output mismatch");
+        assert_eq!(
+            result.strategies, expected_strategies,
+            "{name}: strategy mismatch"
+        );
+    }
+}
+
+#[test]
 fn standard_filter_does_not_grow_output() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "short";
@@ -606,6 +681,101 @@ fn dedup_returns_bounded_marker_for_repeated_output() {
     assert!(!first.deduped);
     assert!(second.deduped);
     assert!(second.output.contains("Duplicate of call #"));
+}
+
+#[test]
+fn dedup_is_scoped_by_session() {
+    let state = ToolOutputCompressionState::new();
+    let raw = (0..200)
+        .map(|idx| format!("unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let first_config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("s1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let second_config = ToolOutputCompressionConfig {
+        session_id: Some("s2".to_string()),
+        ..first_config.clone()
+    };
+
+    let first = compress_tool_output("bash", None, &raw, &first_config, Some(&state));
+    let second = compress_tool_output("bash", None, &raw, &second_config, Some(&state));
+    let third = compress_tool_output("bash", None, &raw, &first_config, Some(&state));
+
+    assert!(!first.deduped);
+    assert!(!second.deduped);
+    assert!(third.deduped);
+}
+
+#[test]
+fn dedup_is_scoped_by_tool_name() {
+    let state = ToolOutputCompressionState::new();
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("s1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = (0..200)
+        .map(|idx| format!("unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let first = compress_tool_output("bash", None, &raw, &config, Some(&state));
+    let second = compress_tool_output("read", None, &raw, &config, Some(&state));
+    let third = compress_tool_output("bash", None, &raw, &config, Some(&state));
+
+    assert!(!first.deduped);
+    assert!(!second.deduped);
+    assert!(third.deduped);
+}
+
+#[test]
+fn dedup_evicts_oldest_entries_per_session() {
+    let state = ToolOutputCompressionState::new();
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("s1".to_string()),
+        max_dedup_entries_per_session: 1,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let first_raw = (0..200)
+        .map(|idx| format!("first unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let second_raw = (0..200)
+        .map(|idx| format!("second unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!compress_tool_output("bash", None, &first_raw, &config, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", None, &second_raw, &config, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", None, &first_raw, &config, Some(&state)).deduped);
+    assert!(compress_tool_output("bash", None, &first_raw, &config, Some(&state)).deduped);
+}
+
+#[test]
+fn dedup_evicts_oldest_sessions() {
+    let state = ToolOutputCompressionState::new();
+    let raw = (0..200)
+        .map(|idx| format!("unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let config_for_session = |session_id: &str| ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some(session_id.to_string()),
+        max_dedup_sessions: 1,
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    let s1 = config_for_session("s1");
+    let s2 = config_for_session("s2");
+
+    assert!(!compress_tool_output("bash", None, &raw, &s1, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", None, &raw, &s2, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", None, &raw, &s1, Some(&state)).deduped);
+    assert!(compress_tool_output("bash", None, &raw, &s1, Some(&state)).deduped);
 }
 
 fn repeated_lzw_output() -> String {

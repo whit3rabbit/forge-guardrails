@@ -207,13 +207,16 @@ cargo run --bin forge-dataset -- assemble \
   --input target/dataset/run/training.toolcall.jsonl \
   --input target/dataset/run/agent_logs/tool_call_training.jsonl \
   --out-dir target/dataset/run \
-  --combined-output training.toolcall.combined.jsonl
+  --combined-output training.toolcall.combined.jsonl \
+  --drop-conflicts
 ```
 
 `assemble` validates canonical `toolcall-verifier-training/v1` rows, accepts
 tool-call input v1 or v2, stamps private provenance on accepted rows, dedupes
 by serialized model input, preserves the first input on exact duplicates, and
-writes conflicting duplicate labels to `conflicts.jsonl`.
+writes conflicting duplicate labels to `conflicts.jsonl`. Use
+`--drop-conflicts` for upload candidates so every serialized input with
+conflicting labels is excluded from the combined output and notebook adapter.
 
 ## Provider Configuration
 
@@ -246,6 +249,10 @@ Provider selection:
   whose OpenRouter model metadata includes `structured_outputs`. Free models
   without `response_format`/`structured_outputs`, such as some Poolside routes,
   will reject strict schema routing and fall back to plain JSON prompting.
+- Reviewer and verifier prompts must judge only the serialized training input:
+  user request, workflow state, available tools, and candidate call. Capture-only
+  `tool_result`, proxy trace, run index, and provenance are not classifier
+  inputs and must not determine the label.
 
 Manual OpenAI-compatible endpoints are still possible:
 
@@ -275,6 +282,9 @@ Default one-command output files under `target/dataset/run/`:
 The proxy capture log is useful for auditing what Forge accepted. The canonical
 training input is `training.toolcall.jsonl` for proxy-only runs and
 `training.toolcall.combined.jsonl` for merged runs.
+For Hub uploads, keep the production v5 notebook pointed at a versioned addendum
+path such as `addenda/forge-eval-3k-v2/agent_training.notebook.jsonl`, not the
+older root `agent_training.notebook.jsonl`.
 
 ## Recommended Generation Size
 
@@ -290,10 +300,11 @@ this recovery pass. Generate a small reviewed addendum first:
 - Keep `synthetic_unrelated_tool` at zero. Use only real competing tools from
   multi-tool contexts or reviewed quarantine rows.
 
-For the current notebook mix, a `2k` to `4k` private addendum is the right first
-target. It is large enough to make validation/test slices visible, but small
-enough to keep public data as the backbone under the existing
-`FORGE_AGENT_HF_DATASET_WEIGHT=1` and
+The clean `forge-eval-3k-v2` recovery addendum is `724` rows after dropping
+conflicted serialized inputs. For the next expansion, a `2k` to `4k` reviewed
+private addendum is the target. That is large enough to make validation/test
+slices visible, but small enough to keep public data as the backbone under the
+existing `FORGE_AGENT_HF_DATASET_WEIGHT=1` and
 `FORGE_AGENT_HF_TRAIN_FRACTION_TARGET=0.25` settings.
 
 `--runs` repeats every selected scenario with a new `example_group_id` per

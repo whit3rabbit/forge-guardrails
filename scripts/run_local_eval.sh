@@ -537,11 +537,12 @@ prepare_classifier_binaries() {
 }
 
 start_proxy() {
-  local budget classifier_log label
+  local budget classifier_log compression_log label
   budget="$1"
   label="$2"
   CURRENT_PROXY_LOG="$OUTPUT_DIR/proxy_${label}.log"
   classifier_log="$OUTPUT_DIR/proxy_classifier_${label}.jsonl"
+  compression_log="$OUTPUT_DIR/proxy_tool_output_compression_${label}.jsonl"
 
   phase "Start proxy: $label"
   log "Budget tokens: $budget"
@@ -583,6 +584,10 @@ start_proxy() {
   proxy_args+=(--tool-output-compression "$TOOL_OUTPUT_COMPRESSION")
   proxy_args+=(--tool-output-compression-method "$TOOL_OUTPUT_COMPRESSION_METHOD")
   log "Tool-output compression: mode=$TOOL_OUTPUT_COMPRESSION, method=$TOOL_OUTPUT_COMPRESSION_METHOD"
+  if [[ "$TOOL_OUTPUT_COMPRESSION" != "disabled" ]]; then
+    env_args+=("FORGE_TOOL_OUTPUT_COMPRESSION_LOG=$compression_log")
+    log "Tool-output compression JSONL: $compression_log"
+  fi
   if classifier_feature_enabled; then
     log "Classifier JSONL: $classifier_log"
   fi
@@ -827,6 +832,7 @@ resource_summary_pattern=$OUTPUT_DIR/resource_summary_*.json
 resource_report=$OUTPUT_DIR/resource_baseline_report.txt
 tool_output_compression=$TOOL_OUTPUT_COMPRESSION
 tool_output_compression_method=$TOOL_OUTPUT_COMPRESSION_METHOD
+tool_output_compression_jsonl_pattern=$OUTPUT_DIR/proxy_tool_output_compression_*.jsonl
 EOF
   log "Metadata: $metadata"
 }

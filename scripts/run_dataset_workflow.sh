@@ -335,7 +335,8 @@ if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
     --input "$TRAINING_JSONL" \
     --input "$AGENT_LOGS_TOOL_JSONL" \
     --out-dir "$OUT_DIR" \
-    --combined-output "$COMBINED_OUTPUT"
+    --combined-output "$COMBINED_OUTPUT" \
+    --drop-conflicts
   cargo run --bin forge-dataset -- validate --input "$COMBINED_JSONL"
 fi
 

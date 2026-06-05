@@ -73,6 +73,7 @@ pub(crate) struct AssembleCli {
     pub(crate) inputs: Vec<String>,
     pub(crate) out_dir: String,
     pub(crate) combined_output: String,
+    pub(crate) drop_conflicts: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +385,7 @@ fn parse_assemble(values: &[String]) -> Result<Command, String> {
         inputs: Vec::new(),
         out_dir: DEFAULT_ASSEMBLE_OUT_DIR.to_string(),
         combined_output: DEFAULT_COMBINED_OUTPUT.to_string(),
+        drop_conflicts: false,
     };
 
     let mut index = 0;
@@ -395,6 +397,7 @@ fn parse_assemble(values: &[String]) -> Result<Command, String> {
             "--combined-output" => {
                 cli.combined_output = take_one(values, &mut index, "--combined-output")?
             }
+            "--drop-conflicts" => cli.drop_conflicts = true,
             flag if flag.starts_with("--") => return Err(format!("unknown assemble flag: {flag}")),
             value => cli.inputs.push(value.to_string()),
         }
@@ -541,7 +544,8 @@ pub(crate) fn print_help() {
          Assemble options:\n\
            --input PATH (may be repeated; positional paths are also accepted)\n\
            --out-dir DIR (default: target/dataset/assembled)\n\
-           --combined-output NAME (default: training.toolcall.combined.jsonl)\n\n\
+           --combined-output NAME (default: training.toolcall.combined.jsonl)\n\
+           --drop-conflicts (exclude all inputs with conflicting labels)\n\n\
          Validate options:\n\
            --input PATH (may be repeated; positional paths are also accepted)"
     );
@@ -725,6 +729,22 @@ mod tests {
         assert_eq!(cli.inputs, vec!["target/proxy.jsonl", "target/agent.jsonl"]);
         assert_eq!(cli.out_dir, "target/dataset/combined");
         assert_eq!(cli.combined_output, "training.toolcall.private.jsonl");
+        assert!(!cli.drop_conflicts);
+    }
+
+    #[test]
+    fn assemble_parses_drop_conflicts() {
+        let command = parse(&[
+            "assemble",
+            "--input",
+            "target/proxy.jsonl",
+            "--drop-conflicts",
+        ])
+        .expect("parse");
+        let Command::Assemble(cli) = command else {
+            panic!("expected assemble");
+        };
+        assert!(cli.drop_conflicts);
     }
 
     #[test]

@@ -18,9 +18,11 @@ pub use handler::{
     handle_chat_completions_with_scorer, handle_chat_completions_with_scorers,
     handle_chat_completions_with_scorers_and_tool_controls,
     handle_chat_completions_with_scorers_and_tool_output_compression,
-    init_proxy_classifier_log_sink_from_env, init_proxy_training_capture_sink_from_env,
-    shutdown_proxy_classifier_log_sink, shutdown_proxy_training_capture_sink, AnthropicEventStream,
-    AnthropicHandlerError, AnthropicHandlerResult, HandlerError, HandlerResult, OpenAiEventStream,
+    init_proxy_classifier_log_sink_from_env, init_proxy_tool_output_compression_log_sink_from_env,
+    init_proxy_training_capture_sink_from_env, shutdown_proxy_classifier_log_sink,
+    shutdown_proxy_tool_output_compression_log_sink, shutdown_proxy_training_capture_sink,
+    AnthropicEventStream, AnthropicHandlerError, AnthropicHandlerResult, HandlerError,
+    HandlerResult, OpenAiEventStream,
 };
 pub use proxy::{
     extract_passthrough, extract_sampling, has_respond_tool, openai_to_messages,

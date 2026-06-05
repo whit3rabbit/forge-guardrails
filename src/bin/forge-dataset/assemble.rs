@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -22,10 +22,11 @@ const CONFLICT_SCHEMA_VERSION: &str = "forge-dataset-assemble-conflict/v1";
 pub(crate) fn run(cli: AssembleCli) -> Result<(), String> {
     let summary = assemble(cli)?;
     println!(
-        "assembled rows={} duplicates={} conflicts={} quarantine={} output={}",
+        "assembled rows={} duplicates={} conflicts={} dropped_conflict_rows={} quarantine={} output={}",
         summary.accepted,
         summary.duplicates,
         summary.conflicts,
+        summary.dropped_conflict_rows,
         summary.quarantine,
         summary.combined_path.display()
     );
@@ -37,6 +38,7 @@ struct AssembleSummary {
     accepted: usize,
     duplicates: usize,
     conflicts: usize,
+    dropped_conflict_rows: usize,
     quarantine: usize,
     combined_path: PathBuf,
 }
@@ -55,6 +57,9 @@ fn assemble(cli: AssembleCli) -> Result<AssembleSummary, String> {
     for (input_index, input) in cli.inputs.iter().enumerate() {
         read_input(input, input_index, &mut state)?;
     }
+    if cli.drop_conflicts {
+        state.drop_conflicted_rows();
+    }
 
     write_jsonl(&combined_path, &state.rows)?;
     let adapter_rows = state
@@ -71,6 +76,7 @@ fn assemble(cli: AssembleCli) -> Result<AssembleSummary, String> {
         accepted: state.rows.len(),
         duplicates: state.duplicates,
         conflicts: state.conflicts.len(),
+        dropped_conflict_rows: state.dropped_conflict_rows,
         quarantine: state.quarantine.len(),
         combined_path,
     })
@@ -82,8 +88,23 @@ struct AssembleState {
     quarantine: Vec<Value>,
     conflicts: Vec<Value>,
     seen_by_input: HashMap<String, SeenRow>,
+    conflicted_input_keys: HashSet<String>,
     duplicates: usize,
+    dropped_conflict_rows: usize,
     input_stats: Vec<InputStats>,
+}
+
+impl AssembleState {
+    fn drop_conflicted_rows(&mut self) {
+        if self.conflicted_input_keys.is_empty() {
+            return;
+        }
+        let before = self.rows.len();
+        let conflicted = &self.conflicted_input_keys;
+        self.rows
+            .retain(|row| !conflicted.contains(&serialize_model_input(&row["input"])));
+        self.dropped_conflict_rows = before.saturating_sub(self.rows.len());
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +191,7 @@ fn read_input(path: &str, input_index: usize, state: &mut AssembleState) -> Resu
                 continue;
             }
             stats.conflicts += 1;
+            state.conflicted_input_keys.insert(input_key.clone());
             state
                 .conflicts
                 .push(conflict_row(&input_key, seen, path, line_number, &row));
@@ -483,6 +505,8 @@ fn write_manifest(
             "accepted": state.rows.len(),
             "duplicates": state.duplicates,
             "conflicts": state.conflicts.len(),
+            "conflict_input_groups": state.conflicted_input_keys.len(),
+            "dropped_conflict_rows": state.dropped_conflict_rows,
             "quarantine": state.quarantine.len(),
         },
         "labels": labels,
@@ -490,6 +514,7 @@ fn write_manifest(
             "private_agent_log": true,
             "public_export_allowed": false,
             "combined_output": cli.combined_output,
+            "drop_conflicts": cli.drop_conflicts,
         }
     });
     fs::write(
@@ -613,6 +638,7 @@ mod tests {
             inputs: vec![input_a.display().to_string(), input_b.display().to_string()],
             out_dir: out_dir.display().to_string(),
             combined_output: "combined.jsonl".to_string(),
+            drop_conflicts: false,
         })
         .expect("assemble");
 
@@ -632,6 +658,36 @@ mod tests {
     }
 
     #[test]
+    fn assemble_can_drop_conflicting_inputs_for_upload() {
+        let dir = temp_dir("drop-conflicts");
+        let input_a = dir.join("a.jsonl");
+        let input_b = dir.join("b.jsonl");
+        let other = {
+            let mut row = tool_row("valid");
+            row["input"]["candidate_call"]["arguments"]["product_ids"] = json!(["SKU-3", "SKU-4"]);
+            row
+        };
+        write_rows(&input_a, &[tool_row("valid"), other]);
+        write_rows(&input_b, &[tool_row("wrong_tool_semantic")]);
+
+        let out_dir = dir.join("out");
+        let summary = assemble(AssembleCli {
+            inputs: vec![input_a.display().to_string(), input_b.display().to_string()],
+            out_dir: out_dir.display().to_string(),
+            combined_output: "combined.jsonl".to_string(),
+            drop_conflicts: true,
+        })
+        .expect("assemble");
+
+        assert_eq!(summary.accepted, 1);
+        assert_eq!(summary.conflicts, 1);
+        assert_eq!(summary.dropped_conflict_rows, 1);
+        let combined = fs::read_to_string(out_dir.join("combined.jsonl")).expect("combined");
+        assert_eq!(combined.lines().count(), 1);
+        assert!(combined.contains("SKU-3"));
+    }
+
+    #[test]
     fn assemble_quarantines_public_export_rows() {
         let dir = temp_dir("privacy");
         let input = dir.join("rows.jsonl");
@@ -644,6 +700,7 @@ mod tests {
             inputs: vec![input.display().to_string()],
             out_dir: out_dir.display().to_string(),
             combined_output: "combined.jsonl".to_string(),
+            drop_conflicts: false,
         })
         .expect("assemble");
 

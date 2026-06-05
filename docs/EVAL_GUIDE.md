@@ -189,6 +189,45 @@ baseline. Do not use the skipped `LS/N` behavior to explain an `LS/P` warning.
 Run live evals manually against real backends. CI should stay deterministic
 unless a job is explicitly marked as live-backend integration.
 
+## Tool-Output Compression Eval
+
+Use `eval-release-compression` to compare disabled compression against one
+selected compression mode on the same release suite:
+
+```bash
+make eval-release-compression \
+  TOOL_OUTPUT_COMPRESSION=standard \
+  TOOL_OUTPUT_COMPRESSION_METHOD=lzw \
+  COMPRESSION_MIN_INPUT_TOKEN_SAVINGS=1
+```
+
+The target writes separate disabled and compressed runs under
+`target/local-eval/compression-<mode>-<timestamp>/` unless `OUTPUT_DIR` is set.
+It then runs `scripts/compare_compression_eval.py` against the two
+`python_oracle.jsonl` files and writes `compression_report.txt`.
+When compression is enabled, the launcher also writes
+`proxy_tool_output_compression_<budget>.jsonl` with per-tool-result strategy
+names, token estimates, byte and line counts, bounded request debug metadata,
+argument/output fingerprints, and redaction/capping/dedup flags. These events
+exclude raw tool output.
+
+Controls:
+
+- `TOOL_OUTPUT_COMPRESSION`: `safe`, `standard`, or `aggressive`; `disabled`
+  is rejected because the target needs a compressed side.
+- `TOOL_OUTPUT_COMPRESSION_METHOD`: `lzw`, `repair`, or `auto`; used only by
+  aggressive dictionary compression.
+- `COMPRESSION_MIN_INPUT_TOKEN_SAVINGS`: minimum aggregate prompt-token savings
+  required by the comparator. When paired oracle rows do not contain
+  `input_tokens`, the comparator falls back to compression telemetry estimated
+  before/after token counts and labels that line as a telemetry estimate.
+
+The comparator fails on success, completeness, or accuracy regressions unless
+`--allow-behavior-regression` is passed through direct script use. It also
+reports unpaired rows and individual behavior changes so run shape changes and
+scenario-level regressions are visible. Treat this as a live-backend check, not
+a deterministic CI gate.
+
 ## ONNX Classifier Mode Runs
 
 This section separates the user-cache classifier shortcut from the

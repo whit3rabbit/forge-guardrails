@@ -75,6 +75,7 @@ class FakeProxyClient:
         stream: bool = False,
         required_steps: list[str] | None = None,
         terminal_tools: list[str] | None = None,
+        debug: dict[str, Any] | None = None,
     ) -> Any:
         self.tool_names_by_call.append([tool.name for tool in tools or []])
         self.messages_by_call.append(list(messages))
@@ -95,6 +96,7 @@ class FailingHttpProxyClient:
         stream: bool = False,
         required_steps: list[str] | None = None,
         terminal_tools: list[str] | None = None,
+        debug: dict[str, Any] | None = None,
     ) -> Any:
         import httpx
 
@@ -134,6 +136,29 @@ class EvalOpenAIProxyTests(unittest.IsolatedAsyncioTestCase):
             recommended_sampling=False,
         )
         self.assertNotIn("temperature", disabled._body([], None, None, stream=False))
+
+    def test_stream_request_includes_usage_and_debug_metadata(self) -> None:
+        client = proxy_eval.OpenAIProxyClient(
+            "http://127.0.0.1:8081/v1",
+            "Ministral-3-8B-Instruct-2512-Q8_0",
+        )
+
+        body = client._body(
+            [],
+            None,
+            None,
+            stream=True,
+            debug={
+                "scenario": "basic_2step",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+            },
+        )
+
+        self.assertEqual(body["stream_options"], {"include_usage": True})
+        self.assertEqual(body["_forge"]["debug"]["scenario"], "basic_2step")
+        self.assertEqual(body["_forge"]["debug"]["run"], 1)
 
     def test_nonstream_parser_preserves_tool_ids_and_arguments(self) -> None:
         turn = proxy_eval._parse_openai_response({
@@ -642,6 +667,58 @@ rel=relevance_detection, b2s=basic_2step
         )
         self.assertIn("Compression comparison passed", stdout.getvalue())
 
+    def test_compression_compare_uses_telemetry_when_usage_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "disabled" / "python_oracle.jsonl"
+            compressed = Path(tmp) / "standard" / "python_oracle.jsonl"
+            baseline.parent.mkdir()
+            compressed.parent.mkdir()
+            row = {
+                "scenario": "basic_2step",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+                "success": True,
+                "completeness": True,
+                "accuracy": True,
+            }
+            write_jsonl(baseline, [row])
+            write_jsonl(compressed, [row])
+            write_jsonl(
+                compressed.parent / "proxy_tool_output_compression_budget_8192.jsonl",
+                [
+                    {
+                        "kind": "tool_output_compression",
+                        "before_tokens": 100,
+                        "after_tokens": 70,
+                        "request": {"scenario": "basic_2step", "run": 1},
+                    }
+                ],
+            )
+
+            old_argv = sys.argv
+            sys.argv = [
+                "compare_compression_eval.py",
+                str(baseline),
+                str(compressed),
+                "--min-input-token-savings",
+                "10",
+            ]
+            try:
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    status = compression_eval.main()
+            finally:
+                sys.argv = old_argv
+
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "Compression telemetry input estimate: baseline 100, compressed 70, saved 30",
+            stdout.getvalue(),
+        )
+        self.assertIn("basic_2step: telemetry saved 30", stdout.getvalue())
+        self.assertIn("Compression comparison passed", stdout.getvalue())
+
     def test_compression_compare_fails_on_behavior_regression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             baseline = Path(tmp) / "baseline.jsonl"
@@ -675,6 +752,81 @@ rel=relevance_detection, b2s=basic_2step
 
         self.assertEqual(status, 1)
         self.assertIn("success regressed", stderr.getvalue())
+
+    def test_compression_compare_warns_on_unpaired_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "baseline.jsonl"
+            compressed = Path(tmp) / "compressed.jsonl"
+            row = {
+                "scenario": "basic_2step",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+                "success": True,
+                "completeness": True,
+                "accuracy": True,
+                "input_tokens": 100,
+                "output_tokens": 10,
+            }
+            extra = dict(row)
+            extra.update({"run": 2, "input_tokens": 90})
+            write_jsonl(baseline, [row, extra])
+            compressed_row = dict(row)
+            compressed_row.update({"input_tokens": 80})
+            write_jsonl(compressed, [compressed_row])
+
+            old_argv = sys.argv
+            sys.argv = ["compare_compression_eval.py", str(baseline), str(compressed)]
+            try:
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    status = compression_eval.main()
+            finally:
+                sys.argv = old_argv
+
+        self.assertEqual(status, 0)
+        self.assertIn("1 baseline rows were not paired", stdout.getvalue())
+        self.assertIn("Compression comparison passed", stdout.getvalue())
+
+    def test_compression_compare_fails_when_min_savings_unmet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "baseline.jsonl"
+            compressed = Path(tmp) / "compressed.jsonl"
+            row = {
+                "scenario": "basic_2step",
+                "run": 1,
+                "stream": True,
+                "budget_tokens": 8192,
+                "success": True,
+                "completeness": True,
+                "accuracy": True,
+                "input_tokens": 100,
+                "output_tokens": 10,
+            }
+            write_jsonl(baseline, [row])
+            compressed_row = dict(row)
+            compressed_row.update({"input_tokens": 95})
+            write_jsonl(compressed, [compressed_row])
+
+            old_argv = sys.argv
+            sys.argv = [
+                "compare_compression_eval.py",
+                str(baseline),
+                str(compressed),
+                "--min-input-token-savings",
+                "10",
+            ]
+            try:
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(stdout), \
+                        contextlib.redirect_stderr(stderr):
+                    status = compression_eval.main()
+            finally:
+                sys.argv = old_argv
+
+        self.assertEqual(status, 1)
+        self.assertIn("input token savings 5 below required 10", stderr.getvalue())
 
 
 if __name__ == "__main__":

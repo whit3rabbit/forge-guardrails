@@ -18,7 +18,11 @@ pub(super) const FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD: &str =
     "return_raw_on_guardrail_failure";
 pub(super) const FORGE_TOOL_CALL_POLICY_FIELD: &str = "tool_call_policy";
 pub(super) const FORGE_TOOL_OUTPUT_COMPRESSION_FIELD: &str = "tool_output_compression";
+pub(super) const FORGE_DEBUG_FIELD: &str = "debug";
 const MAX_REQUEST_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_DEBUG_FIELDS: usize = 16;
+const MAX_DEBUG_KEY_CHARS: usize = 64;
+const MAX_DEBUG_STRING_CHARS: usize = 256;
 
 #[derive(Debug, Clone)]
 pub(super) struct ProxyStepContract {
@@ -32,6 +36,11 @@ pub(super) fn extract_proxy_step_contract(
     let Some(forge_obj) = forge_object(body)? else {
         return Ok(None);
     };
+    if !forge_obj.contains_key(FORGE_REQUIRED_STEPS_FIELD)
+        && !forge_obj.contains_key(FORGE_TERMINAL_TOOLS_FIELD)
+    {
+        return Ok(None);
+    }
 
     let required_steps =
         parse_forge_string_array_field(forge_obj, FORGE_REQUIRED_STEPS_FIELD)?.unwrap_or_default();
@@ -202,6 +211,39 @@ pub(super) fn extract_tool_output_compression_config(
         return Ok(default.clone());
     };
     parse_tool_output_compression_value(value, default)
+}
+
+pub(super) fn extract_forge_debug_context(body: &Value) -> Result<Option<Value>, HandlerError> {
+    let Some(forge_obj) = forge_object(body)? else {
+        return Ok(None);
+    };
+    let Some(value) = forge_obj.get(FORGE_DEBUG_FIELD) else {
+        return Ok(None);
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_DEBUG_FIELD} must be an object"
+        )));
+    };
+
+    let mut sanitized = Map::new();
+    for (key, value) in obj.iter().take(MAX_DEBUG_FIELDS) {
+        if key.is_empty() || key.chars().count() > MAX_DEBUG_KEY_CHARS {
+            continue;
+        }
+        let value = match value {
+            Value::String(s) => Value::String(s.chars().take(MAX_DEBUG_STRING_CHARS).collect()),
+            Value::Number(_) | Value::Bool(_) => value.clone(),
+            _ => continue,
+        };
+        sanitized.insert(key.clone(), value);
+    }
+
+    Ok(if sanitized.is_empty() {
+        None
+    } else {
+        Some(Value::Object(sanitized))
+    })
 }
 
 fn parse_tool_output_compression_value(

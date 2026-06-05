@@ -133,6 +133,10 @@ Fields:
 
 Invalid mode, method, or field types return `400 Bad Request`.
 
+Dedup is session-scoped and bounded. A duplicate marker is emitted only when
+the current compressed output has the same canonical tool name, output byte
+length, and output hash as a prior entry in the same `session_id`.
+
 ## Pipeline
 
 When enabled, Forge applies transforms in this order:
@@ -206,6 +210,56 @@ are redacted.
 
 Compression is not an access-control boundary. Treat compressed tool output as
 still model-visible. Do not rely on it to hide data from an upstream model.
+
+## Telemetry
+
+Set `FORGE_TOOL_OUTPUT_COMPRESSION_LOG` to write bounded JSONL events for
+compressed tool results:
+
+```bash
+FORGE_TOOL_OUTPUT_COMPRESSION_LOG=target/compression.jsonl \
+  forge-guardrails-proxy \
+    --backend-url http://localhost:8080 \
+    --tool-output-compression standard
+```
+
+Each event includes strategy names, tool family, mode, token estimates, byte
+and line counts, bounded request debug metadata when provided by the caller,
+and redaction/capping/dedup flags. It also includes non-cryptographic 64-bit
+fingerprints for the original output, compressed output, and tool arguments so
+eval regressions can be correlated without logging raw payloads. It does not
+include raw or compressed tool output. Optional bounds are
+`FORGE_TOOL_OUTPUT_COMPRESSION_LOG_QUEUE_CAPACITY` and
+`FORGE_TOOL_OUTPUT_COMPRESSION_LOG_MAX_EVENT_BYTES`.
+
+## Verification
+
+Run focused unit and proxy checks after compression changes:
+
+```bash
+cargo test tool_output --lib
+cargo test proxy::handler
+python -m unittest tests/test_eval_openai_proxy.py
+cargo fmt --all --check
+```
+
+Use the live compression eval only when a local backend and model are available:
+
+```bash
+make eval-release-compression \
+  TOOL_OUTPUT_COMPRESSION=standard \
+  TOOL_OUTPUT_COMPRESSION_METHOD=lzw \
+  COMPRESSION_MIN_INPUT_TOKEN_SAVINGS=1
+```
+
+The live eval runs the same suite once with compression disabled and once with
+the selected mode, then compares Python-oracle JSONL rows for prompt-token
+savings and behavior regressions. If the backend does not report prompt-token
+usage, the comparator falls back to the compressed run's
+`proxy_tool_output_compression_*.jsonl` estimated before/after token counts for
+the savings threshold and labels the report as a telemetry estimate. Behavior
+regression checks remain strict. The live eval should not replace
+deterministic unit and proxy tests.
 
 ## Package Notes
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import sys
 from collections import defaultdict
@@ -102,6 +103,93 @@ def token_totals(
     return TokenTotals(baseline_total, compressed_total, rows)
 
 
+def expand_jsonl_paths(values: list[str] | None) -> list[Path]:
+    paths: list[Path] = []
+    for value in values or []:
+        matches = [Path(match) for match in glob.glob(value)]
+        paths.extend(matches or [Path(value)])
+    return paths
+
+
+def default_compression_jsonl_paths(compressed_jsonl: Path) -> list[Path]:
+    return sorted(compressed_jsonl.parent.glob("proxy_tool_output_compression_*.jsonl"))
+
+
+def telemetry_token_totals(paths: list[Path]) -> TokenTotals:
+    before_total = 0
+    after_total = 0
+    events = 0
+    for path in paths:
+        if not path.exists():
+            continue
+        for row in load_jsonl(path):
+            if row.get("kind") != "tool_output_compression":
+                continue
+            before = as_int(row.get("before_tokens"))
+            after = as_int(row.get("after_tokens"))
+            if before is None or after is None:
+                continue
+            before_total += before
+            after_total += after
+            events += 1
+    return TokenTotals(before_total, after_total, events)
+
+
+def telemetry_savings_by_scenario(paths: list[Path]) -> dict[str, TokenTotals]:
+    totals: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for path in paths:
+        if not path.exists():
+            continue
+        for row in load_jsonl(path):
+            request = row.get("request")
+            if not isinstance(request, dict):
+                continue
+            scenario = request.get("scenario")
+            if not isinstance(scenario, str) or not scenario:
+                continue
+            before = as_int(row.get("before_tokens"))
+            after = as_int(row.get("after_tokens"))
+            if before is None or after is None:
+                continue
+            totals[scenario][0] += before
+            totals[scenario][1] += after
+            totals[scenario][2] += 1
+    return {
+        scenario: TokenTotals(values[0], values[1], values[2])
+        for scenario, values in totals.items()
+    }
+
+
+def behavior_changes(
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> list[str]:
+    changes: list[str] = []
+    for baseline, compressed in pairs:
+        changed = (
+            bool(baseline.get("success")) != bool(compressed.get("success"))
+            or bool(baseline.get("completeness"))
+            != bool(compressed.get("completeness"))
+            or baseline.get("accuracy") != compressed.get("accuracy")
+        )
+        if not changed:
+            continue
+        key = row_key(baseline)
+        compressed_class = compressed.get("proxy_failure_classification")
+        compressed_error = compressed.get("error_type")
+        detail = (
+            f"{key[0]} run {key[1]} stream={key[2]} budget={key[3]}: "
+            f"success {bool(baseline.get('success'))}->{bool(compressed.get('success'))}, "
+            f"complete {bool(baseline.get('completeness'))}->{bool(compressed.get('completeness'))}, "
+            f"accuracy {baseline.get('accuracy')}->{compressed.get('accuracy')}"
+        )
+        if compressed_class:
+            detail += f", compressed_class={compressed_class}"
+        if compressed_error:
+            detail += f", compressed_error={compressed_error}"
+        changes.append(detail)
+    return changes
+
+
 def count_true(rows: list[dict[str, Any]], field: str) -> int:
     return sum(1 for row in rows if bool(row.get(field)))
 
@@ -116,13 +204,14 @@ def pct(saved: int, baseline: int) -> str:
     return f"{saved / baseline * 100:.1f}%"
 
 
-def print_token_line(label: str, totals: TokenTotals) -> None:
+def print_token_line(label: str, totals: TokenTotals, row_label: str = "rows") -> None:
     if totals.rows == 0:
         print(f"  {label}: unavailable; no paired rows reported usage")
         return
     print(
         f"  {label}: baseline {totals.baseline}, compressed {totals.compressed}, "
-        f"saved {totals.saved} ({pct(totals.saved, totals.baseline)}), rows {totals.rows}"
+        f"saved {totals.saved} ({pct(totals.saved, totals.baseline)}), "
+        f"{row_label} {totals.rows}"
     )
 
 
@@ -174,6 +263,14 @@ def main() -> int:
         action="store_true",
         help="Report behavior regressions without failing",
     )
+    parser.add_argument(
+        "--compression-jsonl",
+        action="append",
+        help=(
+            "Compression telemetry JSONL path or glob. Defaults to "
+            "proxy_tool_output_compression_*.jsonl next to the compressed oracle."
+        ),
+    )
     args = parser.parse_args()
 
     baseline_rows = load_jsonl(args.baseline_jsonl)
@@ -188,6 +285,11 @@ def main() -> int:
     input_totals = token_totals(pairs, "input_tokens")
     output_totals = token_totals(pairs, "output_tokens")
     total_totals = token_totals(pairs, "input_tokens", "output_tokens")
+    telemetry_paths = expand_jsonl_paths(args.compression_jsonl)
+    if not telemetry_paths:
+        telemetry_paths = default_compression_jsonl_paths(args.compressed_jsonl)
+    telemetry_totals = telemetry_token_totals(telemetry_paths)
+    telemetry_by_scenario = telemetry_savings_by_scenario(telemetry_paths)
 
     baseline_success = count_true(baseline_paired, "success")
     compressed_success = count_true(compressed_paired, "success")
@@ -222,11 +324,16 @@ def main() -> int:
                 f"to {compressed_accuracy_false}"
             )
 
-    if input_totals.rows == 0 and args.min_input_token_savings > 0:
-        failures.append("input token savings unavailable because no paired rows reported usage")
-    elif input_totals.saved < args.min_input_token_savings:
+    savings_totals = input_totals if input_totals.rows else telemetry_totals
+    savings_source = "input token" if input_totals.rows else "compression telemetry input estimate"
+    if savings_totals.rows == 0 and args.min_input_token_savings > 0:
         failures.append(
-            f"input token savings {input_totals.saved} below required "
+            "input token savings unavailable because no paired rows reported usage "
+            "and no compression telemetry was found"
+        )
+    elif savings_totals.saved < args.min_input_token_savings:
+        failures.append(
+            f"{savings_source} savings {savings_totals.saved} below required "
             f"{args.min_input_token_savings}"
         )
 
@@ -252,13 +359,29 @@ def main() -> int:
     print_token_line("Input tokens", input_totals)
     print_token_line("Output tokens", output_totals)
     print_token_line("Total tokens", total_totals)
+    if input_totals.rows == 0:
+        print_token_line(
+            "Compression telemetry input estimate",
+            telemetry_totals,
+            row_label="events",
+        )
 
     scenario_rows = scenario_savings(pairs)
     if scenario_rows:
         print("  Per-scenario input savings:")
         for scenario, totals, baseline_s, compressed_s, pair_count in scenario_rows:
             if totals.rows == 0:
-                savings = "usage unavailable"
+                telemetry = telemetry_by_scenario.get(scenario)
+                if telemetry is not None:
+                    savings = (
+                        f"telemetry saved {telemetry.saved} "
+                        f"({pct(telemetry.saved, telemetry.baseline)}), "
+                        f"events {telemetry.rows}"
+                    )
+                elif telemetry_by_scenario:
+                    savings = "no compression telemetry events"
+                else:
+                    savings = "usage unavailable"
             else:
                 savings = (
                     f"saved {totals.saved} ({pct(totals.saved, totals.baseline)})"
@@ -268,6 +391,14 @@ def main() -> int:
                 f"success {baseline_s}/{pair_count} -> "
                 f"{compressed_s}/{pair_count}"
             )
+
+    changed_rows = behavior_changes(pairs)
+    if changed_rows:
+        print("  Behavior changes:")
+        for detail in changed_rows[:20]:
+            print(f"    {detail}")
+        if len(changed_rows) > 20:
+            print(f"    ... {len(changed_rows) - 20} more")
 
     if warnings:
         print("\nWarnings:")

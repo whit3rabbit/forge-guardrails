@@ -9,7 +9,8 @@ use crate::core::tool_spec::ToolSpec;
 use crate::{
     ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore, ToolCallClass,
     ToolCallPolicyConfig, ToolCallScore, ToolCallScorer, ToolOutputCompressionConfig,
-    ToolOutputCompressionMode, ToolOutputCompressionState,
+    ToolOutputCompressionMethod, ToolOutputCompressionMode, ToolOutputCompressionResult,
+    ToolOutputCompressionState,
 };
 use anyllm_translate::anthropic::MessageCreateRequest;
 use indexmap::IndexMap;
@@ -141,6 +142,100 @@ async fn classifier_log_sink_drops_oversized_events() {
     let text = std::fs::read_to_string(&path).expect("jsonl");
     assert!(text.is_empty());
     std::fs::remove_file(path).ok();
+}
+
+#[tokio::test]
+async fn tool_output_compression_log_sink_writes_strategy_events() {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "forge-proxy-tool-output-compression-{}-{}.jsonl",
+        std::process::id(),
+        super::classifier_log::unix_ms()
+    ));
+    std::fs::remove_file(&path).ok();
+    let event = json!({
+        "kind": "tool_output_compression",
+        "tool_call_id": "call_search",
+        "strategies": ["strip_ansi", "redact_secrets"],
+        "input_bytes": 64,
+        "output_bytes": 20
+    });
+
+    let sink = super::compression::ToolOutputCompressionLogSink::spawn(
+        super::compression::ToolOutputCompressionLogConfig::new(path.clone())
+            .with_queue_capacity(4),
+    )
+    .expect("sink");
+    sink.emit(event.clone());
+    sink.flush().await.expect("flush");
+
+    let text = std::fs::read_to_string(&path).expect("jsonl");
+    let rows = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("json row"))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, vec![event]);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
+    let raw_output = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz";
+    let mut args = IndexMap::new();
+    args.insert("command".to_string(), json!("cargo test"));
+    let request_debug = json!({
+        "scenario": "basic_2step",
+        "run": 1,
+        "stream": true,
+        "budget_tokens": 8192
+    });
+    let result = ToolOutputCompressionResult {
+        output: "[REDACTED_SECRET]".to_string(),
+        before_tokens: 12,
+        after_tokens: 4,
+        saved_tokens: 8,
+        saved_pct: 66,
+        canonical_tool: "bash".to_string(),
+        family: "cargo".to_string(),
+        mode: ToolOutputCompressionMode::Standard,
+        redacted: true,
+        capped: false,
+        deduped: false,
+        strategies: vec!["strip_ansi".to_string(), "redact_secrets".to_string()],
+    };
+
+    let event = super::compression::compression_event(
+        Some("call_shell"),
+        "run_command",
+        2,
+        1,
+        Some(&args),
+        raw_output,
+        &result,
+        Some(&request_debug),
+    );
+
+    assert_eq!(event["kind"], "tool_output_compression");
+    assert_eq!(event["event_version"], 2);
+    assert_eq!(event["tool_call_id"], "call_shell");
+    assert_eq!(event["tool_name"], "run_command");
+    assert_eq!(event["message_index"], 2);
+    assert_eq!(event["tool_result_index"], 1);
+    assert_eq!(event["canonical_tool"], "bash");
+    assert_eq!(event["family"], "cargo");
+    assert_eq!(event["mode"], "standard");
+    assert_eq!(event["strategies"], json!(["strip_ansi", "redact_secrets"]));
+    assert_eq!(event["input_bytes"], raw_output.len());
+    assert_eq!(event["input_chars"], raw_output.chars().count());
+    assert_eq!(event["input_lines"], 1);
+    assert!(event["input_fingerprint64"].as_str().is_some());
+    assert_eq!(event["output_bytes"], 17);
+    assert!(event["output_fingerprint64"].as_str().is_some());
+    assert!(event["args_fingerprint64"].as_str().is_some());
+    assert_eq!(event["request"], request_debug);
+    let wire = serde_json::to_string(&event).expect("event json");
+    assert!(!wire.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    assert!(!wire.contains("[REDACTED_SECRET]"));
 }
 
 #[tokio::test]
@@ -2286,6 +2381,113 @@ async fn tool_output_compression_request_method_overrides_process_default() {
     assert!(!content.starts_with("[Forge LZW Dictionary]"));
 }
 
+#[test]
+fn tool_output_compression_object_inherits_process_defaults() {
+    let default = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        method: ToolOutputCompressionMethod::Repair,
+        redact_secrets: false,
+        enable_dedup: false,
+        session_id: Some("process-session".to_string()),
+        max_output_bytes: 4096,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let body = json!({
+        "_forge": {
+            "tool_output_compression": {
+                "mode": "safe"
+            }
+        }
+    });
+
+    let config =
+        extract_tool_output_compression_config(&body, &default).expect("compression config");
+
+    assert_eq!(config.mode, ToolOutputCompressionMode::Safe);
+    assert_eq!(config.method, ToolOutputCompressionMethod::Repair);
+    assert!(!config.redact_secrets);
+    assert!(!config.enable_dedup);
+    assert_eq!(config.session_id.as_deref(), Some("process-session"));
+    assert_eq!(config.max_output_bytes, 4096);
+}
+
+#[test]
+fn tool_output_compression_object_overrides_process_defaults() {
+    let default = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        method: ToolOutputCompressionMethod::Repair,
+        redact_secrets: false,
+        enable_dedup: false,
+        session_id: Some("process-session".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let body = json!({
+        "_forge": {
+            "tool_output_compression": {
+                "mode": "aggressive",
+                "method": "auto",
+                "redact_secrets": true,
+                "dedup": true,
+                "session_id": "request-session"
+            }
+        }
+    });
+
+    let config =
+        extract_tool_output_compression_config(&body, &default).expect("compression config");
+
+    assert_eq!(config.mode, ToolOutputCompressionMode::Aggressive);
+    assert_eq!(config.method, ToolOutputCompressionMethod::Auto);
+    assert!(config.redact_secrets);
+    assert!(config.enable_dedup);
+    assert_eq!(config.session_id.as_deref(), Some("request-session"));
+}
+
+#[test]
+fn forge_debug_context_keeps_only_bounded_scalar_fields() {
+    let long = "x".repeat(300);
+    let long_key = "k".repeat(65);
+    let mut body = json!({
+        "_forge": {
+            "debug": {
+                "scenario": "basic_2step",
+                "run": 3,
+                "stream": true,
+                "long": long,
+                "nested": {"raw": "ignored"},
+                "list": ["ignored"]
+            }
+        }
+    });
+    body["_forge"]["debug"][long_key] = json!("ignored");
+
+    let context = extract_forge_debug_context(&body)
+        .expect("debug context")
+        .expect("debug context present");
+
+    assert_eq!(context["scenario"], "basic_2step");
+    assert_eq!(context["run"], 3);
+    assert_eq!(context["stream"], true);
+    assert_eq!(context["long"].as_str().expect("long").len(), 256);
+    assert!(context.get("nested").is_none());
+    assert!(context.get("list").is_none());
+    assert_eq!(context.as_object().expect("object").len(), 4);
+}
+
+#[test]
+fn forge_debug_context_does_not_create_step_contract() {
+    let body = json!({
+        "_forge": {
+            "debug": {"scenario": "basic_2step"},
+            "tool_output_compression": "standard"
+        }
+    });
+
+    let contract = extract_proxy_step_contract(&body).expect("step contract");
+
+    assert!(contract.is_none());
+}
+
 #[tokio::test]
 async fn tool_output_compression_request_rejects_invalid_method() {
     let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
@@ -2569,6 +2771,62 @@ async fn anthropic_tool_output_compression_patches_raw_body_and_preserves_cache_
         _ => panic!("expected Response"),
     }
     mock.assert_async().await;
+}
+
+#[test]
+fn anthropic_tool_output_compression_patches_single_text_block_content() {
+    let mut body = json!({
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_search",
+                "content": [{
+                    "type": "text",
+                    "text": "old output"
+                }]
+            }]
+        }]
+    });
+    let updates = [super::compression::ToolOutputCompressionUpdate {
+        tool_call_id: Some("toolu_search".to_string()),
+        output: "new output".to_string(),
+    }];
+
+    assert!(patch_anthropic_tool_results(&mut body, &updates));
+    assert_eq!(
+        body["messages"][0]["content"][0]["content"][0]["text"],
+        "new output"
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0]["content"][0]["type"],
+        "text"
+    );
+}
+
+#[test]
+fn anthropic_tool_output_compression_fails_closed_for_multi_block_content() {
+    let mut body = json!({
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_search",
+                "content": [
+                    {"type": "text", "text": "old output"},
+                    {"type": "text", "text": "second block"}
+                ]
+            }]
+        }]
+    });
+    let original = body.clone();
+    let updates = [super::compression::ToolOutputCompressionUpdate {
+        tool_call_id: Some("toolu_search".to_string()),
+        output: "new output".to_string(),
+    }];
+
+    assert!(!patch_anthropic_tool_results(&mut body, &updates));
+    assert_eq!(body, original);
 }
 
 #[tokio::test]

@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "name": "safe_redacts_secret",
+      "mode": "safe",
+      "tool": "bash",
+      "input": "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\n",
+      "expected_output": "OPENAI_[REDACTED_SECRET]\n",
+      "expected_strategies": ["redact_secrets"]
+    },
+    {
+      "name": "standard_minifies_json",
+      "mode": "standard",
+      "tool": "read",
+      "input": "{\n  \"a\": 1,\n  \"b\": 2\n}",
+      "expected_output": "{\"a\":1,\"b\":2}",
+      "expected_strategies": ["json_minify"]
+    },
+    {
+      "name": "aggressive_normalizes_dynamic_log_noise",
+      "mode": "aggressive",
+      "tool": "bash",
+      "input": "2026-05-28T12:34:56Z completed artifact 0123456789abcdef0123456789abcdef\n",
+      "expected_output": "[timestamp] completed artifact [hash]\n",
+      "expected_strategies": ["normalize_dynamic_log_noise"]
+    }
+  ]
+}

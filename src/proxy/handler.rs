@@ -45,7 +45,12 @@ pub use anthropic::{
     handle_anthropic_messages_with_scorers_and_tool_output_compression,
     handle_anthropic_messages_with_scorers_tool_controls_and_headers,
 };
-use compression::{compress_proxy_tool_results, patch_anthropic_tool_results};
+use compression::{
+    compress_proxy_tool_results,
+    init_proxy_tool_output_compression_log_sink_from_env as init_compression_log_sink_from_env,
+    patch_anthropic_tool_results,
+    shutdown_proxy_tool_output_compression_log_sink as shutdown_compression_log_sink,
+};
 use nudge::{
     emit_proxy_classifier_nudge_or_error, emit_proxy_final_response_tool_nudge_or_error,
     emit_proxy_step_nudge_or_error, emit_proxy_tool_policy_nudge_or_error,
@@ -56,8 +61,8 @@ use prior_tool_results::record_completed_proxy_tool_results;
 #[cfg(test)]
 use request_contract::sanitize_guarded_anthropic_body;
 use request_contract::{
-    add_proxy_respond_tool_if_needed, extract_forge_bool_field, extract_proxy_step_contract,
-    extract_stream_include_usage, extract_tool_call_policy_config,
+    add_proxy_respond_tool_if_needed, extract_forge_bool_field, extract_forge_debug_context,
+    extract_proxy_step_contract, extract_stream_include_usage, extract_tool_call_policy_config,
     extract_tool_output_compression_config, sanitize_guarded_request_options,
     strip_forge_extension_from_body, validate_proxy_step_contract, FORGE_EXTENSION_FIELD,
     FORGE_REQUIRED_STEPS_FIELD, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
@@ -78,6 +83,11 @@ pub fn init_proxy_training_capture_sink_from_env() {
     training_capture::init_proxy_training_capture_sink_from_env();
 }
 
+/// Initialize the optional bounded proxy tool-output compression JSONL sink from environment.
+pub fn init_proxy_tool_output_compression_log_sink_from_env() {
+    init_compression_log_sink_from_env();
+}
+
 /// Shut down the optional bounded proxy classifier JSONL sink.
 pub fn shutdown_proxy_classifier_log_sink() {
     classifier_log::shutdown_proxy_classifier_log_sink();
@@ -86,6 +96,11 @@ pub fn shutdown_proxy_classifier_log_sink() {
 /// Shut down the optional bounded private training-capture JSONL sink.
 pub fn shutdown_proxy_training_capture_sink() {
     training_capture::shutdown_proxy_training_capture_sink();
+}
+
+/// Shut down the optional bounded proxy tool-output compression JSONL sink.
+pub fn shutdown_proxy_tool_output_compression_log_sink() {
+    shutdown_compression_log_sink();
 }
 
 /// Stream of OpenAI chat completion chunk objects.
@@ -376,6 +391,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         extract_forge_bool_field(body, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD)?;
     let tool_output_compression =
         extract_tool_output_compression_config(body, &default_tool_output_compression)?;
+    let forge_debug_context = extract_forge_debug_context(body)?;
     let tool_call_policy = extract_tool_call_policy_config(body, &default_tool_call_policy)?;
 
     let sampling = extract_sampling(body);
@@ -400,6 +416,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         &mut internal_msgs,
         &tool_output_compression,
         tool_output_state.as_deref(),
+        forge_debug_context.as_ref(),
     );
     if !tool_output_updates.is_empty() {
         if let Some(body) = request_options.inbound_anthropic_body.take() {

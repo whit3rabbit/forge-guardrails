@@ -118,7 +118,8 @@ make eval-smoke-final-response
 Verifier model training:
 
 - The production notebook is
-  `notebook/toolcall_verifier_training_production_colab_v4.ipynb`.
+  `notebook/toolcall_verifier_training_production_colab_v5.ipynb`.
+  `notebook/toolcall_verifier_training_production_colab_v4.ipynb` is legacy.
 - The notebook is Google Colab-first. Do not use local notebook execution as a
   test or release gate. For local edits, validate only JSON/static syntax and
   Rust runtime compatibility, then run the notebook in Colab.
@@ -231,9 +232,12 @@ cargo run --bin forge-dataset -- validate \
 
 - `training.toolcall.jsonl` is the canonical proxy-only notebook input.
   `training.toolcall.combined.jsonl` is the canonical merged input when
-  `--include-agent-logs` is used. The Colab notebook's private-HF default
-  filename is `agent_training.notebook.jsonl`, so upload the generated adapter
-  under that name or set `FORGE_AGENT_HF_DATASET_FILE`.
+  `--include-agent-logs` is used. The production v5 Colab notebook's private-HF
+  default file is
+  `addenda/forge-eval-3k-v2/agent_training.notebook.jsonl`; upload addenda under
+  a versioned path and set `FORGE_AGENT_HF_DATASET_FILE` to that path instead of
+  overwriting the root dataset. When loading an uploaded commit or unmerged
+  dataset PR, pin `FORGE_AGENT_HF_DATASET_REVISION` to that commit SHA.
 - Keep generated dataset outputs under `target/dataset/` private and do not
   commit them. Use `docs/DATASET_WORKFLOW.md` for the full contract, including
   capture-only mode, provider overrides, rejects, and validation details.

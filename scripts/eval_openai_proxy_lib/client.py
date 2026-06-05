@@ -38,6 +38,7 @@ class OpenAIProxyClient:
         stream: bool = False,
         required_steps: list[str] | None = None,
         terminal_tools: list[str] | None = None,
+        debug: dict[str, Any] | None = None,
     ) -> ProxyTurn:
         """Send a chat completions request to the proxy server."""
         import httpx
@@ -49,6 +50,7 @@ class OpenAIProxyClient:
             stream=stream,
             required_steps=required_steps,
             terminal_tools=terminal_tools,
+            debug=debug,
         )
         if stream:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -70,18 +72,25 @@ class OpenAIProxyClient:
         stream: bool,
         required_steps: list[str] | None = None,
         terminal_tools: list[str] | None = None,
+        debug: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": stream,
         }
+        if stream:
+            body["stream_options"] = {"include_usage": True}
         if tools:
             body["tools"] = [format_tool(tool) for tool in tools]
-        if required_steps:
-            forge: dict[str, Any] = {"required_steps": required_steps}
-            if terminal_tools:
-                forge["terminal_tools"] = terminal_tools
+        if required_steps or debug:
+            forge: dict[str, Any] = {}
+            if required_steps:
+                forge["required_steps"] = required_steps
+                if terminal_tools:
+                    forge["terminal_tools"] = terminal_tools
+            if debug:
+                forge["debug"] = debug
             body["_forge"] = forge
         body.update(self.sampling_defaults)
         if sampling:

@@ -2,7 +2,7 @@
 
 This document defines the training-data, artifact, and eval telemetry schemas for Forge semantic verifier models. It covers the tool-call verifier and the final-response verifier. These schemas are Rust-facing contracts; notebooks or training jobs should emit data that loads into the Rust types without lossy conversion.
 
-The production training notebook is [`notebook/toolcall_verifier_training_production_colab_v4.ipynb`](../notebook/toolcall_verifier_training_production_colab_v4.ipynb). It is a Google Colab notebook. Do not treat local notebook execution as a verification gate. Validate local edits with JSON/static syntax checks, then run the notebook in Colab. `UPLOAD_TO_HUB`, `ENABLE_FORGE_AUGMENTATION`, and `ENABLE_FINAL_RESPONSE_VERIFIER` are intentionally enabled by default; artifacts are private by default and must carry shadow-first provenance until eval replay promotes them.
+The production training notebook is [`notebook/toolcall_verifier_training_production_colab_v5.ipynb`](../notebook/toolcall_verifier_training_production_colab_v5.ipynb). `toolcall_verifier_training_production_colab_v4.ipynb` is legacy. The v5 notebook is Google Colab-first; do not treat local notebook execution as a verification gate. Validate local edits with JSON/static syntax checks, then run the notebook in Colab. `UPLOAD_TO_HUB`, `ENABLE_FORGE_AUGMENTATION`, and `ENABLE_FINAL_RESPONSE_VERIFIER` are intentionally enabled by default; artifacts are private by default and must carry shadow-first provenance until eval replay promotes them.
 
 ## Versioning Rules
 

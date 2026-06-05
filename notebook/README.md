@@ -2,7 +2,10 @@
 
 This directory contains the Colab-first verifier training notebook:
 
-- `toolcall_verifier_training_production_colab_v4.ipynb`
+- `toolcall_verifier_training_production_colab_v5.ipynb`
+
+`toolcall_verifier_training_production_colab_v4.ipynb` is legacy. Keep new
+training changes on v5 unless you are intentionally reproducing an older run.
 
 The notebook trains the Forge tool-call verifier and, by default, the separate
 final-response verifier. It is intended to run in Google Colab. Local notebook
@@ -11,22 +14,60 @@ then run the notebook in Colab for training and artifact export.
 
 ## Current Private Tool-Call Dataset
 
-The production notebook now defaults to the private Hugging Face dataset:
+The production v5 notebook defaults to this private Hugging Face dataset repo
+and file:
 
 ```text
 cowWhySo/forge-toolcall-verifier-openrouter-2650-v1
+addenda/forge-eval-3k-v2/agent_training.notebook.jsonl
+revision: 01eedcb861324df5fe5b6584ed4f12995b103d0f
 ```
 
 Uploaded commit:
 
 ```text
+https://huggingface.co/datasets/cowWhySo/forge-toolcall-verifier-openrouter-2650-v1/commit/01eedcb861324df5fe5b6584ed4f12995b103d0f
+```
+
+The addendum was generated with `forge-dataset` from local Forge eval proxy
+captures, reviewed with OpenRouter `openrouter/owl-alpha` and MiniMax
+`MiniMax-M2.7`, assembled with `--drop-conflicts`, and uploaded under a
+versioned path so the older root dataset remains reproducible.
+
+Addendum summary:
+
+```text
+source: target/dataset/forge-eval-3k/upload-clean
+canonical rows: 724
+notebook adapter rows: 724
+duplicates removed: 2345
+conflicts recorded: 33
+conflicted inputs dropped: 16
+quarantine: 0
+```
+
+Addendum labels:
+
+```text
+valid: 413
+tool_not_needed: 241
+wrong_arguments_semantic: 38
+wrong_tool_semantic: 32
+```
+
+The older root file remains available:
+
+```text
+agent_training.notebook.jsonl
 https://huggingface.co/datasets/cowWhySo/forge-toolcall-verifier-openrouter-2650-v1/commit/95d668edb81130257b1d06f6175eb944aa8f3957
 ```
 
-This dataset was generated with `notebook/generatetd` from sanitized local Codex
-agent logs, then reviewed and verified with OpenRouter `openrouter/owl-alpha`.
-It is private agent-derived data and must stay private unless a separate privacy
-review explicitly approves public export.
+Older root dataset details:
+
+The root file was generated with `notebook/generatetd` from sanitized local
+Codex agent logs, then reviewed and verified with OpenRouter
+`openrouter/owl-alpha`. It is private agent-derived data and must stay private
+unless a separate privacy review explicitly approves public export.
 
 Generation summary:
 
@@ -79,19 +120,23 @@ The notebook loads the dataset from Hugging Face with these controls:
 ```python
 ENABLE_FORGE_AGENT_HF_DATASET = True
 FORGE_AGENT_HF_DATASET_REPO = "cowWhySo/forge-toolcall-verifier-openrouter-2650-v1"
-FORGE_AGENT_HF_DATASET_FILE = "agent_training.notebook.jsonl"
-FORGE_AGENT_HF_DATASET_WEIGHT = 2
+FORGE_AGENT_HF_DATASET_FILE = "addenda/forge-eval-3k-v2/agent_training.notebook.jsonl"
+FORGE_AGENT_HF_DATASET_REVISION = "01eedcb861324df5fe5b6584ed4f12995b103d0f"
+FORGE_AGENT_HF_DATASET_WEIGHT = 1
 PREFER_FORGE_AGENT_HF_DATASET = True
 ```
 
 The loader uses `datasets.load_dataset(..., token=True)`, so Colab must have an
 `HF_TOKEN` with access to the private dataset. The notebook keeps local agent
 log ingestion opt-in via `INCLUDE_PRIVATE_AGENT_LOGS`; the private Hub dataset
-is loaded through its own path.
+is loaded through its own path. `FORGE_AGENT_HF_DATASET_REVISION` pins the
+uploaded addendum commit; clear it only when you intentionally want Colab to
+follow the dataset repo's default revision.
 
-`FORGE_AGENT_HF_DATASET_WEIGHT = 2` duplicates private Hub tool-call rows only
-inside the training split, with stable weighted IDs and the original
-`example_group_id`. Calibration, validation, and test splits stay unweighted.
+`FORGE_AGENT_HF_DATASET_WEIGHT = 1` keeps private Hub tool-call rows unweighted.
+If this is raised above `1`, only training rows are duplicated with stable
+weighted IDs and the original `example_group_id`; calibration, validation, and
+test splits stay unweighted.
 
 `PREFER_FORGE_AGENT_HF_DATASET = True` preserves those private Hub rows before
 sampling other sources during per-label class caps.

@@ -19,6 +19,7 @@ struct DedupState {
 #[derive(Debug, Clone)]
 struct DedupRecord {
     hash: u64,
+    output_len: usize,
     tool_name: String,
     call_index: u64,
 }
@@ -45,8 +46,13 @@ impl ToolOutputCompressionState {
         let hash = hash_output(output);
         let mut state = self.inner.lock().expect("tool output dedup lock");
 
+        let output_len = output.len();
         if let Some(records) = state.sessions.get(session_id) {
-            if let Some(record) = records.iter().find(|record| record.hash == hash) {
+            if let Some(record) = records.iter().find(|record| {
+                record.tool_name == tool_name
+                    && record.hash == hash
+                    && record.output_len == output_len
+            }) {
                 return Some(format!(
                     "[Duplicate of call #{} ({}) - see earlier result]",
                     record.call_index, record.tool_name
@@ -69,6 +75,7 @@ impl ToolOutputCompressionState {
             .expect("session inserted above");
         records.push_back(DedupRecord {
             hash,
+            output_len,
             tool_name: tool_name.to_string(),
             call_index,
         });

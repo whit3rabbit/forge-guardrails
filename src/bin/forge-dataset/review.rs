@@ -451,24 +451,40 @@ fn apply_capture_outcome(
     Ok(())
 }
 
+fn training_input_for_review(capture: &Value, candidate_call: &Value) -> Value {
+    json!({
+        "schema_version": TRAINING_INPUT_SCHEMA_VERSION,
+        "user_request": capture.get("user_request").cloned().unwrap_or(Value::Null),
+        "workflow_state": capture.get("workflow_state").cloned().unwrap_or(Value::Null),
+        "available_tools": capture.get("available_tools").cloned().unwrap_or_else(|| json!([])),
+        "candidate_call": candidate_call,
+    })
+}
+
 async fn review_capture(client: &JsonLlmClient, capture: &Value) -> Result<ReviewDecision, String> {
     let system = concat!(
         "You label Forge tool-call verifier examples. Return only JSON. ",
         "Allowed labels are valid, wrong_tool_semantic, wrong_arguments_semantic, ",
         "tool_not_needed, needs_clarification. Do not use classifier telemetry as truth. ",
-        "Judge the candidate call in the current workflow state, not from a generic ideal plan. ",
-        "A successful tool result is evidence that the call is plausible. Do not mark a tool wrong ",
-        "just because another read/inspect tool could also have been used. Terminal tools indicate ",
+        "Judge only the serialized training input: user request, workflow state, available tools, ",
+        "and candidate call. Do not rely on tool_result, provenance, run index, or captured outcome; ",
+        "those fields are not available to the classifier. Do not mark a tool wrong just because ",
+        "another read/inspect tool could also have been used. Terminal tools indicate ",
         "how to answer after tool work is done; they do not forbid a still-useful non-terminal tool. ",
         "If the same non-terminal tool has already completed and there are no pending steps, another ",
         "call to that tool is usually tool_not_needed, not valid. For shopping compare workflows, ",
         "search_products followed by compare_products with product IDs from the search result is valid; ",
         "do not invent a required get_product step unless the user specifically asked for product details."
     );
+    let candidate_call = capture
+        .get("candidate_call")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let review_input = training_input_for_review(capture, &candidate_call);
     let user = format!(
-        "Review this captured candidate call and return JSON with \
+        "Review this serialized training input and return JSON with \
          label, confidence, rationale, and optional corrected_candidate_call.\n\n{}",
-        serde_json::to_string_pretty(capture).map_err(|err| err.to_string())?
+        serde_json::to_string_pretty(&review_input).map_err(|err| err.to_string())?
     );
     parse_reviewer_decision(
         client
@@ -488,8 +504,9 @@ async fn verify_label(
         "You verify a proposed Forge tool-call verifier label. ",
         "Return only JSON with accepted boolean and rationale string. ",
         "Do not invent a different label. Verify the proposed label against the actual ",
-        "user request, workflow state, available tools, candidate call, and tool result. ",
-        "Reject labels that over-penalize normal multi-step tool use. A successful ",
+        "serialized training input: user request, workflow state, available tools, and candidate call. ",
+        "Do not rely on tool_result, provenance, run index, or captured outcome; those fields are not ",
+        "available to the classifier. Reject labels that over-penalize normal multi-step tool use. A successful ",
         "search_products then compare_products sequence is valid for a comparison request. ",
         "If a candidate repeats an already completed non-terminal tool with no pending work, ",
         "the valid label should be rejected."
@@ -498,13 +515,7 @@ async fn verify_label(
         "task": "Accept or reject the proposed label. Do not relabel.",
         "proposed_label": label,
         "reviewer_rationale": rationale,
-        "capture_context": {
-            "user_request": capture.get("user_request").cloned().unwrap_or(Value::Null),
-            "workflow_state": capture.get("workflow_state").cloned().unwrap_or(Value::Null),
-            "available_tools": capture.get("available_tools").cloned().unwrap_or(Value::Null),
-            "candidate_call": candidate_call,
-            "tool_result": capture.get("tool_result").cloned().unwrap_or(Value::Null),
-        }
+        "serialized_training_input": training_input_for_review(capture, candidate_call)
     });
     let raw = client
         .complete_json(
@@ -525,19 +536,14 @@ async fn review_generated_alternative(
         "Allowed labels are valid, wrong_tool_semantic, wrong_arguments_semantic, ",
         "tool_not_needed, needs_clarification. Generated wrong-tool rows must use ",
         "a real available competing tool, be schema-valid for that wrong tool, and ",
-        "be semantically wrong for the request. If the proposed label is not clearly ",
-        "correct, return the better label or needs_clarification."
+        "be semantically wrong for the serialized training input. Judge only the user request, ",
+        "workflow state, available tools, and generated candidate call. If the proposed label is ",
+        "not clearly correct, return the better label or needs_clarification."
     );
     let user = json!({
         "task": "Review this generated non-valid training alternative.",
         "proposed_label": proposal.label,
-        "capture_context": {
-            "user_request": proposal.capture.get("user_request").cloned().unwrap_or(Value::Null),
-            "workflow_state": proposal.capture.get("workflow_state").cloned().unwrap_or(Value::Null),
-            "available_tools": proposal.capture.get("available_tools").cloned().unwrap_or(Value::Null),
-            "original_candidate_call": proposal.capture.get("candidate_call").cloned().unwrap_or(Value::Null),
-            "generated_candidate_call": proposal.candidate_call,
-        }
+        "serialized_training_input": training_input_for_review(&proposal.capture, &proposal.candidate_call)
     });
     parse_reviewer_decision(
         client
@@ -1836,6 +1842,18 @@ mod tests {
             "tool_result": {"status": "ok", "content": {}},
             "proxy_trace": {"domain": "shopping", "scenario": "compare_headphones"}
         })
+    }
+
+    #[test]
+    fn review_training_input_omits_capture_only_fields() {
+        let capture = capture_row();
+        let input = training_input_for_review(&capture, &capture["candidate_call"]);
+
+        assert_eq!(input["schema_version"], TRAINING_INPUT_SCHEMA_VERSION);
+        assert!(input.get("tool_result").is_none());
+        assert!(input.get("proxy_trace").is_none());
+        assert!(input.get("metadata").is_none());
+        assert_eq!(input["candidate_call"], capture["candidate_call"]);
     }
 
     #[test]

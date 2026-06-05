@@ -102,6 +102,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 stream=args.stream,
                 budget_tokens=args.budget_tokens,
                 ablation=ablation,
+                run_idx=run_idx,
                 verbose=args.verbose,
             )
             row = _result_row(

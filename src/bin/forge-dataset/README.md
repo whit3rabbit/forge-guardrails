@@ -168,8 +168,13 @@ cargo run --bin forge-dataset -- assemble \
   --input target/dataset/run/training.toolcall.jsonl \
   --input target/dataset/run/agent_logs/tool_call_training.jsonl \
   --out-dir target/dataset/run \
-  --combined-output training.toolcall.combined.jsonl
+  --combined-output training.toolcall.combined.jsonl \
+  --drop-conflicts
 ```
+
+Use `--drop-conflicts` for upload candidates. It excludes every serialized
+model input that received conflicting labels, rather than keeping the first
+label and only recording the later conflict.
 
 Validate outputs:
 
@@ -233,6 +238,9 @@ prompting plus local validation.
 - Same tool with wrong semantic values is `wrong_arguments_semantic`.
 - Wrong competing tools must come from the same available tool set and be
   schema-valid for the wrong tool.
+- Reviewer and verifier prompts judge only the serialized training input:
+  user request, workflow state, available tools, and candidate call. They must
+  not rely on capture-only `tool_result` or provenance fields.
 - Synthetic wrong-tool rows from unrelated fake tools stay disabled.
 - Keep captured, corrected, and targeted alternatives in one
   `example_group_id`.

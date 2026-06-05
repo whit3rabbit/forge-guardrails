@@ -159,6 +159,7 @@ async def run_proxy_scenario(
     stream: bool,
     budget_tokens: int | None,
     ablation: Any,
+    run_idx: int | None = None,
     verbose: bool = False,
 ) -> ProxyRunResult:
     """Run an evaluation scenario against the proxy server client."""
@@ -194,6 +195,17 @@ async def run_proxy_scenario(
                 stream=stream,
                 required_steps=proxy_required_steps,
                 terminal_tools=proxy_terminal_tools,
+                debug={
+                    "scenario": scenario.name,
+                    "run": run_idx,
+                    "stream": stream,
+                    "budget_tokens": (
+                        budget_tokens
+                        if budget_tokens is not None
+                        else scenario.budget_tokens
+                    ),
+                    "iteration": result.iterations_used + 1,
+                },
             )
         except httpx.HTTPError as exc:
             result.iterations_used += 1
