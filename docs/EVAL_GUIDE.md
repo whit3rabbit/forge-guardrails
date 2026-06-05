@@ -192,13 +192,21 @@ unless a job is explicitly marked as live-backend integration.
 ## Tool-Output Compression Eval
 
 Use `eval-release-compression` to compare disabled compression against one
-selected compression mode on the same release suite:
+selected compression mode on the same release suite. The standard comparison is
+disabled baseline vs `standard` mode:
 
 ```bash
 make eval-release-compression \
   TOOL_OUTPUT_COMPRESSION=standard \
   TOOL_OUTPUT_COMPRESSION_METHOD=lzw \
   COMPRESSION_MIN_INPUT_TOKEN_SAVINGS=1
+```
+
+Other compression checks use the same target with a different mode:
+
+```bash
+make eval-release-compression TOOL_OUTPUT_COMPRESSION=safe
+make eval-release-compression TOOL_OUTPUT_COMPRESSION=aggressive TOOL_OUTPUT_COMPRESSION_METHOD=auto
 ```
 
 The target writes separate disabled and compressed runs under
@@ -221,6 +229,16 @@ Controls:
   required by the comparator. When paired oracle rows do not contain
   `input_tokens`, the comparator falls back to compression telemetry estimated
   before/after token counts and labels that line as a telemetry estimate.
+
+The available compression techniques are:
+
+- `safe`: secret redaction, ANSI stripping, binary suppression, and oversized
+  output capping.
+- `standard`: `safe` plus JSON minification, table-whitespace cleanup,
+  tool-family filters, repeated-line folding, and whitespace normalization.
+- `aggressive`: `standard` plus dynamic log-noise normalization, scalar
+  JSON-array table conversion, and dictionary compression.
+- Aggressive dictionary methods: `lzw`, `repair`, or `auto`.
 
 The comparator fails on success, completeness, or accuracy regressions unless
 `--allow-behavior-regression` is passed through direct script use. It also
