@@ -665,6 +665,67 @@ fn aggressive_auto_uses_smaller_dictionary_output() {
 }
 
 #[test]
+fn aggressive_lzw_can_fire_after_table_whitespace_minimization() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = repeated_table_dictionary_output();
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert!(result.output.starts_with("[Forge LZW Dictionary]"));
+    assert!(result
+        .strategies
+        .contains(&"minimize_table_whitespace".to_string()));
+    assert!(result.strategies.contains(&"lzw_dictionary".to_string()));
+}
+
+#[test]
+fn aggressive_repair_can_fire_after_table_whitespace_minimization() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        method: ToolOutputCompressionMethod::Repair,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = repeated_table_dictionary_output();
+
+    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+
+    assert!(result.output.starts_with("[Forge RePair Dictionary]"));
+    assert!(result
+        .strategies
+        .contains(&"minimize_table_whitespace".to_string()));
+    assert!(result.strategies.contains(&"repair_dictionary".to_string()));
+}
+
+#[test]
+fn aggressive_auto_can_choose_dictionary_after_table_whitespace_minimization() {
+    let lzw_config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let repair_config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        method: ToolOutputCompressionMethod::Repair,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let auto_config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        method: ToolOutputCompressionMethod::Auto,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = repeated_table_dictionary_output();
+    let lzw = compress_tool_output("custom_tool", None, &raw, &lzw_config, None);
+    let repair = compress_tool_output("custom_tool", None, &raw, &repair_config, None);
+
+    let result = compress_tool_output("custom_tool", None, &raw, &auto_config, None);
+
+    assert_eq!(
+        result.output.len(),
+        lzw.output.len().min(repair.output.len())
+    );
+    assert!(result
+        .strategies
+        .contains(&"minimize_table_whitespace".to_string()));
+    assert!(result.strategies.contains(&"auto_dictionary".to_string()));
+}
+
+#[test]
 fn dedup_returns_bounded_marker_for_repeated_output() {
     let state = ToolOutputCompressionState::new();
     let config = ToolOutputCompressionConfig {
@@ -783,6 +844,18 @@ fn repeated_lzw_output() -> String {
         .map(|idx| {
             format!(
                 "error: repeated dependency resolution failure in workspace crate alpha at module_{idx}\n"
+            )
+        })
+        .collect::<String>()
+}
+
+fn repeated_table_dictionary_output() -> String {
+    (0..48)
+        .map(|idx| {
+            format!(
+                "ROW-{idx:04} | service=checkout | status=degraded | \
+                 message=database connection pool timeout while processing payment authorization | \
+                 recommended_action=retry with exponential backoff and preserve request correlation id\n"
             )
         })
         .collect::<String>()

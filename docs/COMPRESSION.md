@@ -225,10 +225,12 @@ FORGE_TOOL_OUTPUT_COMPRESSION_LOG=target/compression.jsonl \
 
 Each event includes strategy names, tool family, mode, token estimates, byte
 and line counts, bounded request debug metadata when provided by the caller,
-and redaction/capping/dedup flags. It also includes non-cryptographic 64-bit
+redaction/capping/dedup flags, and `dictionary_method` when an aggressive
+dictionary output was accepted. It also includes non-cryptographic 64-bit
 fingerprints for the original output, compressed output, and tool arguments so
-eval regressions can be correlated without logging raw payloads. It does not
-include raw or compressed tool output. Optional bounds are
+eval regressions can be correlated without logging raw payloads. Strategy
+totals are event-level and do not report marginal per-transform savings. It
+does not include raw or compressed tool output. Optional bounds are
 `FORGE_TOOL_OUTPUT_COMPRESSION_LOG_QUEUE_CAPACITY` and
 `FORGE_TOOL_OUTPUT_COMPRESSION_LOG_MAX_EVENT_BYTES`.
 

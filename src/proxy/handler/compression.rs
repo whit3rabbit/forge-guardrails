@@ -1,7 +1,7 @@
 use crate::core::message::{Message, MessageRole, MessageType, ToolCallInfo};
 use crate::tool_output::{
     compress_tool_output, ToolOutputCompressionConfig, ToolOutputCompressionResult,
-    ToolOutputCompressionState,
+    ToolOutputCompressionState, LZW_DICTIONARY_HEADER, REPAIR_DICTIONARY_HEADER,
 };
 use indexmap::IndexMap;
 use serde_json::{json, Value};
@@ -170,10 +170,23 @@ pub(super) fn compression_event(
             .ok()
             .map(|args| fingerprint64(&args)));
     }
+    if let Some(method) = dictionary_method(&result.output) {
+        event["dictionary_method"] = json!(method);
+    }
     if let Some(request_debug) = request_debug {
         event["request"] = request_debug.clone();
     }
     event
+}
+
+fn dictionary_method(output: &str) -> Option<&'static str> {
+    if output.starts_with(LZW_DICTIONARY_HEADER) {
+        Some("lzw")
+    } else if output.starts_with(REPAIR_DICTIONARY_HEADER) {
+        Some("repair")
+    } else {
+        None
+    }
 }
 
 /// Patches the Anthropic request JSON body with the compressed tool outputs.

@@ -216,7 +216,8 @@ It then runs `scripts/compare_compression_eval.py` against the two
 When compression is enabled, the launcher also writes
 `proxy_tool_output_compression_<budget>.jsonl` with per-tool-result strategy
 names, token estimates, byte and line counts, bounded request debug metadata,
-argument/output fingerprints, and redaction/capping/dedup flags. These events
+argument/output fingerprints, redaction/capping/dedup flags, and
+`dictionary_method` for accepted aggressive dictionary outputs. These events
 exclude raw tool output.
 
 Controls:
@@ -232,7 +233,8 @@ Controls:
   The report prints aggregate and per-scenario input, output, and total token
   changes so prompt savings are visible alongside any completion-token
   increase. It also summarizes compression strategy telemetry so release runs
-  show which transforms actually fired.
+  show which transforms actually fired. Strategy totals are event-level, not
+  marginal per transform.
 
 The available compression techniques are:
 

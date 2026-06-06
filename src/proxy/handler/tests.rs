@@ -235,9 +235,62 @@ fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
     assert!(event["output_fingerprint64"].as_str().is_some());
     assert!(event["args_fingerprint64"].as_str().is_some());
     assert_eq!(event["request"], request_debug);
+    assert!(event.get("dictionary_method").is_none());
     let wire = serde_json::to_string(&event).expect("event json");
     assert!(!wire.contains("sk-abcdefghijklmnopqrstuvwxyz"));
     assert!(!wire.contains("[REDACTED_SECRET]"));
+}
+
+#[test]
+fn tool_output_compression_event_includes_dictionary_method_when_present() {
+    let result_for = |output: String| ToolOutputCompressionResult {
+        output,
+        before_tokens: 200,
+        after_tokens: 80,
+        saved_tokens: 120,
+        saved_pct: 60,
+        canonical_tool: "generic".to_string(),
+        family: "generic".to_string(),
+        mode: ToolOutputCompressionMode::Aggressive,
+        redacted: false,
+        capped: false,
+        deduped: false,
+        strategies: vec!["auto_dictionary".to_string()],
+    };
+
+    let lzw = super::compression::compression_event(
+        super::compression::CompressionEventInput {
+            tool_call_id: Some("call_lzw"),
+            tool_name: "custom_tool",
+            message_index: 2,
+            tool_result_index: 1,
+            args: None,
+            input_output: "repeated content",
+            request_debug: None,
+        },
+        &result_for(format!(
+            "{}\n<<FORGE_LZW_1_1>> = \"value\"\n\n<<FORGE_LZW_1_1>>",
+            crate::tool_output::LZW_DICTIONARY_HEADER
+        )),
+    );
+    let repair = super::compression::compression_event(
+        super::compression::CompressionEventInput {
+            tool_call_id: Some("call_repair"),
+            tool_name: "custom_tool",
+            message_index: 2,
+            tool_result_index: 1,
+            args: None,
+            input_output: "repeated content",
+            request_debug: None,
+        },
+        &result_for(format!(
+            "{}\n<<FORGE_REPAIR_1_1>> = \"value\"\n\n<<FORGE_REPAIR_1_1>>",
+            crate::tool_output::REPAIR_DICTIONARY_HEADER
+        )),
+    );
+
+    assert_eq!(lzw["dictionary_method"], "lzw");
+    assert_eq!(repair["dictionary_method"], "repair");
 }
 
 #[tokio::test]
