@@ -56,6 +56,14 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_existing_jsonl(paths: list[Path]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        if path.exists():
+            rows.extend(load_jsonl(path))
+    return rows
+
+
 def row_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
     return (
         str(row.get("scenario", "")),
@@ -145,45 +153,39 @@ def default_compression_jsonl_paths(compressed_jsonl: Path) -> list[Path]:
     return sorted(compressed_jsonl.parent.glob("proxy_tool_output_compression_*.jsonl"))
 
 
-def telemetry_token_totals(paths: list[Path]) -> TokenTotals:
+def telemetry_token_totals(rows: list[dict[str, Any]]) -> TokenTotals:
     before_total = 0
     after_total = 0
     events = 0
-    for path in paths:
-        if not path.exists():
+    for row in rows:
+        if row.get("kind") != "tool_output_compression":
             continue
-        for row in load_jsonl(path):
-            if row.get("kind") != "tool_output_compression":
-                continue
-            before = as_int(row.get("before_tokens"))
-            after = as_int(row.get("after_tokens"))
-            if before is None or after is None:
-                continue
-            before_total += before
-            after_total += after
-            events += 1
+        before = as_int(row.get("before_tokens"))
+        after = as_int(row.get("after_tokens"))
+        if before is None or after is None:
+            continue
+        before_total += before
+        after_total += after
+        events += 1
     return TokenTotals(before_total, after_total, events)
 
 
-def telemetry_savings_by_scenario(paths: list[Path]) -> dict[str, TokenTotals]:
+def telemetry_savings_by_scenario(rows: list[dict[str, Any]]) -> dict[str, TokenTotals]:
     totals: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
-    for path in paths:
-        if not path.exists():
+    for row in rows:
+        request = row.get("request")
+        if not isinstance(request, dict):
             continue
-        for row in load_jsonl(path):
-            request = row.get("request")
-            if not isinstance(request, dict):
-                continue
-            scenario = request.get("scenario")
-            if not isinstance(scenario, str) or not scenario:
-                continue
-            before = as_int(row.get("before_tokens"))
-            after = as_int(row.get("after_tokens"))
-            if before is None or after is None:
-                continue
-            totals[scenario][0] += before
-            totals[scenario][1] += after
-            totals[scenario][2] += 1
+        scenario = request.get("scenario")
+        if not isinstance(scenario, str) or not scenario:
+            continue
+        before = as_int(row.get("before_tokens"))
+        after = as_int(row.get("after_tokens"))
+        if before is None or after is None:
+            continue
+        totals[scenario][0] += before
+        totals[scenario][1] += after
+        totals[scenario][2] += 1
     return {
         scenario: TokenTotals(values[0], values[1], values[2])
         for scenario, values in totals.items()
@@ -203,58 +205,52 @@ def event_strategies(row: dict[str, Any]) -> list[str]:
     return ["<unspecified>"]
 
 
-def telemetry_savings_by_strategy(paths: list[Path]) -> dict[str, StrategyTotals]:
+def telemetry_savings_by_strategy(rows: list[dict[str, Any]]) -> dict[str, StrategyTotals]:
     totals: dict[str, StrategyTotals] = {}
-    for path in paths:
-        if not path.exists():
+    for row in rows:
+        if row.get("kind") != "tool_output_compression":
             continue
-        for row in load_jsonl(path):
-            if row.get("kind") != "tool_output_compression":
-                continue
-            before = as_int(row.get("before_tokens"))
-            after = as_int(row.get("after_tokens"))
-            if before is None or after is None:
-                continue
-            request = row.get("request")
-            scenario = None
-            if isinstance(request, dict) and isinstance(request.get("scenario"), str):
-                scenario = request["scenario"]
-            for strategy in event_strategies(row):
-                current = totals.setdefault(
-                    strategy,
-                    StrategyTotals(
-                        events=0,
-                        before_tokens=0,
-                        after_tokens=0,
-                        scenarios=set(),
-                    ),
-                )
-                current.events += 1
-                current.before_tokens += before
-                current.after_tokens += after
-                if scenario:
-                    current.scenarios.add(scenario)
+        before = as_int(row.get("before_tokens"))
+        after = as_int(row.get("after_tokens"))
+        if before is None or after is None:
+            continue
+        request = row.get("request")
+        scenario = None
+        if isinstance(request, dict) and isinstance(request.get("scenario"), str):
+            scenario = request["scenario"]
+        for strategy in event_strategies(row):
+            current = totals.setdefault(
+                strategy,
+                StrategyTotals(
+                    events=0,
+                    before_tokens=0,
+                    after_tokens=0,
+                    scenarios=set(),
+                ),
+            )
+            current.events += 1
+            current.before_tokens += before
+            current.after_tokens += after
+            if scenario:
+                current.scenarios.add(scenario)
     return totals
 
 
-def telemetry_coverage(paths: list[Path]) -> TelemetryCoverage:
+def telemetry_coverage(rows: list[dict[str, Any]]) -> TelemetryCoverage:
     row_keys: set[tuple[str, str, str, str]] = set()
     scenarios: set[str] = set()
-    for path in paths:
-        if not path.exists():
+    for row in rows:
+        if row.get("kind") != "tool_output_compression":
             continue
-        for row in load_jsonl(path):
-            if row.get("kind") != "tool_output_compression":
-                continue
-            request = row.get("request")
-            if not isinstance(request, dict):
-                continue
-            scenario = request.get("scenario")
-            if isinstance(scenario, str) and scenario:
-                scenarios.add(scenario)
-            key = request_key(request)
-            if key is not None:
-                row_keys.add(key)
+        request = row.get("request")
+        if not isinstance(request, dict):
+            continue
+        scenario = request.get("scenario")
+        if isinstance(scenario, str) and scenario:
+            scenarios.add(scenario)
+        key = request_key(request)
+        if key is not None:
+            row_keys.add(key)
     return TelemetryCoverage(row_keys=row_keys, scenarios=scenarios)
 
 
@@ -418,10 +414,11 @@ def main() -> int:
     telemetry_paths = expand_jsonl_paths(args.compression_jsonl)
     if not telemetry_paths:
         telemetry_paths = default_compression_jsonl_paths(args.compressed_jsonl)
-    telemetry_totals = telemetry_token_totals(telemetry_paths)
-    telemetry_by_scenario = telemetry_savings_by_scenario(telemetry_paths)
-    telemetry_by_strategy = telemetry_savings_by_strategy(telemetry_paths)
-    coverage = telemetry_coverage(telemetry_paths)
+    telemetry_rows = load_existing_jsonl(telemetry_paths)
+    telemetry_totals = telemetry_token_totals(telemetry_rows)
+    telemetry_by_scenario = telemetry_savings_by_scenario(telemetry_rows)
+    telemetry_by_strategy = telemetry_savings_by_strategy(telemetry_rows)
+    coverage = telemetry_coverage(telemetry_rows)
     behavior_pairs, behavior_scope = compression_touched_pairs(pairs, coverage)
 
     baseline_success = count_true(baseline_paired, "success")
