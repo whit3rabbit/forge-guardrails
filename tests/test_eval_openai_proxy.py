@@ -665,6 +665,14 @@ rel=relevance_detection, b2s=basic_2step
             "Input tokens: baseline 300, compressed 230, saved 70",
             stdout.getvalue(),
         )
+        self.assertIn(
+            "basic_2step: input 20 (20.0%), output 0 (0.0%), total 20",
+            stdout.getvalue(),
+        )
+        self.assertIn(
+            "error_recovery: input 50 (25.0%), output 0 (0.0%), total 50",
+            stdout.getvalue(),
+        )
         self.assertIn("Compression comparison passed", stdout.getvalue())
 
     def test_compression_compare_uses_telemetry_when_usage_missing(self) -> None:
@@ -689,6 +697,7 @@ rel=relevance_detection, b2s=basic_2step
                 [
                     {
                         "kind": "tool_output_compression",
+                        "strategies": ["minimize_table_whitespace"],
                         "before_tokens": 100,
                         "after_tokens": 70,
                         "request": {"scenario": "basic_2step", "run": 1},
@@ -716,7 +725,11 @@ rel=relevance_detection, b2s=basic_2step
             "Compression telemetry input estimate: baseline 100, compressed 70, saved 30",
             stdout.getvalue(),
         )
-        self.assertIn("basic_2step: telemetry saved 30", stdout.getvalue())
+        self.assertIn(
+            "minimize_table_whitespace: events 1, input estimate saved 30",
+            stdout.getvalue(),
+        )
+        self.assertIn("basic_2step: input telemetry saved 30", stdout.getvalue())
         self.assertIn("Compression comparison passed", stdout.getvalue())
 
     def test_compression_compare_fails_on_behavior_regression(self) -> None:

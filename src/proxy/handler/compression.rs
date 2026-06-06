@@ -90,14 +90,16 @@ pub fn compress_proxy_tool_results(
                         "compressed proxy tool output"
                     );
                     emit_proxy_tool_output_compression_jsonl(compression_event(
-                        message.tool_call_id.as_deref(),
-                        tool_name,
-                        message_index,
-                        tool_result_index,
-                        args,
-                        &message.content,
+                        CompressionEventInput {
+                            tool_call_id: message.tool_call_id.as_deref(),
+                            tool_name,
+                            message_index,
+                            tool_result_index,
+                            args,
+                            input_output: &message.content,
+                            request_debug,
+                        },
                         &result,
-                        request_debug,
                     ));
                     updates.push(ToolOutputCompressionUpdate {
                         tool_call_id: message.tool_call_id.clone(),
@@ -112,16 +114,29 @@ pub fn compress_proxy_tool_results(
     updates
 }
 
+pub(super) struct CompressionEventInput<'a> {
+    pub(super) tool_call_id: Option<&'a str>,
+    pub(super) tool_name: &'a str,
+    pub(super) message_index: usize,
+    pub(super) tool_result_index: usize,
+    pub(super) args: Option<&'a IndexMap<String, Value>>,
+    pub(super) input_output: &'a str,
+    pub(super) request_debug: Option<&'a Value>,
+}
+
 pub(super) fn compression_event(
-    tool_call_id: Option<&str>,
-    tool_name: &str,
-    message_index: usize,
-    tool_result_index: usize,
-    args: Option<&IndexMap<String, Value>>,
-    input_output: &str,
+    input: CompressionEventInput<'_>,
     result: &ToolOutputCompressionResult,
-    request_debug: Option<&Value>,
 ) -> Value {
+    let CompressionEventInput {
+        tool_call_id,
+        tool_name,
+        message_index,
+        tool_result_index,
+        args,
+        input_output,
+        request_debug,
+    } = input;
     let mut event = json!({
         "kind": "tool_output_compression",
         "event_version": 2,

@@ -205,14 +205,16 @@ fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
     };
 
     let event = super::compression::compression_event(
-        Some("call_shell"),
-        "run_command",
-        2,
-        1,
-        Some(&args),
-        raw_output,
+        super::compression::CompressionEventInput {
+            tool_call_id: Some("call_shell"),
+            tool_name: "run_command",
+            message_index: 2,
+            tool_result_index: 1,
+            args: Some(&args),
+            input_output: raw_output,
+            request_debug: Some(&request_debug),
+        },
         &result,
-        Some(&request_debug),
     );
 
     assert_eq!(event["kind"], "tool_output_compression");

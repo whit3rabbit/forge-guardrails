@@ -30,6 +30,18 @@ class TelemetryCoverage:
     scenarios: set[str]
 
 
+@dataclass
+class StrategyTotals:
+    events: int
+    before_tokens: int
+    after_tokens: int
+    scenarios: set[str]
+
+    @property
+    def saved_tokens(self) -> int:
+        return self.before_tokens - self.after_tokens
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open() as handle:
@@ -178,6 +190,53 @@ def telemetry_savings_by_scenario(paths: list[Path]) -> dict[str, TokenTotals]:
     }
 
 
+def event_strategies(row: dict[str, Any]) -> list[str]:
+    strategies = row.get("strategies")
+    if isinstance(strategies, str) and strategies:
+        return [strategies]
+    if isinstance(strategies, list):
+        return [
+            strategy
+            for strategy in strategies
+            if isinstance(strategy, str) and strategy
+        ]
+    return ["<unspecified>"]
+
+
+def telemetry_savings_by_strategy(paths: list[Path]) -> dict[str, StrategyTotals]:
+    totals: dict[str, StrategyTotals] = {}
+    for path in paths:
+        if not path.exists():
+            continue
+        for row in load_jsonl(path):
+            if row.get("kind") != "tool_output_compression":
+                continue
+            before = as_int(row.get("before_tokens"))
+            after = as_int(row.get("after_tokens"))
+            if before is None or after is None:
+                continue
+            request = row.get("request")
+            scenario = None
+            if isinstance(request, dict) and isinstance(request.get("scenario"), str):
+                scenario = request["scenario"]
+            for strategy in event_strategies(row):
+                current = totals.setdefault(
+                    strategy,
+                    StrategyTotals(
+                        events=0,
+                        before_tokens=0,
+                        after_tokens=0,
+                        scenarios=set(),
+                    ),
+                )
+                current.events += 1
+                current.before_tokens += before
+                current.after_tokens += after
+                if scenario:
+                    current.scenarios.add(scenario)
+    return totals
+
+
 def telemetry_coverage(paths: list[Path]) -> TelemetryCoverage:
     row_keys: set[tuple[str, str, str, str]] = set()
     scenarios: set[str] = set()
@@ -284,7 +343,7 @@ def print_token_line(label: str, totals: TokenTotals, row_label: str = "rows") -
 
 def scenario_savings(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
-) -> list[tuple[str, TokenTotals, int, int, int]]:
+) -> list[tuple[str, TokenTotals, TokenTotals, TokenTotals, int, int, int]]:
     by_scenario: dict[
         str, list[tuple[dict[str, Any], dict[str, Any]]]
     ] = defaultdict(list)
@@ -294,7 +353,9 @@ def scenario_savings(
 
     results = []
     for scenario, scenario_pairs in sorted(by_scenario.items()):
-        totals = token_totals(scenario_pairs, "input_tokens")
+        input_totals = token_totals(scenario_pairs, "input_tokens")
+        output_totals = token_totals(scenario_pairs, "output_tokens")
+        total_totals = token_totals(scenario_pairs, "input_tokens", "output_tokens")
         baseline_success = count_true(
             [baseline for baseline, _ in scenario_pairs],
             "success",
@@ -305,7 +366,9 @@ def scenario_savings(
         )
         results.append((
             scenario,
-            totals,
+            input_totals,
+            output_totals,
+            total_totals,
             baseline_success,
             compressed_success,
             len(scenario_pairs),
@@ -357,6 +420,7 @@ def main() -> int:
         telemetry_paths = default_compression_jsonl_paths(args.compressed_jsonl)
     telemetry_totals = telemetry_token_totals(telemetry_paths)
     telemetry_by_scenario = telemetry_savings_by_scenario(telemetry_paths)
+    telemetry_by_strategy = telemetry_savings_by_strategy(telemetry_paths)
     coverage = telemetry_coverage(telemetry_paths)
     behavior_pairs, behavior_scope = compression_touched_pairs(pairs, coverage)
 
@@ -460,16 +524,40 @@ def main() -> int:
             telemetry_totals,
             row_label="events",
         )
+    elif telemetry_totals.rows:
+        print_token_line(
+            "Compression telemetry input estimate",
+            telemetry_totals,
+            row_label="events",
+        )
+
+    if telemetry_by_strategy:
+        print("  Compression strategies:")
+        for strategy, totals in sorted(telemetry_by_strategy.items()):
+            print(
+                f"    {strategy}: events {totals.events}, "
+                f"input estimate saved {totals.saved_tokens} "
+                f"({pct(totals.saved_tokens, totals.before_tokens)}), "
+                f"scenarios {len(totals.scenarios)}"
+            )
 
     scenario_rows = scenario_savings(pairs)
     if scenario_rows:
-        print("  Per-scenario input savings:")
-        for scenario, totals, baseline_s, compressed_s, pair_count in scenario_rows:
-            if totals.rows == 0:
+        print("  Per-scenario token savings:")
+        for (
+            scenario,
+            scenario_input,
+            scenario_output,
+            scenario_total,
+            baseline_s,
+            compressed_s,
+            pair_count,
+        ) in scenario_rows:
+            if scenario_input.rows == 0:
                 telemetry = telemetry_by_scenario.get(scenario)
                 if telemetry is not None:
                     savings = (
-                        f"telemetry saved {telemetry.saved} "
+                        f"input telemetry saved {telemetry.saved} "
                         f"({pct(telemetry.saved, telemetry.baseline)}), "
                         f"events {telemetry.rows}"
                     )
@@ -479,7 +567,12 @@ def main() -> int:
                     savings = "usage unavailable"
             else:
                 savings = (
-                    f"saved {totals.saved} ({pct(totals.saved, totals.baseline)})"
+                    f"input {scenario_input.saved} "
+                    f"({pct(scenario_input.saved, scenario_input.baseline)}), "
+                    f"output {scenario_output.saved} "
+                    f"({pct(scenario_output.saved, scenario_output.baseline)}), "
+                    f"total {scenario_total.saved} "
+                    f"({pct(scenario_total.saved, scenario_total.baseline)})"
                 )
             print(
                 f"    {scenario}: {savings}, "

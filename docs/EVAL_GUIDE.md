@@ -229,6 +229,10 @@ Controls:
   required by the comparator. When paired oracle rows do not contain
   `input_tokens`, the comparator falls back to compression telemetry estimated
   before/after token counts and labels that line as a telemetry estimate.
+  The report prints aggregate and per-scenario input, output, and total token
+  changes so prompt savings are visible alongside any completion-token
+  increase. It also summarizes compression strategy telemetry so release runs
+  show which transforms actually fired.
 
 The available compression techniques are:
 
