@@ -29,10 +29,12 @@ is a recovery playbook, not a promotion record. The current published tool-call
 artifact is telemetry-only and must stay in `shadow` mode until a replacement
 passes notebook gates, ONNX parity, release shadow replay, and advisory replay.
 
-The classifier is a DeBERTa sequence-classification sidecar over
-`serialize_state_v1` tool-call contexts. It runs after deterministic validation:
-syntax, JSON schema, unknown tools, required steps, prerequisites, unsafe
-batches, and terminal-tool rules remain Rust-owned and authoritative.
+The classifier is a DeBERTa sequence-classification sidecar over serialized
+tool-call contexts. Current published artifacts use `serialize_state_v1`; new
+replacement runs should use `toolcall-verifier-input/v2` with
+`serialize_state_v2`. It runs after deterministic validation: syntax, JSON
+schema, unknown tools, required steps, prerequisites, unsafe batches, and
+terminal-tool rules remain Rust-owned and authoritative.
 
 ## Current Status
 
@@ -41,8 +43,10 @@ batches, and terminal-tool rules remain Rust-owned and authoritative.
 | Base model | `microsoft/deberta-v3-small` |
 | Notebook | `notebook/toolcall_verifier_training_production_colab_v5.ipynb` |
 | Label mode | `production` |
-| Input schema | `toolcall-verifier-input/v1` |
-| Serializer | `serialize_state_v1` |
+| Current published input schema | `toolcall-verifier-input/v1` |
+| Current published serializer | `serialize_state_v1` |
+| Replacement notebook input schema | `toolcall-verifier-input/v2` |
+| Replacement notebook serializer | `serialize_state_v2` |
 | Default runtime mode | `shadow` |
 | Active non-valid thresholds | `1.01` |
 | Current published tool-call pin | `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` |
@@ -88,6 +92,7 @@ run gives a concrete reason to change them.
 | `FORGE_AGENT_HF_DOWNSAMPLE_PUBLIC_FOR_TARGET` | `False` | Do not shrink the public backbone to satisfy private fraction. |
 | `PREFER_FORGE_AGENT_HF_DATASET` | `True` | Keep reviewed private rows when present. |
 | `INCLUDE_PRIVATE_AGENT_LOGS` | `False` | Local agent logs remain opt-in. |
+| `USE_SERIALIZER_V2` | `True` | Train/export the metadata-aware schema used by new Forge rows. |
 
 Use group-preserving sampling by `example_group_id`. If a hard negative is
 included, keep the paired valid/corrected row in the same group so splitting and
@@ -106,26 +111,39 @@ rows:
 | `wrong_arguments_semantic` | `80` |
 | `tool_not_needed` | `246` |
 
-This dataset is useful as Forge-style valid-call coverage, but it is not strong
-wrong-tool training evidence yet. In this run, `246/247` private wrong-tool rows
-used a literal `synthetic_unrelated_tool` distractor, so the negative boundary is
-mostly a name-level shortcut. The latest pasted evaluation showed
+This legacy dataset is useful as Forge-style valid-call coverage, but it is not
+strong wrong-tool training evidence. In this run, `246/247` private wrong-tool
+rows used a literal `synthetic_unrelated_tool` distractor, so the negative
+boundary is mostly a name-level shortcut. The latest pasted evaluation showed
 `agent_training_hf` accuracy around `0.975`, while the large wrong-tool
 confusions still came from public datasets. Do not infer from that private score
 that the classifier has learned real wrong-tool semantics.
 
-Before increasing private weight or enabling semantic-negative train rebalance,
-improve generated wrong-tool rows:
+For the next private addendum, use `forge-dataset` reviewed rows rather than the
+legacy distractor dataset. The generator now creates targeted alternatives only
+from verified-valid captures and reviewer/verifier-accepts them before training:
 
 - prefer real competing tools from the same observed task group when available;
-- otherwise use a small reviewed distractor catalog rather than the single
-  `synthetic_unrelated_tool` name;
 - include paired valid rows in the same `example_group_id`;
 - keep schema-valid arguments for the distractor so the label remains semantic
   wrong-tool, not deterministic invalid or wrong-argument noise;
+- include bounded repeated-tool (`tool_not_needed`) and underspecified-request
+  (`needs_clarification`) alternatives;
 - mine high-confidence reviewed quarantines, such as `uv lock` requested but
   `make build` executed, into paired wrong-argument or wrong-tool examples only
   after verification accepts them as training rows.
+
+Recommended private capture-review mix for the next OpenRouter addendum:
+
+```bash
+--review-max-alternatives-per-group 4 \
+--review-max-alternative-ratio 0.50
+```
+
+After generation, require `forge-dataset validate` and `split_manifest.json` to
+show nonzero counts for `valid`, `wrong_tool_semantic`,
+`wrong_arguments_semantic`, `tool_not_needed`, and `needs_clarification` before
+using the addendum in a production notebook run.
 
 ### Uploaded Eval Files
 
@@ -158,6 +176,7 @@ The T4 profile is for cheap diagnosis; it is not promotion evidence.
 | `WRONG_TOOL_TRAIN_TO_VALID_RATIO_TARGET` | `0.90` unused while disabled | `0.55` unused while disabled |
 | `WRONG_ARGUMENTS_TRAIN_TO_VALID_RATIO_TARGET` | `0.75` unused while disabled | `0.70` unused while disabled |
 | `MAX_SEMANTIC_NEGATIVE_DUPLICATION_FACTOR` | `4` | `2` unused while disabled |
+| `MAX_NEEDS_CLARIFICATION_TO_VALID_TRAIN_RATIO` | `0.15` | `0.15` |
 | `ENABLE_VALID_PROTECTION_EXTRA_TRAIN_REBALANCE` | `True` | `True` |
 | `VALID_PROTECTION_EXTRA_COPY_FACTOR` | `2` | `2` |
 | `VALID_PROTECTION_EXTRA_COPY_ROWS_CAP` | `5000` | `5000` |
@@ -170,6 +189,7 @@ Non-valid caps remain:
 | `wrong_tool_semantic` | `0.75` |
 | `wrong_arguments_semantic` | `0.90` |
 | `tool_not_needed` | `0.30` |
+| `needs_clarification` | `0.15` |
 
 ### Valid-Protection Slices
 
@@ -353,8 +373,9 @@ replay both pass.
 
 ## Input Format
 
-The classifier expects the canonical serialized format produced by
-`serialize_state_v1`.
+The current published classifier expects the canonical serialized format
+produced by `serialize_state_v1`. New replacement artifacts should use
+`serialize_state_v2`, which keeps the v1 body and appends `SCORING_METADATA`.
 
 ```text
 SCHEMA_VERSION:

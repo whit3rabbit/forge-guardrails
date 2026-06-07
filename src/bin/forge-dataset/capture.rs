@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -17,14 +18,60 @@ pub(crate) async fn run(cli: CaptureCli) -> Result<(), String> {
     ensure_parent_dir(&cli.output)?;
     let client = reqwest::Client::new();
     let chat_url = normalize_chat_completions_url(&cli.proxy_base_url);
+    let scenarios_per_run = registries
+        .iter()
+        .map(|registry| registry.scenarios.len())
+        .sum::<usize>();
+    let total_scenarios = scenarios_per_run * cli.runs;
+    let mut scenario_index = 0;
+    let mut scenario_errors = 0usize;
+
+    eprintln!(
+        "capture start output={} model={} domains={} runs={} scenarios={} max_turns={} max_scenario_errors={}",
+        cli.output,
+        cli.model,
+        cli.domains.join(","),
+        cli.runs,
+        total_scenarios,
+        cli.max_turns,
+        cli.max_scenario_errors
+    );
 
     for run_index in 0..cli.runs {
         for registry in &registries {
             for scenario in &registry.scenarios {
-                capture_scenario(&client, &chat_url, &cli, registry, scenario, run_index).await?;
+                scenario_index += 1;
+                eprintln!(
+                    "capture scenario {}/{} run={} domain={} scenario={}",
+                    scenario_index, total_scenarios, run_index, registry.domain, scenario.id
+                );
+                if let Err(err) =
+                    capture_scenario(&client, &chat_url, &cli, registry, scenario, run_index).await
+                {
+                    scenario_errors += 1;
+                    eprintln!(
+                        "capture warning scenario {}/{} run={} domain={} scenario={} failed: {}",
+                        scenario_index,
+                        total_scenarios,
+                        run_index,
+                        registry.domain,
+                        scenario.id,
+                        err
+                    );
+                    if scenario_errors > cli.max_scenario_errors {
+                        return Err(format!(
+                            "capture exceeded --max-scenario-errors {} after {} failed scenarios",
+                            cli.max_scenario_errors, scenario_errors
+                        ));
+                    }
+                }
             }
         }
     }
+    eprintln!(
+        "capture complete output={} scenario_errors={}",
+        cli.output, scenario_errors
+    );
     Ok(())
 }
 
@@ -54,6 +101,7 @@ async fn capture_scenario(
     ];
     let mut completed_tools = Vec::new();
     let mut recent_errors = Vec::new();
+    let mut seen_tool_call_ids = HashSet::new();
 
     for turn in 0..cli.max_turns {
         let body = json!({
@@ -79,9 +127,14 @@ async fn capture_scenario(
         if tool_calls.is_empty() {
             break;
         }
+        let normalized_tool_calls =
+            normalize_tool_call_ids(&tool_calls, turn, &mut seen_tool_call_ids);
 
-        messages.push(assistant_message_from_response(message));
-        for (call_index, raw_call) in tool_calls.iter().enumerate() {
+        messages.push(assistant_message_from_response(
+            message,
+            &normalized_tool_calls,
+        ));
+        for (call_index, raw_call) in normalized_tool_calls.iter().enumerate() {
             let parsed = parse_tool_call(raw_call, turn, call_index)?;
             let candidate_call = capture_candidate_call(&parsed.name, parsed.arguments.clone());
             let workflow_state = workflow_state(&completed_tools, &recent_errors);
@@ -102,6 +155,14 @@ async fn capture_scenario(
                 &cli.model,
             );
             append_jsonl(&cli.output, &row)?;
+            eprintln!(
+                "capture row group={} turn={} call={} tool={} status={}",
+                example_group_id,
+                turn,
+                call_index,
+                parsed.name,
+                execution.status.as_str()
+            );
 
             if execution.status.as_str() == "ok" {
                 completed_tools.push(parsed.name.clone());
@@ -210,17 +271,54 @@ async fn post_json(client: &reqwest::Client, url: &str, body: &Value) -> Result<
     serde_json::from_str(&text).map_err(|err| format!("failed to parse proxy JSON: {err}"))
 }
 
-fn assistant_message_from_response(message: &Value) -> Value {
+fn assistant_message_from_response(message: &Value, tool_calls: &[Value]) -> Value {
     let mut out = Map::new();
     out.insert("role".to_string(), json!("assistant"));
     out.insert(
         "content".to_string(),
         message.get("content").cloned().unwrap_or(Value::Null),
     );
-    if let Some(tool_calls) = message.get("tool_calls") {
-        out.insert("tool_calls".to_string(), tool_calls.clone());
+    if !tool_calls.is_empty() {
+        out.insert("tool_calls".to_string(), Value::Array(tool_calls.to_vec()));
     }
     Value::Object(out)
+}
+
+fn normalize_tool_call_ids(
+    tool_calls: &[Value],
+    turn: usize,
+    seen: &mut HashSet<String>,
+) -> Vec<Value> {
+    let mut normalized = Vec::with_capacity(tool_calls.len());
+    for (call_index, raw_call) in tool_calls.iter().enumerate() {
+        let mut call = raw_call.clone();
+        let raw_id = raw_call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("capture_call_{turn}_{call_index}"));
+        let mut id = raw_id.clone();
+        if !seen.insert(id.clone()) {
+            let mut suffix = 1;
+            loop {
+                id = format!("{raw_id}_dup_{suffix}");
+                if seen.insert(id.clone()) {
+                    break;
+                }
+                suffix += 1;
+            }
+            eprintln!(
+                "capture warning turn={} call={} duplicate tool_call_id={} normalized_to={}",
+                turn, call_index, raw_id, id
+            );
+        }
+        if let Some(obj) = call.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(id));
+        }
+        normalized.push(call);
+    }
+    normalized
 }
 
 struct ParsedToolCall {
@@ -354,6 +452,103 @@ mod tests {
         assert_eq!(
             normalize_chat_completions_url("http://127.0.0.1:8081/v1"),
             "http://127.0.0.1:8081/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalizes_duplicate_tool_call_ids_before_history_reuse() {
+        let tool_calls = vec![
+            json!({
+                "id": "call_DUPLICATE",
+                "type": "function",
+                "function": {"name": "lookup_ticket", "arguments": "{}"}
+            }),
+            json!({
+                "id": "call_DUPLICATE",
+                "type": "function",
+                "function": {"name": "lookup_ticket", "arguments": "{}"}
+            }),
+        ];
+
+        let mut seen = HashSet::new();
+        let normalized = normalize_tool_call_ids(&tool_calls, 2, &mut seen);
+        assert_eq!(normalized[0]["id"], "call_DUPLICATE");
+        assert_eq!(normalized[1]["id"], "call_DUPLICATE_dup_1");
+
+        let assistant = assistant_message_from_response(&json!({"content": null}), &normalized);
+        assert_eq!(
+            assistant["tool_calls"]
+                .as_array()
+                .expect("tool calls")
+                .iter()
+                .filter_map(|call| call.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["call_DUPLICATE", "call_DUPLICATE_dup_1"]
+        );
+        assert_eq!(
+            parse_tool_call(&normalized[1], 2, 1)
+                .expect("parsed")
+                .call_id,
+            "call_DUPLICATE_dup_1"
+        );
+    }
+
+    #[test]
+    fn normalizes_missing_tool_call_ids_before_history_reuse() {
+        let tool_calls = vec![
+            json!({
+                "type": "function",
+                "function": {"name": "lookup_ticket", "arguments": "{}"}
+            }),
+            json!({
+                "id": "",
+                "type": "function",
+                "function": {"name": "lookup_ticket", "arguments": "{}"}
+            }),
+        ];
+
+        let mut seen = HashSet::new();
+        let normalized = normalize_tool_call_ids(&tool_calls, 3, &mut seen);
+        assert_eq!(normalized[0]["id"], "capture_call_3_0");
+        assert_eq!(normalized[1]["id"], "capture_call_3_1");
+        assert_eq!(
+            parse_tool_call(&normalized[0], 3, 0)
+                .expect("parsed")
+                .call_id,
+            "capture_call_3_0"
+        );
+        assert_eq!(
+            parse_tool_call(&normalized[1], 3, 1)
+                .expect("parsed")
+                .call_id,
+            "capture_call_3_1"
+        );
+    }
+
+    #[test]
+    fn normalizes_tool_call_ids_across_scenario_history() {
+        let first_turn = vec![json!({
+            "id": "call_REUSED",
+            "type": "function",
+            "function": {"name": "search_kb", "arguments": "{}"}
+        })];
+        let second_turn = vec![json!({
+            "id": "call_REUSED",
+            "type": "function",
+            "function": {"name": "search_kb", "arguments": "{}"}
+        })];
+
+        let mut seen = HashSet::new();
+        let first_normalized = normalize_tool_call_ids(&first_turn, 0, &mut seen);
+        let second_normalized = normalize_tool_call_ids(&second_turn, 1, &mut seen);
+
+        assert_eq!(first_normalized[0]["id"], "call_REUSED");
+        assert_eq!(second_normalized[0]["id"], "call_REUSED_dup_1");
+        assert_eq!(
+            parse_tool_call(&second_normalized[0], 1, 0)
+                .expect("parsed")
+                .call_id,
+            "call_REUSED_dup_1"
         );
     }
 }

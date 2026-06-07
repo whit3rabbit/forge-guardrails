@@ -54,6 +54,41 @@ The script:
 
 Use `--capture-only` or `--provider none` to skip external review.
 
+To avoid local `llama-server` entirely, run capture through OpenRouter. This
+builds a mixed private dataset from OpenRouter-generated proxy captures plus
+sanitized local agent-log rows, then writes a group-aware train/validation
+split:
+
+```bash
+export OPENROUTER_API_KEY=...
+
+scripts/run_dataset_workflow.sh \
+  --capture-backend openrouter \
+  --capture-model mistralai/mixtral-8x22b-instruct \
+  --provider openrouter \
+  --verifier-provider same \
+  --openrouter-model deepseek/deepseek-v4-pro \
+  --review-concurrency 4 \
+  --review-chunk-size 100 \
+  --capture-max-errors 25 \
+  --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 75 \
+  --include-agent-logs \
+  --agent-log-limit 1000 \
+  --agent-log-synthetic-balanced 250 \
+  --split-validation-ratio 0.10 \
+  --out-dir target/dataset/openrouter-mixtral-v4-review
+```
+
+`--capture-model` controls the model that generates candidate tool calls.
+`--openrouter-model` controls review and verification.
+`--capture-max-errors` bounds provider/model failures during capture; failed
+scenarios are skipped, already-written valid rows remain, and `0` restores
+fail-fast behavior.
+For a heavier hard-negative mix, add `--review-max-alternatives-per-group 4`
+and `--review-max-alternative-ratio 0.50`; this costs more reviewer/verifier
+calls.
+
 To include sanitized local agent logs in the same run, opt in explicitly:
 
 ```bash
@@ -104,10 +139,13 @@ Use `forge_eval` for Forge-specific recovery slices:
 - `diagnose_failure(...)`, `summarize_records(...)`, and `report_result(...)`
   exercise terminal/report/diagnostic distinctions.
 
-Generated wrong-tool alternatives are intentionally conservative. They are
-created only from verified-valid captured rows, use curated real competing tools
-from the same captured scenario, must be schema-valid for the wrong tool, and
-must pass both reviewer and verifier review.
+Generated targeted alternatives are intentionally conservative. They are created
+only from verified-valid captured rows, stay grouped with the source capture,
+must remain schema-valid, and must pass both reviewer and verifier review. They
+cover wrong arguments, curated wrong tools, repeated completed tools
+(`tool_not_needed`), and intentionally underspecified requests
+(`needs_clarification`). Real captured rows remain the backbone; alternatives
+are bounded by `--max-alternative-ratio` and `--max-alternatives-per-group`.
 
 ## Manual Run
 
@@ -191,6 +229,10 @@ cargo run --bin forge-dataset -- validate \
   --input target/dataset/proxy_training_capture.jsonl \
   --input target/dataset/training.toolcall.jsonl
 ```
+
+For training JSONL, validation output includes label and source-bucket counts.
+Use those counts, plus `split_manifest.json`, to confirm the final mix before
+notebook training.
 
 Mine agent logs directly through the canonical `forge-dataset` surface:
 

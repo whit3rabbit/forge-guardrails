@@ -34,17 +34,94 @@ pub(crate) fn propose_targeted_alternatives(capture: &Value) -> Vec<AlternativeP
         }
     }
 
+    if validate_candidate_call(available_tools, original).is_ok() {
+        if let Some(capture) = tool_not_needed_capture(capture, current_name) {
+            proposals.push(AlternativeProposal {
+                capture,
+                example_group_id: example_group_id.clone(),
+                candidate_call: original.clone(),
+                label: "tool_not_needed".to_string(),
+            });
+        }
+        if let Some(capture) = needs_clarification_capture(capture) {
+            proposals.push(AlternativeProposal {
+                capture,
+                example_group_id: example_group_id.clone(),
+                candidate_call: original.clone(),
+                label: "needs_clarification".to_string(),
+            });
+        }
+    }
+
     if let Some(candidate_call) = curated_wrong_tool_candidate(capture, current_name) {
         if validate_candidate_call(available_tools, &candidate_call).is_ok() {
             proposals.push(AlternativeProposal {
                 capture: capture.clone(),
-                example_group_id,
+                example_group_id: example_group_id.clone(),
                 candidate_call,
                 label: "wrong_tool_semantic".to_string(),
             });
         }
     }
+    rotate_proposals(&mut proposals, &example_group_id);
     proposals
+}
+
+fn tool_not_needed_capture(capture: &Value, current_name: &str) -> Option<Value> {
+    if current_name == "respond" {
+        return None;
+    }
+    let mut capture = capture.clone();
+    let workflow_state = capture.get_mut("workflow_state")?.as_object_mut()?;
+    workflow_state.insert("required_steps".to_string(), json!([]));
+    workflow_state.insert("completed_steps".to_string(), json!([current_name]));
+    workflow_state.insert("pending_steps".to_string(), json!([]));
+    Some(capture)
+}
+
+fn needs_clarification_capture(capture: &Value) -> Option<Value> {
+    let domain = capture
+        .get("proxy_trace")
+        .and_then(|trace| trace.get("domain"))
+        .and_then(Value::as_str)
+        .unwrap_or("forge_dataset");
+    let request = match domain {
+        "repo_docs" => "Find the relevant repository information, but I have not said what topic or file I need.",
+        "shopping" => "Help me buy the thing I mentioned, but I have not provided the product or quantity.",
+        "calendar" => "Schedule that meeting for me, but I have not provided a date, duration, or slot.",
+        "support" => "Fix the issue on my account, but I have not provided a ticket, account, or problem details.",
+        "forge_eval" => "Run the eval I meant, but I have not provided the suite, scenario, or run count.",
+        _ => "Use the right tool for my request, but I have not provided enough details to choose arguments.",
+    };
+    let mut capture = capture.clone();
+    capture["user_request"] = Value::String(request.to_string());
+    if let Some(workflow_state) = capture
+        .get_mut("workflow_state")
+        .and_then(Value::as_object_mut)
+    {
+        workflow_state.insert("required_steps".to_string(), json!([]));
+        workflow_state.insert("completed_steps".to_string(), json!([]));
+        workflow_state.insert("pending_steps".to_string(), json!([]));
+        workflow_state.insert("recent_errors".to_string(), json!([]));
+    }
+    Some(capture)
+}
+
+fn rotate_proposals(proposals: &mut [AlternativeProposal], key: &str) {
+    if proposals.len() <= 1 {
+        return;
+    }
+    let rotation = stable_hash(key) as usize % proposals.len();
+    proposals.rotate_left(rotation);
+}
+
+fn stable_hash(key: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in key.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 pub(crate) fn curated_wrong_tool_candidate(capture: &Value, current_name: &str) -> Option<Value> {
@@ -174,6 +251,12 @@ mod tests {
         assert!(proposals
             .iter()
             .any(|proposal| proposal.label == "wrong_tool_semantic"));
+        assert!(proposals
+            .iter()
+            .any(|proposal| proposal.label == "tool_not_needed"));
+        assert!(proposals
+            .iter()
+            .any(|proposal| proposal.label == "needs_clarification"));
         assert!(proposals.iter().any(|proposal| {
             proposal.label == "wrong_tool_semantic"
                 && proposal.candidate_call["name"] == "add_to_cart"
@@ -182,6 +265,35 @@ mod tests {
             validate_candidate_call(&capture["available_tools"], &proposal.candidate_call)
                 .expect("schema-valid proposal");
         }
+    }
+
+    #[test]
+    fn targeted_alternatives_cover_repeated_tool_and_ambiguous_request() {
+        let capture = capture_row();
+        let proposals = propose_targeted_alternatives(&capture);
+        let repeated = proposals
+            .iter()
+            .find(|proposal| proposal.label == "tool_not_needed")
+            .expect("tool_not_needed proposal");
+        assert_eq!(
+            repeated.capture["workflow_state"]["completed_steps"],
+            json!(["compare_products"])
+        );
+        assert_eq!(
+            repeated.capture["workflow_state"]["pending_steps"],
+            json!([])
+        );
+        assert_eq!(repeated.candidate_call, capture["candidate_call"]);
+
+        let ambiguous = proposals
+            .iter()
+            .find(|proposal| proposal.label == "needs_clarification")
+            .expect("needs_clarification proposal");
+        assert!(ambiguous.capture["user_request"]
+            .as_str()
+            .expect("request")
+            .contains("not provided"));
+        assert_eq!(ambiguous.candidate_call, capture["candidate_call"]);
     }
 
     #[test]

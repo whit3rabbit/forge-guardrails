@@ -318,6 +318,7 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `FORGE_MAX_RETRIES` | `3` | Retry budget per validation failure |
 | `FORGE_RESCUE_ENABLED` | `true` | Enable rescue parsing |
 | `FORGE_SERIALIZE_REQUESTS` | `false` | Force request serialization |
+| `FORGE_SENTRY_ENABLED` | `false` | Opt in to Sentry crash and aggregate guardrail telemetry |
 | `FORGE_CLASSIFIER_CACHE_DIR` | platform cache | User-facing classifier download cache root |
 | `FORGE_CLASSIFIER_DIR` | — | Local ONNX tool-call classifier artifact directory |
 | `FORGE_CLASSIFIER_MODE` | `shadow` | `disabled`, `shadow`, `advisory`, or `enforce` |
@@ -332,6 +333,13 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `OPENAI_API_KEY` | — | API key forwarded to the upstream |
 
 Existing anyllm env and config are still honored, including provider API keys, `PROXY_CONFIG`, `BIG_MODEL`, `SMALL_MODEL`, and LiteLLM aliases such as `LITELLM_CONFIG`.
+
+`FORGE_SENTRY_ENABLED=true` enables Sentry for the proxy binary only. Sentry
+events are limited to scrubbed crashes and aggregate guardrail signals such as
+classifier labels, retry exhaustion reasons, counts, and tool names. Prompts,
+messages, headers, request bodies, tool arguments, tool outputs, and final
+responses are not sent. Use `FORGE_TRAINING_CAPTURE_LOG` or
+`FORGE_CLASSIFIER_LOG` for private local JSONL training/eval examples.
 
 ### Docker
 

@@ -576,7 +576,8 @@ async fn verify_label(
         "available to the classifier. Reject labels that over-penalize normal multi-step tool use. A successful ",
         "search_products then compare_products sequence is valid for a comparison request. ",
         "If a candidate repeats an already completed non-terminal tool with no pending work, ",
-        "the valid label should be rejected."
+        "the valid label should be rejected. If the request lacks identifiers or required details, ",
+        "needs_clarification is appropriate when a tool call would fabricate missing arguments."
     );
     let user = json!({
         "task": "Accept or reject the proposed label. Do not relabel.",
@@ -605,7 +606,11 @@ async fn review_generated_alternative(
         "a real available competing tool, be schema-valid for that wrong tool, and ",
         "be semantically wrong for the serialized training input. Judge only the user request, ",
         "workflow state, available tools, and generated candidate call. If the proposed label is ",
-        "not clearly correct, return the better label or needs_clarification."
+        "not clearly correct, return the better label or needs_clarification. ",
+        "For tool_not_needed alternatives, an already-completed non-terminal tool with no pending ",
+        "steps should not be called again. For needs_clarification alternatives, the user request is ",
+        "intentionally underspecified and the model should ask for missing identifiers or details instead ",
+        "of fabricating tool arguments."
     );
     let user = json!({
         "task": "Review this generated non-valid training alternative.",
@@ -647,12 +652,20 @@ async fn verify_alternatives(run: AlternativeReviewRun<'_>) -> Result<usize, Str
             break;
         }
         progress.alternatives_seen += 1;
+        let identity_bucket = row_key_source_bucket("targeted_alternative", &proposal.label);
         let r_key = row_key(
+            &proposal.example_group_id,
+            &identity_bucket,
+            &proposal.candidate_call,
+        );
+        let legacy_r_key = row_key(
             &proposal.example_group_id,
             "targeted_alternative",
             &proposal.candidate_call,
         );
-        if resume_state.processed_row_keys.contains(&r_key) {
+        if resume_state.processed_row_keys.contains(&r_key)
+            || resume_state.processed_row_keys.contains(&legacy_r_key)
+        {
             progress.alternatives_skipped += 1;
             progress.log_alternative_skip_if_needed();
             continue;
@@ -859,7 +872,8 @@ fn training_row(
         .unwrap_or(Value::Null);
     let example_group_id_str = example_group_id.as_str().unwrap_or("unknown-group");
     let cap_key = capture_key(capture);
-    let r_key = row_key(example_group_id_str, source_bucket, &candidate_call);
+    let identity_bucket = row_key_source_bucket(source_bucket, label);
+    let r_key = row_key(example_group_id_str, &identity_bucket, &candidate_call);
     let mut row = json!({
         "schema_version": TRAINING_SCHEMA_VERSION,
         "input": {
@@ -900,6 +914,14 @@ fn training_row(
         }
     }
     row
+}
+
+fn row_key_source_bucket(source_bucket: &str, label: &str) -> String {
+    if source_bucket == "targeted_alternative" {
+        format!("{source_bucket}:{label}")
+    } else {
+        source_bucket.to_string()
+    }
 }
 
 fn training_metadata(capture: &Value) -> Value {
@@ -1087,5 +1109,37 @@ mod tests {
             clarification_row["input"]["metadata"]["must_acknowledge_missing_data"],
             false
         );
+    }
+
+    #[test]
+    fn targeted_alternative_row_keys_include_label_identity() {
+        let review = ReviewDecision {
+            label: "tool_not_needed".to_string(),
+            confidence: 0.9,
+            rationale: "repeat".to_string(),
+            corrected_candidate_call: None,
+            raw: json!({}),
+        };
+        let verifier = VerifierDecision {
+            accepted: true,
+            rationale: "accepted".to_string(),
+            raw: json!({}),
+        };
+        let capture = capture_row();
+        let row = training_row(
+            &capture,
+            capture["candidate_call"].clone(),
+            "tool_not_needed",
+            "targeted_alternative",
+            &review,
+            &verifier,
+            None,
+        );
+
+        assert!(row["review"]["row_key"]
+            .as_str()
+            .expect("row key")
+            .contains("targeted_alternative:tool_not_needed"));
+        assert_eq!(row["review"]["source_bucket"], "targeted_alternative");
     }
 }

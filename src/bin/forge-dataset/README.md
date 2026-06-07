@@ -57,6 +57,40 @@ scripts/run_dataset_workflow.sh mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf
   --out-dir target/dataset/capture-smoke
 ```
 
+Use OpenRouter for capture when you do not want to run a local GGUF. This builds
+a mixed private dataset from OpenRouter-generated proxy captures plus sanitized
+local agent-log rows, then writes a group-aware train/validation split:
+
+```bash
+export OPENROUTER_API_KEY=...
+
+scripts/run_dataset_workflow.sh \
+  --capture-backend openrouter \
+  --capture-model mistralai/mixtral-8x22b-instruct \
+  --provider openrouter \
+  --verifier-provider same \
+  --openrouter-model deepseek/deepseek-v4-pro \
+  --review-concurrency 4 \
+  --review-chunk-size 100 \
+  --capture-max-errors 25 \
+  --domains repo_docs,shopping,calendar,support,forge_eval \
+  --runs 75 \
+  --include-agent-logs \
+  --agent-log-limit 1000 \
+  --agent-log-synthetic-balanced 250 \
+  --split-validation-ratio 0.10 \
+  --out-dir target/dataset/openrouter-mixtral-v4-review
+```
+
+`--capture-model` controls the model that produces candidate tool calls through
+the Forge proxy. `--openrouter-model` controls the reviewer/verifier model used
+to label those candidates. `--capture-max-errors` bounds provider/model
+failures during capture; failed scenarios are skipped, already-written valid
+rows remain, and `0` restores fail-fast behavior.
+For a heavier hard-negative mix, add `--review-max-alternatives-per-group 4`
+and `--review-max-alternative-ratio 0.50`; this costs more reviewer/verifier
+calls.
+
 ## Merged Proxy + Agent-Log Workflow
 
 Opt in to sanitized local agent-log mining and assembly:
@@ -137,8 +171,12 @@ cargo run --bin forge-dataset -- review \
 
 `--concurrency N` overlaps reviewer/verifier API calls for the main capture
 pass. Start with `--concurrency 4`; raise it only if the providers do not
-rate-limit. Targeted alternatives remain cap-ordered. If you only need reviewed
-real model calls, use `--max-alternative-ratio 0` to skip the alternative pass.
+rate-limit. Targeted alternatives are generated only from verified-valid
+captures, remain grouped with their source capture, and cover wrong arguments,
+curated wrong tools, repeated completed tools (`tool_not_needed`), and
+underspecified requests (`needs_clarification`). They still pass reviewer and
+verifier checks. If you only need reviewed real model calls, use
+`--max-alternative-ratio 0` to skip the alternative pass.
 
 Mine sanitized local agent logs:
 
@@ -203,6 +241,9 @@ cargo run --bin forge-dataset -- validate \
   --input target/dataset/run/quarantine.jsonl \
   --input target/dataset/run/conflicts.jsonl
 ```
+
+For training JSONL, `validate` also prints label and source-bucket counts. The
+split step writes the same kind of counts to `split_manifest.json`.
 
 ## Providers And Models
 

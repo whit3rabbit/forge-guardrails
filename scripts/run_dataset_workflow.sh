@@ -5,10 +5,13 @@ DEFAULT_OUT_DIR="target/dataset/run"
 DEFAULT_PROXY_PORT="8081"
 DEFAULT_BACKEND_PORT="8080"
 DEFAULT_MODEL="test-model"
+DEFAULT_CAPTURE_BACKEND="llamaserver"
+DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 DEFAULT_PROVIDER="auto"
 DEFAULT_VERIFIER_PROVIDER="same"
 DEFAULT_REVIEW_CONCURRENCY="1"
 DEFAULT_MAX_TURNS="4"
+DEFAULT_CAPTURE_MAX_ERRORS="25"
 DEFAULT_RUNS="1"
 DEFAULT_DOMAINS="repo_docs,shopping,calendar,support"
 DEFAULT_COMBINED_OUTPUT="training.toolcall.combined.jsonl"
@@ -21,11 +24,16 @@ OUT_DIR="${FORGE_DATASET_OUT_DIR:-$DEFAULT_OUT_DIR}"
 PROXY_PORT="${FORGE_PROXY_PORT:-${PROXY_PORT:-$DEFAULT_PROXY_PORT}}"
 BACKEND_PORT="${FORGE_BACKEND_PORT:-${BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 MODEL="${FORGE_DATASET_MODEL:-$DEFAULT_MODEL}"
+CAPTURE_BACKEND="${FORGE_DATASET_CAPTURE_BACKEND:-$DEFAULT_CAPTURE_BACKEND}"
+OPENROUTER_BASE_URL="${FORGE_DATASET_OPENROUTER_BASE_URL:-$DEFAULT_OPENROUTER_BASE_URL}"
 PROVIDER="${FORGE_DATASET_REVIEW_PROVIDER:-$DEFAULT_PROVIDER}"
 VERIFIER_PROVIDER="${FORGE_DATASET_VERIFIER_PROVIDER:-$DEFAULT_VERIFIER_PROVIDER}"
 REVIEW_CONCURRENCY="${FORGE_DATASET_REVIEW_CONCURRENCY:-$DEFAULT_REVIEW_CONCURRENCY}"
 REVIEW_CHUNK_SIZE="${FORGE_DATASET_REVIEW_CHUNK_SIZE:-}"
+REVIEW_MAX_ALTERNATIVES_PER_GROUP="${FORGE_DATASET_REVIEW_MAX_ALTERNATIVES_PER_GROUP:-}"
+REVIEW_MAX_ALTERNATIVE_RATIO="${FORGE_DATASET_REVIEW_MAX_ALTERNATIVE_RATIO:-}"
 MAX_TURNS="${FORGE_DATASET_MAX_TURNS:-$DEFAULT_MAX_TURNS}"
+CAPTURE_MAX_ERRORS="${FORGE_DATASET_CAPTURE_MAX_ERRORS:-$DEFAULT_CAPTURE_MAX_ERRORS}"
 RUNS="${FORGE_DATASET_RUNS:-$DEFAULT_RUNS}"
 DOMAINS="${FORGE_DATASET_DOMAINS:-$DEFAULT_DOMAINS}"
 OPENROUTER_MODEL="${FORGE_DATASET_OPENROUTER_MODEL:-}"
@@ -49,6 +57,10 @@ MiniMax/OpenRouter unless --capture-only or --provider none is used.
 Options:
   --out-dir DIR                 Output directory (default: $DEFAULT_OUT_DIR)
   --model MODEL                 Chat model name sent to the proxy (default: $DEFAULT_MODEL)
+  --capture-backend llamaserver|openrouter
+                                Capture backend (default: $DEFAULT_CAPTURE_BACKEND)
+  --capture-model MODEL         Alias for --model; useful with --capture-backend openrouter
+  --openrouter-base-url URL     OpenRouter-compatible capture base URL (default: $DEFAULT_OPENROUTER_BASE_URL)
   --provider auto|minimax|openrouter|none
                                 Review provider (default: auto)
   --verifier-provider same|auto|minimax|openrouter
@@ -56,7 +68,12 @@ Options:
   --openrouter-model MODEL      OpenRouter review/verifier model
   --review-concurrency N        Parallel capture reviews (default: $DEFAULT_REVIEW_CONCURRENCY)
   --review-chunk-size N         Client-side review chunk size
+  --review-max-alternatives-per-group N
+                                Cap targeted hard negatives accepted per group
+  --review-max-alternative-ratio R
+                                Cap targeted hard negatives as a ratio of real accepted rows
   --max-turns N                 Capture turns per scenario (default: $DEFAULT_MAX_TURNS)
+  --capture-max-errors N        Failed capture scenarios tolerated (default: $DEFAULT_CAPTURE_MAX_ERRORS; 0 fails fast)
   --runs N                      Scenario repetitions (default: $DEFAULT_RUNS)
   --domains CSV                 Dataset domains (default: $DEFAULT_DOMAINS; also supports forge_eval)
   --proxy-port PORT             Forge proxy port (default: $DEFAULT_PROXY_PORT)
@@ -79,6 +96,7 @@ Environment:
 Examples:
   $(basename "$0") /models/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf
   OPENROUTER_API_KEY=... $(basename "$0") --provider openrouter --out-dir target/dataset/openrouter
+  OPENROUTER_API_KEY=... $(basename "$0") --capture-backend openrouter --capture-model mistralai/mixtral-8x22b-instruct
   MINIMAX_API_KEY=... $(basename "$0") --provider minimax --verifier-provider openrouter
 EOF
 }
@@ -112,6 +130,18 @@ while [[ $# -gt 0 ]]; do
       MODEL="${2:?--model requires a value}"
       shift 2
       ;;
+    --capture-model)
+      MODEL="${2:?--capture-model requires a value}"
+      shift 2
+      ;;
+    --capture-backend)
+      CAPTURE_BACKEND="${2:?--capture-backend requires a value}"
+      shift 2
+      ;;
+    --openrouter-base-url)
+      OPENROUTER_BASE_URL="${2:?--openrouter-base-url requires a value}"
+      shift 2
+      ;;
     --provider)
       PROVIDER="${2:?--provider requires a value}"
       shift 2
@@ -132,8 +162,20 @@ while [[ $# -gt 0 ]]; do
       REVIEW_CHUNK_SIZE="${2:?--review-chunk-size requires a value}"
       shift 2
       ;;
+    --review-max-alternatives-per-group)
+      REVIEW_MAX_ALTERNATIVES_PER_GROUP="${2:?--review-max-alternatives-per-group requires a value}"
+      shift 2
+      ;;
+    --review-max-alternative-ratio)
+      REVIEW_MAX_ALTERNATIVE_RATIO="${2:?--review-max-alternative-ratio requires a value}"
+      shift 2
+      ;;
     --max-turns)
       MAX_TURNS="${2:?--max-turns requires a value}"
+      shift 2
+      ;;
+    --capture-max-errors)
+      CAPTURE_MAX_ERRORS="${2:?--capture-max-errors requires a value}"
       shift 2
       ;;
     --runs)
@@ -202,13 +244,21 @@ done
 
 valid_port "$PROXY_PORT" || die "invalid proxy port: $PROXY_PORT"
 valid_port "$BACKEND_PORT" || die "invalid backend port: $BACKEND_PORT"
+[[ "$CAPTURE_BACKEND" =~ ^(llamaserver|openrouter)$ ]] || die "--capture-backend must be llamaserver|openrouter"
 [[ "$PROVIDER" =~ ^(auto|minimax|openrouter|none)$ ]] || die "--provider must be auto|minimax|openrouter|none"
 [[ "$VERIFIER_PROVIDER" =~ ^(same|auto|minimax|openrouter)$ ]] || die "--verifier-provider must be same|auto|minimax|openrouter"
 [[ "$REVIEW_CONCURRENCY" =~ ^[0-9]+$ ]] && (( REVIEW_CONCURRENCY >= 1 && REVIEW_CONCURRENCY <= 32 )) || die "--review-concurrency must be an integer from 1 to 32"
 if [[ -n "$REVIEW_CHUNK_SIZE" ]]; then
   [[ "$REVIEW_CHUNK_SIZE" =~ ^[0-9]+$ ]] && (( REVIEW_CHUNK_SIZE > 0 )) || die "--review-chunk-size must be a positive integer"
 fi
+if [[ -n "$REVIEW_MAX_ALTERNATIVES_PER_GROUP" ]]; then
+  [[ "$REVIEW_MAX_ALTERNATIVES_PER_GROUP" =~ ^[0-9]+$ ]] || die "--review-max-alternatives-per-group must be a non-negative integer"
+fi
+if [[ -n "$REVIEW_MAX_ALTERNATIVE_RATIO" ]]; then
+  [[ "$REVIEW_MAX_ALTERNATIVE_RATIO" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "--review-max-alternative-ratio must be a number"
+fi
 [[ "$MAX_TURNS" =~ ^[0-9]+$ ]] && (( MAX_TURNS > 0 )) || die "--max-turns must be a positive integer"
+[[ "$CAPTURE_MAX_ERRORS" =~ ^[0-9]+$ ]] || die "--capture-max-errors must be a non-negative integer"
 [[ "$RUNS" =~ ^[0-9]+$ ]] && (( RUNS > 0 )) || die "--runs must be a positive integer"
 if [[ -n "$AGENT_LOG_LIMIT" ]]; then
   [[ "$AGENT_LOG_LIMIT" =~ ^[0-9]+$ ]] || die "--agent-log-limit must be a non-negative integer"
@@ -218,6 +268,9 @@ if [[ -n "$SPLIT_VALIDATION_RATIO" ]]; then
   [[ "$SPLIT_VALIDATION_RATIO" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "--split-validation-ratio must be a number"
 fi
 [[ -n "$SPLIT_SEED" ]] || die "--split-seed must not be empty"
+if [[ "$CAPTURE_BACKEND" == "openrouter" ]]; then
+  [[ -n "${OPENROUTER_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" ]] || die "OPENROUTER_API_KEY or OPENAI_API_KEY is required for --capture-backend openrouter"
+fi
 
 mkdir -p "$OUT_DIR"
 PROMPTS_JSONL="$OUT_DIR/tool_prompts.jsonl"
@@ -300,11 +353,27 @@ if [[ -n "$SPLIT_VALIDATION_RATIO" ]]; then
   printf 'Validation split rows: %s\n' "$VALIDATION_JSONL"
 fi
 
-env \
-  FORGE_PROXY_PORT="$PROXY_PORT" \
-  FORGE_BACKEND_PORT="$BACKEND_PORT" \
-  FORGE_TRAINING_CAPTURE_LOG="$PROXY_CAPTURE_JSONL" \
-  "$SCRIPT_DIR/start_llamaserver_proxy.sh" ${GGUF_PATH_ARG:+"$GGUF_PATH_ARG"} "${PROXY_EXTRA_ARGS[@]}" &
+if [[ "$CAPTURE_BACKEND" == "openrouter" ]]; then
+  PROXY_CMD=(cargo run --bin forge-guardrails-proxy --)
+  PROXY_CMD+=(
+    --backend-url "$OPENROUTER_BASE_URL"
+    --model "$MODEL"
+    --port "$PROXY_PORT"
+  )
+  PROXY_CMD+=("${PROXY_EXTRA_ARGS[@]}")
+  printf 'Capture backend: OpenRouter-compatible %s\n' "$OPENROUTER_BASE_URL"
+  printf 'Capture model: %s\n' "$MODEL"
+  env \
+    FORGE_TRAINING_CAPTURE_LOG="$PROXY_CAPTURE_JSONL" \
+    OPENAI_API_KEY="${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}" \
+    "${PROXY_CMD[@]}" &
+else
+  env \
+    FORGE_PROXY_PORT="$PROXY_PORT" \
+    FORGE_BACKEND_PORT="$BACKEND_PORT" \
+    FORGE_TRAINING_CAPTURE_LOG="$PROXY_CAPTURE_JSONL" \
+    "$SCRIPT_DIR/start_llamaserver_proxy.sh" ${GGUF_PATH_ARG:+"$GGUF_PATH_ARG"} "${PROXY_EXTRA_ARGS[@]}" &
+fi
 PROXY_PID="$!"
 
 printf 'Waiting for proxy health on http://127.0.0.1:%s/health' "$PROXY_PORT"
@@ -312,6 +381,11 @@ for _ in $(seq 1 120); do
   if curl -fsS "http://127.0.0.1:$PROXY_PORT/health" >/dev/null 2>&1; then
     printf '\n'
     break
+  fi
+  if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+    printf '\n'
+    wait "$PROXY_PID" 2>/dev/null || true
+    die "proxy launcher exited before health check succeeded"
   fi
   printf '.'
   sleep 1
@@ -332,6 +406,7 @@ cargo run --bin forge-dataset -- capture \
   --model "$MODEL" \
   --domains "$DOMAINS" \
   --max-turns "$MAX_TURNS" \
+  --max-scenario-errors "$CAPTURE_MAX_ERRORS" \
   --runs "$RUNS" \
   --output "$CAPTURE_JSONL"
 
@@ -356,6 +431,12 @@ if [[ -n "$OPENROUTER_MODEL" ]]; then
 fi
 if [[ -n "$REVIEW_CHUNK_SIZE" ]]; then
   REVIEW_ARGS+=(--chunk-size "$REVIEW_CHUNK_SIZE")
+fi
+if [[ -n "$REVIEW_MAX_ALTERNATIVES_PER_GROUP" ]]; then
+  REVIEW_ARGS+=(--max-alternatives-per-group "$REVIEW_MAX_ALTERNATIVES_PER_GROUP")
+fi
+if [[ -n "$REVIEW_MAX_ALTERNATIVE_RATIO" ]]; then
+  REVIEW_ARGS+=(--max-alternative-ratio "$REVIEW_MAX_ALTERNATIVE_RATIO")
 fi
 cargo run --bin forge-dataset -- review "${REVIEW_ARGS[@]}"
 

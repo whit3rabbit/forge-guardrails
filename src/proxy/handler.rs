@@ -35,6 +35,7 @@ mod prior_tool_results;
 mod request_contract;
 mod response_shape;
 mod scoring;
+mod telemetry;
 mod tool_specs;
 mod training_capture;
 
@@ -525,6 +526,14 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             Ok(Some(result)) => result,
             Ok(None) => break LLMResponse::Text(TextResponse::new("")),
             Err(crate::error::ForgeError::ToolCall(err)) => {
+                telemetry::capture_guardrail_exhausted(
+                    "deterministic_tool_validation_exhausted",
+                    &[],
+                    &[],
+                    Some(error_tracker.consecutive_retries()),
+                    Some(error_tracker.max_retries()),
+                    Some(stream),
+                );
                 if !return_raw_on_guardrail_failure {
                     return Err(HandlerError::Upstream(format!(
                         "model failed guarded tool-call validation after retries: {}",

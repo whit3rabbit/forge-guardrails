@@ -5,6 +5,8 @@ use crate::tools::respond::RESPOND_TOOL_NAME;
 use indexmap::IndexMap;
 use serde_json::Value;
 
+use super::telemetry::capture_guardrail_exhausted;
+
 const PROXY_STEP_INDEX: i64 = 0;
 
 /// Synthesizes a mock tool call to the respond tool, wrapping the final response text.
@@ -23,10 +25,19 @@ pub fn emit_proxy_step_nudge_or_error(
     tool_call_counter: &mut i64,
 ) -> Result<(), String> {
     if enforcer.premature_exhausted() {
+        let pending = enforcer.pending();
+        capture_guardrail_exhausted(
+            "step_enforcement_exhausted",
+            &tool_calls,
+            &pending,
+            Some(enforcer.premature_attempts()),
+            None,
+            None,
+        );
         return Err(format!(
             "step enforcement exhausted after {} premature terminal tool attempts; pending required steps: {}",
             enforcer.premature_attempts(),
-            enforcer.pending().join(", ")
+            pending.join(", ")
         ));
     }
     let nudge = step_check.nudge.expect("step nudge required");
@@ -53,6 +64,14 @@ pub fn emit_proxy_classifier_nudge_or_error(
 ) -> Result<(), String> {
     error_tracker.record_retry();
     if error_tracker.retries_exhausted() {
+        capture_guardrail_exhausted(
+            "classifier_objections_exhausted",
+            &tool_calls,
+            &[],
+            Some(error_tracker.consecutive_retries()),
+            Some(error_tracker.max_retries()),
+            None,
+        );
         return Err(format!(
             "classifier objections exhausted after {} retries",
             error_tracker.max_retries()
@@ -81,6 +100,14 @@ pub fn emit_proxy_tool_policy_nudge_or_error(
 ) -> Result<(), String> {
     error_tracker.record_retry();
     if error_tracker.retries_exhausted() {
+        capture_guardrail_exhausted(
+            "tool_call_policy_exhausted",
+            &tool_calls,
+            &[],
+            Some(error_tracker.consecutive_retries()),
+            Some(error_tracker.max_retries()),
+            None,
+        );
         return Err(format!(
             "tool-call policy objections exhausted after {} retries",
             error_tracker.max_retries()
@@ -109,6 +136,14 @@ pub fn emit_proxy_final_response_tool_nudge_or_error(
 ) -> Result<(), String> {
     error_tracker.record_retry();
     if error_tracker.retries_exhausted() {
+        capture_guardrail_exhausted(
+            "final_response_classifier_exhausted",
+            &tool_calls,
+            &[],
+            Some(error_tracker.consecutive_retries()),
+            Some(error_tracker.max_retries()),
+            None,
+        );
         return Err(format!(
             "final-response classifier objections exhausted after {} retries",
             error_tracker.max_retries()
@@ -135,6 +170,14 @@ pub fn emit_proxy_user_classifier_nudge_or_error(
 ) -> Result<(), String> {
     error_tracker.record_retry();
     if error_tracker.retries_exhausted() {
+        capture_guardrail_exhausted(
+            "final_response_classifier_exhausted",
+            &[],
+            &[],
+            Some(error_tracker.consecutive_retries()),
+            Some(error_tracker.max_retries()),
+            None,
+        );
         return Err(format!(
             "final-response classifier objections exhausted after {} retries",
             error_tracker.max_retries()

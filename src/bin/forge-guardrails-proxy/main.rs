@@ -6,6 +6,7 @@ mod config;
 mod response;
 pub mod routes;
 mod startup;
+mod telemetry;
 mod upstream;
 
 use clap::Parser;
@@ -14,7 +15,16 @@ use cli::Cli;
 
 fn main() {
     let cli = Cli::parse();
+    let sentry_guard = match telemetry::init_from_env() {
+        Ok(guard) => guard,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    };
     if let Err(err) = run_main(cli) {
+        telemetry::capture_proxy_exit_error();
+        drop(sentry_guard);
         eprintln!("error: {err}");
         std::process::exit(1);
     }

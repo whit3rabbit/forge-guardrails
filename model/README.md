@@ -21,6 +21,11 @@ Both artifacts are DeBERTa-v3-small text classifiers exported as FP32 ONNX and
 quantized ONNX. Both should start in `shadow` mode. Deterministic Forge
 validation remains authoritative.
 
+The pinned published tool-call artifact below is a v1 artifact. New replacement
+training runs should use `toolcall-verifier-input/v2` with
+`serialize_state_v2`, while still exporting v1 compatibility schemas and
+serializer fixtures for older artifacts.
+
 Current deployment recommendation: keep both artifact families shadow-only.
 For local active-mode policy, set every non-valid label's advisory and enforce
 thresholds to `1.01` until release replay proves the label is safe. This is
@@ -101,8 +106,10 @@ Artifact contract:
 | Field | Value |
 |---|---|
 | Artifact schema | `toolcall-verifier-artifact/v1` |
-| Input schema | `toolcall-verifier-input/v1` |
-| Serializer | `serialize_state_v1` |
+| Published input schema | `toolcall-verifier-input/v1` |
+| Published serializer | `serialize_state_v1` |
+| Replacement input schema | `toolcall-verifier-input/v2` |
+| Replacement serializer | `serialize_state_v2` |
 | Max sequence length | `1280` |
 | Base model | `microsoft/deberta-v3-small` |
 | Default deployment | `shadow` |

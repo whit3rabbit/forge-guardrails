@@ -20,12 +20,25 @@ pub(crate) fn run(cli: ValidateCli) -> Result<(), String> {
     for input in cli.inputs {
         match validate_file(&input) {
             Ok(summary) => {
-                println!(
+                let mut parts = vec![format!(
                     "validated {} rows={} schemas={}",
                     input,
                     summary.rows,
-                    summary.schema_counts_text()
-                );
+                    summary.counts_text(&summary.schema_counts)
+                )];
+                if !summary.label_counts.is_empty() {
+                    parts.push(format!(
+                        "labels={}",
+                        summary.counts_text(&summary.label_counts)
+                    ));
+                }
+                if !summary.source_bucket_counts.is_empty() {
+                    parts.push(format!(
+                        "source_buckets={}",
+                        summary.counts_text(&summary.source_bucket_counts)
+                    ));
+                }
+                println!("{}", parts.join(" "));
             }
             Err(err) => errors.push(err),
         }
@@ -41,11 +54,13 @@ pub(crate) fn run(cli: ValidateCli) -> Result<(), String> {
 struct ValidationSummary {
     rows: usize,
     schema_counts: BTreeMap<String, usize>,
+    label_counts: BTreeMap<String, usize>,
+    source_bucket_counts: BTreeMap<String, usize>,
 }
 
 impl ValidationSummary {
-    fn schema_counts_text(&self) -> String {
-        self.schema_counts
+    fn counts_text(&self, counts: &BTreeMap<String, usize>) -> String {
+        counts
             .iter()
             .map(|(schema, count)| format!("{schema}:{count}"))
             .collect::<Vec<_>>()
@@ -82,6 +97,14 @@ fn validate_file(path: &str) -> Result<ValidationSummary, String> {
         match validate_row(&row) {
             Ok(schema) => {
                 *summary.schema_counts.entry(schema.to_string()).or_insert(0) += 1;
+                if schema == TRAINING_SCHEMA_VERSION {
+                    count_value(&mut summary.label_counts, row.get("label"));
+                    count_value(
+                        &mut summary.source_bucket_counts,
+                        row.get("review")
+                            .and_then(|review| review.get("source_bucket")),
+                    );
+                }
             }
             Err(err) => errors.push(format!("{path}:{line_number} {err}")),
         }
@@ -252,10 +275,20 @@ fn required_object_value<'a>(row: &'a Value, key: &str) -> Result<&'a Value, Str
     }
 }
 
+fn count_value(counts: &mut BTreeMap<String, usize>, value: Option<&Value>) {
+    let key = value
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or("unknown");
+    *counts.entry(key.to_string()).or_insert(0) += 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
 
     fn training_row() -> Value {
         json!({
@@ -295,6 +328,18 @@ mod tests {
         })
     }
 
+    fn temp_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "forge-dataset-validate-{}-{}-{}.jsonl",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn validates_training_row_envelope() {
         validate_training_row(&training_row()).expect("valid row");
@@ -306,5 +351,42 @@ mod tests {
         row["label"] = json!("synthetic_unrelated_tool");
         let err = validate_training_row(&row).expect_err("invalid label");
         assert!(err.contains("unsupported label"));
+    }
+
+    #[test]
+    fn validation_summary_counts_training_labels_and_sources() {
+        let path = temp_file("counts");
+        let mut valid = training_row();
+        valid["label"] = json!("valid");
+        valid["review"]["source_bucket"] = json!("real_model_call");
+        let mut wrong = training_row();
+        wrong["label"] = json!("wrong_arguments_semantic");
+        wrong["review"]["source_bucket"] = json!("targeted_alternative");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&valid).expect("json"),
+                serde_json::to_string(&wrong).expect("json")
+            ),
+        )
+        .expect("write");
+
+        let summary = validate_file(path.to_str().expect("path")).expect("valid");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(summary.label_counts.get("valid"), Some(&1));
+        assert_eq!(
+            summary.label_counts.get("wrong_arguments_semantic"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.source_bucket_counts.get("real_model_call"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.source_bucket_counts.get("targeted_alternative"),
+            Some(&1)
+        );
     }
 }

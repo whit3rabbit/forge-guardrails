@@ -23,6 +23,7 @@ pub(crate) struct CaptureCli {
     pub(crate) model: String,
     pub(crate) output: String,
     pub(crate) max_turns: usize,
+    pub(crate) max_scenario_errors: usize,
     pub(crate) domains: Vec<String>,
     pub(crate) runs: usize,
 }
@@ -169,6 +170,7 @@ fn parse_capture(values: &[String]) -> Result<Command, String> {
         model: String::new(),
         output: DEFAULT_CAPTURE_OUTPUT.to_string(),
         max_turns: 4,
+        max_scenario_errors: 25,
         domains: parse_domains(DEFAULT_DOMAINS)?,
         runs: 1,
     };
@@ -184,6 +186,9 @@ fn parse_capture(values: &[String]) -> Result<Command, String> {
             "--output" => cli.output = take_one(values, &mut index, "--output")?,
             "--max-turns" => {
                 cli.max_turns = take_usize(values, &mut index, "--max-turns")?;
+            }
+            "--max-scenario-errors" => {
+                cli.max_scenario_errors = take_usize(values, &mut index, "--max-scenario-errors")?;
             }
             "--domains" => {
                 cli.domains = parse_domains(&take_one(values, &mut index, "--domains")?)?;
@@ -589,6 +594,7 @@ pub(crate) fn print_help() {
            --model MODEL\n\
            --output PATH (default: target/dataset/capture.jsonl)\n\
            --max-turns N (default: 4)\n\
+           --max-scenario-errors N (default: 25; 0 fails fast)\n\
            --runs N (default: 1)\n\
            --domains CSV (default: repo_docs,shopping,calendar,support; also supports forge_eval)\n\n\
          Review options:\n\
@@ -661,11 +667,28 @@ mod tests {
         assert_eq!(cli.proxy_base_url, DEFAULT_PROXY_BASE_URL);
         assert_eq!(cli.output, DEFAULT_CAPTURE_OUTPUT);
         assert_eq!(cli.max_turns, 4);
+        assert_eq!(cli.max_scenario_errors, 25);
         assert_eq!(cli.runs, 1);
         assert_eq!(
             cli.domains,
             vec!["repo_docs", "shopping", "calendar", "support"]
         );
+    }
+
+    #[test]
+    fn capture_parses_error_recovery_budget() {
+        let command = parse(&[
+            "capture",
+            "--model",
+            "test-model",
+            "--max-scenario-errors",
+            "3",
+        ])
+        .expect("parse");
+        let Command::Capture(cli) = command else {
+            panic!("expected capture");
+        };
+        assert_eq!(cli.max_scenario_errors, 3);
     }
 
     #[test]

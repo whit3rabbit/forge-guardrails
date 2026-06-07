@@ -133,6 +133,7 @@ fn anthropic_event_name(event: &StreamEvent) -> &'static str {
         StreamEvent::MessageStop { .. } => "message_stop",
         StreamEvent::Ping { .. } => "ping",
         StreamEvent::Error { .. } => "error",
+        StreamEvent::Unknown => "unknown",
     }
 }
 

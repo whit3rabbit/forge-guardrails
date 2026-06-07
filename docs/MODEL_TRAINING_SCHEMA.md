@@ -8,8 +8,8 @@ The production training notebook is [`notebook/toolcall_verifier_training_produc
 
 - Tool-call verifier input v1 uses `schema_version: "toolcall-verifier-input/v1"` and `serialize_state_v1`.
 - Tool-call verifier input v2 keeps v1 fields and adds generic `metadata`; it is serialized by `serialize_state_v2`.
-- `serialize_state_v1` must remain byte-stable for legacy ONNX artifacts and remains the default deployable serializer.
-- `serialize_state_v2` is an explicit ablation/export option. Do not silently publish metadata-dependent artifacts as v1.
+- `serialize_state_v1` must remain byte-stable for legacy ONNX artifacts and compatibility fixtures.
+- New production tool-call artifacts should use input v2 with `serialize_state_v2`. Do not silently publish metadata-dependent artifacts as v1.
 - Current Rust accepts legacy five-label tool-call artifacts and six-label artifacts.
 - New production tool-call artifacts should use the six-label order.
 - Final-response artifacts use `schema_version: "final-response-verifier-input/v1"` and `serialize_final_response_state_v1`.
@@ -45,6 +45,41 @@ Final-response hard negatives should cover:
 - unsupported claims
 - missing data gaps treated as facts
 - too-vague terminal summaries
+
+## Dataset Mix And Ratios
+
+Public function-calling corpora are the backbone. Private Forge rows should tune
+Forge-specific slices without taking over the train split:
+
+- Keep private reviewed rows around `0.15` to `0.30` of covered train labels;
+  the production notebook target is `0.25`.
+- Keep `FORGE_AGENT_HF_DATASET_WEIGHT=1` unless a run proves a higher weight
+  improves valid recall and wrong-tool precision without raising false
+  objections.
+- Keep public downsampling disabled by default. Do not shrink public coverage
+  only to hit a private fraction target.
+- Preserve groups by `example_group_id` so valid/corrected rows and their hard
+  negatives stay on the same split side.
+
+The production notebook caps train-only non-valid rows relative to valid rows:
+
+| Label | Max train ratio to valid rows |
+| :--- | ---: |
+| `deterministic_invalid` | `0.35` |
+| `wrong_tool_semantic` | `0.75` |
+| `wrong_arguments_semantic` | `0.90` |
+| `tool_not_needed` | `0.30` |
+| `needs_clarification` | `0.15` |
+
+Those caps are guardrails, not target quotas. Prefer distinct reviewed examples
+over duplicated negatives. `needs_clarification` should remain bounded and is
+not a promotion gate unless validation/test support reaches at least `50` rows.
+For new `forge-dataset` private runs, use real captured positives plus reviewed
+targeted alternatives for wrong arguments, real competing wrong tools, repeated
+completed tools, and underspecified requests. A good starting capture-review
+mix is `--review-max-alternative-ratio 0.50` with
+`--review-max-alternatives-per-group 4`, then confirm the actual label/source
+counts with `forge-dataset validate` and `split_manifest.json`.
 
 ## Shared Metadata
 
@@ -174,6 +209,7 @@ input_schema.json
 input_schema_v1.json
 input_schema_v2.json
 serializer_fixture.json
+serializer_fixture_v1.json
 serializer_fixture_v2.json
 calibration_report.json
 reliability_curves.jsonl
@@ -194,8 +230,8 @@ model_quantized.onnx
   "model_kind": "text-classification-cross-encoder",
   "base_model": "microsoft/deberta-v3-small",
   "label_mode": "production",
-  "input_schema_version": "toolcall-verifier-input/v1",
-  "serializer": "serialize_state_v1",
+  "input_schema_version": "toolcall-verifier-input/v2",
+  "serializer": "serialize_state_v2",
   "max_length": 1280,
   "onnx_file": "model.onnx",
   "quantized_onnx_file": "model_quantized.onnx",

@@ -358,6 +358,62 @@ async fn training_capture_sink_redacts_private_payload_fields() {
 }
 
 #[test]
+fn sentry_tool_call_classifier_event_omits_private_payload_fields() {
+    let mut args = IndexMap::new();
+    args.insert("query".to_string(), json!("secret query"));
+    let call = ToolCall::new("search_docs", args)
+        .with_id("secret-call-id")
+        .with_reasoning("secret reasoning");
+    let score = ToolCallScore {
+        label: ToolCallClass::WrongArgumentsSemantic,
+        confidence: 0.98765,
+        logits: vec![0.0, 1.0, 2.0],
+        action: ClassifierAction::AdvisoryNudge,
+        model_version: "classifier-v1".to_string(),
+        latency_ms: 12.34,
+    };
+
+    let event = super::telemetry::tool_call_classifier_event(&call, &score);
+    let text = serde_json::to_string(&event).expect("event json");
+
+    assert!(text.contains("classifier_tool_call_non_allow"));
+    assert!(text.contains("search_docs"));
+    assert!(text.contains("wrong_arguments_semantic"));
+    assert!(!text.contains("secret"));
+    assert!(!text.contains("candidate_call"));
+    assert!(!text.contains("\"args\""));
+    assert!(!text.contains("query"));
+}
+
+#[test]
+fn sentry_guardrail_exhausted_event_omits_private_payload_fields() {
+    let mut args = IndexMap::new();
+    args.insert("path".to_string(), json!("/Users/private/secret.txt"));
+    let calls = vec![ToolCall::new("read_file", args)
+        .with_id("secret-call-id")
+        .with_reasoning("secret reasoning")];
+    let pending_steps = vec!["search_docs".to_string(), "respond".to_string()];
+
+    let event = super::telemetry::guardrail_exhausted_event(
+        "step_enforcement_exhausted",
+        &calls,
+        &pending_steps,
+        Some(4),
+        Some(3),
+        Some(true),
+    );
+    let text = serde_json::to_string(&event).expect("event json");
+
+    assert!(text.contains("guardrail_exhausted"));
+    assert!(text.contains("step_enforcement_exhausted"));
+    assert!(text.contains("read_file"));
+    assert!(text.contains("search_docs"));
+    assert!(!text.contains("secret"));
+    assert!(!text.contains("arguments"));
+    assert!(!text.contains("/Users/private"));
+}
+
+#[test]
 fn training_capture_event_includes_available_tools_and_private_metadata() {
     let mut args = IndexMap::new();
     args.insert("query".to_string(), json!("proxy capture"));

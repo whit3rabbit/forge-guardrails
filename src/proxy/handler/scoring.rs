@@ -13,6 +13,9 @@ use crate::guardrails::{
 use crate::tools::respond::RESPOND_TOOL_NAME;
 
 use super::classifier_log::{emit_proxy_classifier_jsonl, proxy_tool_call_for_json, unix_ms};
+use super::telemetry::{
+    capture_final_response_classifier_non_allow, capture_tool_call_classifier_non_allow,
+};
 
 pub(super) async fn score_proxy_tool_calls(
     scorer: Option<Arc<dyn ToolCallScorer>>,
@@ -50,6 +53,7 @@ pub(super) async fn score_proxy_tool_calls(
             ctx,
             tool_calls,
             |call, score| {
+                capture_tool_call_classifier_non_allow(call, score);
                 tracing::info!(
                     target: "forge.classifier",
                     label = ?score.label,
@@ -184,6 +188,7 @@ async fn score_proxy_final_candidate(
         .score_final_response(
             ctx,
             |score| {
+                capture_final_response_classifier_non_allow(terminal_tool_name, score);
                 tracing::info!(
                     target: "forge.classifier",
                     label = %score.label.as_label(),
