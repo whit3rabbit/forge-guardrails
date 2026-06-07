@@ -5,6 +5,7 @@ pub(crate) enum Command {
     Review(Box<ReviewCli>),
     AgentLogs(Box<AgentLogsCli>),
     Assemble(AssembleCli),
+    Split(SplitCli),
     Validate(ValidateCli),
 }
 
@@ -44,6 +45,7 @@ pub(crate) struct ReviewCli {
     pub(crate) max_alternatives_per_group: usize,
     pub(crate) max_alternative_ratio: f64,
     pub(crate) concurrency: usize,
+    pub(crate) chunk_size: Option<usize>,
     pub(crate) resume: bool,
 }
 
@@ -76,6 +78,16 @@ pub(crate) struct AssembleCli {
     pub(crate) drop_conflicts: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SplitCli {
+    pub(crate) input: String,
+    pub(crate) out_dir: String,
+    pub(crate) train_output: String,
+    pub(crate) validation_output: String,
+    pub(crate) validation_ratio: f64,
+    pub(crate) seed: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidateCli {
     pub(crate) inputs: Vec<String>,
@@ -88,6 +100,10 @@ const DEFAULT_REVIEW_OUTPUT: &str = "target/dataset/training.toolcall.jsonl";
 const DEFAULT_AGENT_LOGS_OUT: &str = "target/dataset/agent_logs";
 const DEFAULT_ASSEMBLE_OUT_DIR: &str = "target/dataset/assembled";
 const DEFAULT_COMBINED_OUTPUT: &str = "training.toolcall.combined.jsonl";
+const DEFAULT_SPLIT_OUT_DIR: &str = "target/dataset/split";
+const DEFAULT_TRAIN_OUTPUT: &str = "train.jsonl";
+const DEFAULT_VALIDATION_OUTPUT: &str = "validation.jsonl";
+const DEFAULT_SPLIT_SEED: &str = "forge-dataset-v1";
 const DEFAULT_DOMAINS: &str = "repo_docs,shopping,calendar,support";
 const DEFAULT_ENV_FILE: &str = "notebook/generatetd/.env";
 const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M2.7";
@@ -108,6 +124,7 @@ where
         "review" => parse_review(&values[1..]),
         "agent-logs" => parse_agent_logs(&values[1..]),
         "assemble" => parse_assemble(&values[1..]),
+        "split" => parse_split(&values[1..]),
         "validate" => parse_validate(&values[1..]),
         other => Err(format!("unknown command: {other}")),
     }
@@ -208,6 +225,7 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
         max_alternatives_per_group: 2,
         max_alternative_ratio: 1.0 / 3.0,
         concurrency: 1,
+        chunk_size: None,
         resume: false,
     };
 
@@ -257,6 +275,9 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
             "--concurrency" => {
                 cli.concurrency = take_usize(values, &mut index, "--concurrency")?;
             }
+            "--chunk-size" => {
+                cli.chunk_size = Some(take_usize(values, &mut index, "--chunk-size")?);
+            }
             "--resume" => cli.resume = true,
             flag if flag.starts_with("--") => return Err(format!("unknown review flag: {flag}")),
             value => return Err(format!("unexpected review argument: {value}")),
@@ -279,6 +300,9 @@ fn parse_review(values: &[String]) -> Result<Command, String> {
     }
     if cli.concurrency == 0 || cli.concurrency > 32 {
         return Err("--concurrency must be between 1 and 32".to_string());
+    }
+    if cli.chunk_size == Some(0) {
+        return Err("--chunk-size must be at least 1".to_string());
     }
 
     Ok(Command::Review(Box::new(cli)))
@@ -413,6 +437,66 @@ fn parse_assemble(values: &[String]) -> Result<Command, String> {
     Ok(Command::Assemble(cli))
 }
 
+fn parse_split(values: &[String]) -> Result<Command, String> {
+    let mut cli = SplitCli {
+        input: String::new(),
+        out_dir: DEFAULT_SPLIT_OUT_DIR.to_string(),
+        train_output: DEFAULT_TRAIN_OUTPUT.to_string(),
+        validation_output: DEFAULT_VALIDATION_OUTPUT.to_string(),
+        validation_ratio: 0.10,
+        seed: DEFAULT_SPLIT_SEED.to_string(),
+    };
+
+    let mut index = 0;
+    while index < values.len() {
+        match values[index].as_str() {
+            "--help" | "-h" => return Err("__help__".to_string()),
+            "--input" => cli.input = take_one(values, &mut index, "--input")?,
+            "--out-dir" => cli.out_dir = take_one(values, &mut index, "--out-dir")?,
+            "--train-output" => {
+                cli.train_output = take_one(values, &mut index, "--train-output")?;
+            }
+            "--validation-output" => {
+                cli.validation_output = take_one(values, &mut index, "--validation-output")?;
+            }
+            "--validation-ratio" => {
+                cli.validation_ratio = take_f64(values, &mut index, "--validation-ratio")?;
+            }
+            "--seed" => cli.seed = take_one(values, &mut index, "--seed")?,
+            flag if flag.starts_with("--") => return Err(format!("unknown split flag: {flag}")),
+            value => {
+                if cli.input.is_empty() {
+                    cli.input = value.to_string();
+                } else {
+                    return Err(format!("unexpected split argument: {value}"));
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if cli.input.trim().is_empty() {
+        return Err("split requires --input".to_string());
+    }
+    if cli.train_output.trim().is_empty() {
+        return Err("--train-output must not be empty".to_string());
+    }
+    if cli.validation_output.trim().is_empty() {
+        return Err("--validation-output must not be empty".to_string());
+    }
+    if cli.train_output == cli.validation_output {
+        return Err("--train-output and --validation-output must differ".to_string());
+    }
+    if !(0.0..=1.0).contains(&cli.validation_ratio) {
+        return Err("--validation-ratio must be between 0.0 and 1.0".to_string());
+    }
+    if cli.seed.trim().is_empty() {
+        return Err("--seed must not be empty".to_string());
+    }
+
+    Ok(Command::Split(cli))
+}
+
 fn parse_validate(values: &[String]) -> Result<Command, String> {
     let mut cli = ValidateCli { inputs: Vec::new() };
 
@@ -493,6 +577,7 @@ pub(crate) fn print_help() {
            forge-dataset review --provider auto|minimax|openrouter [options]\n\
            forge-dataset agent-logs [options]\n\
            forge-dataset assemble --input PATH [--input PATH ...] [options]\n\
+           forge-dataset split --input PATH [options]\n\
            forge-dataset validate --input PATH [--input PATH ...]\n\n\
          Prompt options:\n\
            --model MODEL (default: test-model)\n\
@@ -523,6 +608,7 @@ pub(crate) fn print_help() {
            --max-alternatives-per-group N (default: 2)\n\
            --max-alternative-ratio R (default: 0.333333)\n\
            --concurrency N (default: 1; max: 32; parallelizes capture review)\n\
+           --chunk-size N (client-side review chunk size; optional)\n\
            --resume (skip rows already present in output/rejects)\n\n\
          Agent log options:\n\
            --out DIR (default: target/dataset/agent_logs)\n\
@@ -546,6 +632,13 @@ pub(crate) fn print_help() {
            --out-dir DIR (default: target/dataset/assembled)\n\
            --combined-output NAME (default: training.toolcall.combined.jsonl)\n\
            --drop-conflicts (exclude all inputs with conflicting labels)\n\n\
+         Split options:\n\
+           --input PATH\n\
+           --out-dir DIR (default: target/dataset/split)\n\
+           --train-output NAME (default: train.jsonl)\n\
+           --validation-output NAME (default: validation.jsonl)\n\
+           --validation-ratio R (default: 0.10)\n\
+           --seed TEXT (default: forge-dataset-v1)\n\n\
          Validate options:\n\
            --input PATH (may be repeated; positional paths are also accepted)"
     );
@@ -600,6 +693,7 @@ mod tests {
         assert_eq!(cli.verifier_provider, "same");
         assert_eq!(cli.env_file, DEFAULT_ENV_FILE);
         assert_eq!(cli.concurrency, 1);
+        assert_eq!(cli.chunk_size, None);
         assert!(!cli.resume);
     }
 
@@ -642,6 +736,21 @@ mod tests {
             panic!("expected review");
         };
         assert_eq!(cli.concurrency, 4);
+    }
+
+    #[test]
+    fn review_parses_chunk_size() {
+        let command = parse(&["review", "--chunk-size", "100"]).expect("parse");
+        let Command::Review(cli) = command else {
+            panic!("expected review");
+        };
+        assert_eq!(cli.chunk_size, Some(100));
+    }
+
+    #[test]
+    fn review_rejects_zero_chunk_size() {
+        let err = parse(&["review", "--chunk-size", "0"]).expect_err("invalid");
+        assert!(err.contains("--chunk-size must be at least 1"));
     }
 
     #[test]
@@ -745,6 +854,61 @@ mod tests {
             panic!("expected assemble");
         };
         assert!(cli.drop_conflicts);
+    }
+
+    #[test]
+    fn split_defaults_match_contract() {
+        let command = parse(&["split", "--input", "target/combined.jsonl"]).expect("parse");
+        let Command::Split(cli) = command else {
+            panic!("expected split");
+        };
+        assert_eq!(cli.input, "target/combined.jsonl");
+        assert_eq!(cli.out_dir, DEFAULT_SPLIT_OUT_DIR);
+        assert_eq!(cli.train_output, DEFAULT_TRAIN_OUTPUT);
+        assert_eq!(cli.validation_output, DEFAULT_VALIDATION_OUTPUT);
+        assert_eq!(cli.validation_ratio, 0.10);
+        assert_eq!(cli.seed, DEFAULT_SPLIT_SEED);
+    }
+
+    #[test]
+    fn split_parses_options_and_positional_input() {
+        let command = parse(&[
+            "split",
+            "target/combined.jsonl",
+            "--out-dir",
+            "target/split",
+            "--train-output",
+            "training.jsonl",
+            "--validation-output",
+            "validation.jsonl",
+            "--validation-ratio",
+            "0.2",
+            "--seed",
+            "seed-1",
+        ])
+        .expect("parse");
+        let Command::Split(cli) = command else {
+            panic!("expected split");
+        };
+        assert_eq!(cli.input, "target/combined.jsonl");
+        assert_eq!(cli.out_dir, "target/split");
+        assert_eq!(cli.train_output, "training.jsonl");
+        assert_eq!(cli.validation_output, "validation.jsonl");
+        assert_eq!(cli.validation_ratio, 0.2);
+        assert_eq!(cli.seed, "seed-1");
+    }
+
+    #[test]
+    fn split_rejects_invalid_ratio() {
+        let err = parse(&[
+            "split",
+            "--input",
+            "target/combined.jsonl",
+            "--validation-ratio",
+            "1.1",
+        ])
+        .expect_err("invalid");
+        assert!(err.contains("--validation-ratio must be between"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ DEFAULT_MAX_TURNS="4"
 DEFAULT_RUNS="1"
 DEFAULT_DOMAINS="repo_docs,shopping,calendar,support"
 DEFAULT_COMBINED_OUTPUT="training.toolcall.combined.jsonl"
+DEFAULT_SPLIT_SEED="forge-dataset-v1"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
@@ -23,12 +24,16 @@ MODEL="${FORGE_DATASET_MODEL:-$DEFAULT_MODEL}"
 PROVIDER="${FORGE_DATASET_REVIEW_PROVIDER:-$DEFAULT_PROVIDER}"
 VERIFIER_PROVIDER="${FORGE_DATASET_VERIFIER_PROVIDER:-$DEFAULT_VERIFIER_PROVIDER}"
 REVIEW_CONCURRENCY="${FORGE_DATASET_REVIEW_CONCURRENCY:-$DEFAULT_REVIEW_CONCURRENCY}"
+REVIEW_CHUNK_SIZE="${FORGE_DATASET_REVIEW_CHUNK_SIZE:-}"
 MAX_TURNS="${FORGE_DATASET_MAX_TURNS:-$DEFAULT_MAX_TURNS}"
 RUNS="${FORGE_DATASET_RUNS:-$DEFAULT_RUNS}"
 DOMAINS="${FORGE_DATASET_DOMAINS:-$DEFAULT_DOMAINS}"
+OPENROUTER_MODEL="${FORGE_DATASET_OPENROUTER_MODEL:-}"
 AGENT_LOG_LIMIT="${FORGE_DATASET_AGENT_LOG_LIMIT:-}"
 AGENT_LOG_SYNTHETIC_BALANCED="${FORGE_DATASET_AGENT_LOG_SYNTHETIC_BALANCED:-0}"
 COMBINED_OUTPUT="${FORGE_DATASET_COMBINED_OUTPUT:-$DEFAULT_COMBINED_OUTPUT}"
+SPLIT_VALIDATION_RATIO="${FORGE_DATASET_SPLIT_VALIDATION_RATIO:-}"
+SPLIT_SEED="${FORGE_DATASET_SPLIT_SEED:-$DEFAULT_SPLIT_SEED}"
 GGUF_PATH_ARG="${GGUF_PATH:-${FORGE_GGUF:-${GGUF:-}}}"
 CAPTURE_ONLY=0
 INCLUDE_AGENT_LOGS=0
@@ -48,7 +53,9 @@ Options:
                                 Review provider (default: auto)
   --verifier-provider same|auto|minimax|openrouter
                                 Verifier provider (default: same)
+  --openrouter-model MODEL      OpenRouter review/verifier model
   --review-concurrency N        Parallel capture reviews (default: $DEFAULT_REVIEW_CONCURRENCY)
+  --review-chunk-size N         Client-side review chunk size
   --max-turns N                 Capture turns per scenario (default: $DEFAULT_MAX_TURNS)
   --runs N                      Scenario repetitions (default: $DEFAULT_RUNS)
   --domains CSV                 Dataset domains (default: $DEFAULT_DOMAINS; also supports forge_eval)
@@ -60,6 +67,8 @@ Options:
   --agent-log-synthetic-balanced N
                                 Add bounded synthetic agent-log negatives
   --combined-output NAME        Combined output file name (default: $DEFAULT_COMBINED_OUTPUT)
+  --split-validation-ratio R    Split reviewed rows into train/validation outputs
+  --split-seed TEXT             Deterministic split seed (default: $DEFAULT_SPLIT_SEED)
   -h, --help                    Show this help
 
 Environment:
@@ -111,8 +120,16 @@ while [[ $# -gt 0 ]]; do
       VERIFIER_PROVIDER="${2:?--verifier-provider requires a value}"
       shift 2
       ;;
+    --openrouter-model)
+      OPENROUTER_MODEL="${2:?--openrouter-model requires a value}"
+      shift 2
+      ;;
     --review-concurrency)
       REVIEW_CONCURRENCY="${2:?--review-concurrency requires a value}"
+      shift 2
+      ;;
+    --review-chunk-size)
+      REVIEW_CHUNK_SIZE="${2:?--review-chunk-size requires a value}"
       shift 2
       ;;
     --max-turns)
@@ -155,6 +172,14 @@ while [[ $# -gt 0 ]]; do
       COMBINED_OUTPUT="${2:?--combined-output requires a value}"
       shift 2
       ;;
+    --split-validation-ratio)
+      SPLIT_VALIDATION_RATIO="${2:?--split-validation-ratio requires a value}"
+      shift 2
+      ;;
+    --split-seed)
+      SPLIT_SEED="${2:?--split-seed requires a value}"
+      shift 2
+      ;;
     --)
       shift
       PROXY_EXTRA_ARGS+=("$@")
@@ -180,12 +205,19 @@ valid_port "$BACKEND_PORT" || die "invalid backend port: $BACKEND_PORT"
 [[ "$PROVIDER" =~ ^(auto|minimax|openrouter|none)$ ]] || die "--provider must be auto|minimax|openrouter|none"
 [[ "$VERIFIER_PROVIDER" =~ ^(same|auto|minimax|openrouter)$ ]] || die "--verifier-provider must be same|auto|minimax|openrouter"
 [[ "$REVIEW_CONCURRENCY" =~ ^[0-9]+$ ]] && (( REVIEW_CONCURRENCY >= 1 && REVIEW_CONCURRENCY <= 32 )) || die "--review-concurrency must be an integer from 1 to 32"
+if [[ -n "$REVIEW_CHUNK_SIZE" ]]; then
+  [[ "$REVIEW_CHUNK_SIZE" =~ ^[0-9]+$ ]] && (( REVIEW_CHUNK_SIZE > 0 )) || die "--review-chunk-size must be a positive integer"
+fi
 [[ "$MAX_TURNS" =~ ^[0-9]+$ ]] && (( MAX_TURNS > 0 )) || die "--max-turns must be a positive integer"
 [[ "$RUNS" =~ ^[0-9]+$ ]] && (( RUNS > 0 )) || die "--runs must be a positive integer"
 if [[ -n "$AGENT_LOG_LIMIT" ]]; then
   [[ "$AGENT_LOG_LIMIT" =~ ^[0-9]+$ ]] || die "--agent-log-limit must be a non-negative integer"
 fi
 [[ "$AGENT_LOG_SYNTHETIC_BALANCED" =~ ^[0-9]+$ ]] || die "--agent-log-synthetic-balanced must be a non-negative integer"
+if [[ -n "$SPLIT_VALIDATION_RATIO" ]]; then
+  [[ "$SPLIT_VALIDATION_RATIO" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "--split-validation-ratio must be a number"
+fi
+[[ -n "$SPLIT_SEED" ]] || die "--split-seed must not be empty"
 
 mkdir -p "$OUT_DIR"
 PROMPTS_JSONL="$OUT_DIR/tool_prompts.jsonl"
@@ -196,6 +228,8 @@ TRAINING_REJECTS_JSONL="$OUT_DIR/training.toolcall.rejects.jsonl"
 AGENT_LOGS_DIR="$OUT_DIR/agent_logs"
 AGENT_LOGS_TOOL_JSONL="$AGENT_LOGS_DIR/tool_call_training.jsonl"
 COMBINED_JSONL="$OUT_DIR/$COMBINED_OUTPUT"
+TRAIN_JSONL="$OUT_DIR/train.jsonl"
+VALIDATION_JSONL="$OUT_DIR/validation.jsonl"
 
 pid_listening_on_port() {
   local port
@@ -261,6 +295,10 @@ if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
   printf 'Agent log rows: %s\n' "$AGENT_LOGS_TOOL_JSONL"
   printf 'Combined rows: %s\n' "$COMBINED_JSONL"
 fi
+if [[ -n "$SPLIT_VALIDATION_RATIO" ]]; then
+  printf 'Train split rows: %s\n' "$TRAIN_JSONL"
+  printf 'Validation split rows: %s\n' "$VALIDATION_JSONL"
+fi
 
 env \
   FORGE_PROXY_PORT="$PROXY_PORT" \
@@ -306,12 +344,20 @@ if [[ "$CAPTURE_ONLY" == "1" || "$PROVIDER" == "none" ]]; then
   exit 0
 fi
 
-cargo run --bin forge-dataset -- review \
-  --input "$CAPTURE_JSONL" \
-  --output "$TRAINING_JSONL" \
-  --provider "$PROVIDER" \
-  --verifier-provider "$VERIFIER_PROVIDER" \
+REVIEW_ARGS=(
+  --input "$CAPTURE_JSONL"
+  --output "$TRAINING_JSONL"
+  --provider "$PROVIDER"
+  --verifier-provider "$VERIFIER_PROVIDER"
   --concurrency "$REVIEW_CONCURRENCY"
+)
+if [[ -n "$OPENROUTER_MODEL" ]]; then
+  REVIEW_ARGS+=(--openrouter-model "$OPENROUTER_MODEL")
+fi
+if [[ -n "$REVIEW_CHUNK_SIZE" ]]; then
+  REVIEW_ARGS+=(--chunk-size "$REVIEW_CHUNK_SIZE")
+fi
+cargo run --bin forge-dataset -- review "${REVIEW_ARGS[@]}"
 
 cargo run --bin forge-dataset -- validate --input "$TRAINING_JSONL"
 if [[ -f "$TRAINING_REJECTS_JSONL" ]]; then
@@ -324,6 +370,9 @@ if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
     --provider "$PROVIDER"
     --verifier-provider "$VERIFIER_PROVIDER"
   )
+  if [[ -n "$OPENROUTER_MODEL" ]]; then
+    AGENT_LOG_ARGS+=(--openrouter-model "$OPENROUTER_MODEL")
+  fi
   if [[ -n "$AGENT_LOG_LIMIT" ]]; then
     AGENT_LOG_ARGS+=(--limit "$AGENT_LOG_LIMIT")
   fi
@@ -340,7 +389,26 @@ if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
   cargo run --bin forge-dataset -- validate --input "$COMBINED_JSONL"
 fi
 
+if [[ -n "$SPLIT_VALIDATION_RATIO" ]]; then
+  SPLIT_INPUT="$TRAINING_JSONL"
+  if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
+    SPLIT_INPUT="$COMBINED_JSONL"
+  fi
+  cargo run --bin forge-dataset -- split \
+    --input "$SPLIT_INPUT" \
+    --out-dir "$OUT_DIR" \
+    --validation-ratio "$SPLIT_VALIDATION_RATIO" \
+    --seed "$SPLIT_SEED"
+  cargo run --bin forge-dataset -- validate \
+    --input "$TRAIN_JSONL" \
+    --input "$VALIDATION_JSONL"
+fi
+
 printf 'Training rows: %s\n' "$TRAINING_JSONL"
 if [[ "$INCLUDE_AGENT_LOGS" == "1" ]]; then
   printf 'Combined training rows: %s\n' "$COMBINED_JSONL"
+fi
+if [[ -n "$SPLIT_VALIDATION_RATIO" ]]; then
+  printf 'Train split rows: %s\n' "$TRAIN_JSONL"
+  printf 'Validation split rows: %s\n' "$VALIDATION_JSONL"
 fi

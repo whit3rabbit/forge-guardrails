@@ -137,8 +137,10 @@ cargo run --bin forge-dataset -- review \
   --input target/dataset/capture.jsonl \
   --output target/dataset/training.toolcall.jsonl \
   --provider openrouter \
+  --openrouter-model deepseek/deepseek-v4-pro \
   --verifier-provider same \
-  --concurrency 4
+  --concurrency 4 \
+  --chunk-size 100
 ```
 
 Review with MiniMax:
@@ -174,6 +176,11 @@ output path or move the rejects file aside.
 writes ordered and single-threaded. Start with `4`; higher values can hit
 provider rate limits. To skip generated targeted alternatives, pass
 `--max-alternative-ratio 0`.
+
+`--chunk-size N` groups unreviewed capture rows into deterministic client-side
+review chunks before applying the bounded concurrency window. It is not an
+OpenRouter batch API request; use it to make long review runs easier to resume
+and audit while keeping provider concurrency modest.
 
 Validate JSONL files:
 
@@ -217,6 +224,22 @@ by serialized model input, preserves the first input on exact duplicates, and
 writes conflicting duplicate labels to `conflicts.jsonl`. Use
 `--drop-conflicts` for upload candidates so every serialized input with
 conflicting labels is excluded from the combined output and notebook adapter.
+
+Split reviewed rows into train and validation sets:
+
+```bash
+cargo run --bin forge-dataset -- split \
+  --input target/dataset/run/training.toolcall.combined.jsonl \
+  --out-dir target/dataset/run \
+  --validation-ratio 0.10 \
+  --seed forge-dataset-v1
+```
+
+`split` preserves the accepted rows unchanged, validates the full input before
+writing, accepts tool-call input schemas v1 and v2, and keeps rows with the same
+`review.example_group_id` together. If that field is absent, it falls back to
+other stable review keys, then the serialized model input. Outputs are written
+atomically as `train.jsonl`, `validation.jsonl`, and `split_manifest.json`.
 
 ## Provider Configuration
 
@@ -275,6 +298,9 @@ Default one-command output files under `target/dataset/run/`:
 - `training.toolcall.rejects.jsonl`: malformed/rejected reviewer or verifier rows.
 - `agent_logs/tool_call_training.jsonl`: optional sanitized local agent-log rows.
 - `training.toolcall.combined.jsonl`: optional assembled proxy-first + agent-log rows.
+- `train.jsonl`: optional group-aware training split.
+- `validation.jsonl`: optional group-aware validation split.
+- `split_manifest.json`: optional split counts by label, source bucket, and schema.
 - `agent_training.notebook.jsonl`: optional notebook adapter emitted by `assemble`.
 - `dataset_manifest.json`: optional assembled run manifest.
 - `quarantine.jsonl` and `conflicts.jsonl`: optional assemble rejects and label conflicts.

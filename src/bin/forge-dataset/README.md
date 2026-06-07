@@ -117,9 +117,10 @@ cargo run --bin forge-dataset -- review \
   --input target/dataset/run/capture.jsonl \
   --output target/dataset/run/training.toolcall.jsonl \
   --provider openrouter \
-  --openrouter-model openrouter/owl-alpha \
-  --verifier-provider minimax \
-  --concurrency 4
+  --openrouter-model deepseek/deepseek-v4-pro \
+  --verifier-provider same \
+  --concurrency 4 \
+  --chunk-size 100
 ```
 
 `review` appends accepted rows and rejects as it goes. If interrupted, resume
@@ -176,6 +177,21 @@ Use `--drop-conflicts` for upload candidates. It excludes every serialized
 model input that received conflicting labels, rather than keeping the first
 label and only recording the later conflict.
 
+Split reviewed rows into train and validation sets:
+
+```bash
+cargo run --bin forge-dataset -- split \
+  --input target/dataset/run/training.toolcall.combined.jsonl \
+  --out-dir target/dataset/run \
+  --validation-ratio 0.10 \
+  --seed forge-dataset-v1
+```
+
+`split` preserves rows unchanged, validates `toolcall-verifier-training/v1`
+rows before writing outputs, accepts tool-call input v1 and v2, and keeps
+related rows together by `review.example_group_id` with deterministic fallbacks.
+It writes `train.jsonl`, `validation.jsonl`, and `split_manifest.json`.
+
 Validate outputs:
 
 ```bash
@@ -209,6 +225,7 @@ Useful review flags:
 - `--openrouter-model MODEL`
 - `--minimax-model MODEL`
 - `--concurrency N`
+- `--chunk-size N`
 - `--reviewer-api-key KEY`
 - `--verifier-api-key KEY`
 

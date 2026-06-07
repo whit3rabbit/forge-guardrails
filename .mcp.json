@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "synrepo": {
+      "command": "synrepo",
+      "args": [
+        "mcp",
+        "--repo",
+        "."
+      ]
+    }
+  }
+}

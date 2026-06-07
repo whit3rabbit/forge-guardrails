@@ -7,6 +7,7 @@ mod cli;
 mod prompts;
 mod review;
 mod schema;
+mod split;
 mod stub_tools;
 mod validate;
 
@@ -35,6 +36,7 @@ async fn main() {
         Command::Review(cli) => review::run(*cli).await,
         Command::AgentLogs(cli) => agent_logs::run(*cli),
         Command::Assemble(cli) => assemble::run(cli),
+        Command::Split(cli) => split::run(cli),
         Command::Validate(cli) => validate::run(cli),
     };
 
