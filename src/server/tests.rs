@@ -152,7 +152,7 @@ fn write_fake_http_backend(path: &Path, log_path: &Path, fixed_ctx: Option<i64>)
     let body = format!(
         r#"#!/bin/sh
 printf '%s\n' "$*" >> {log}
-python3 - "$@" <<'PY'
+exec python3 - "$@" <<'PY'
 import json
 import signal
 import sys
