@@ -242,6 +242,53 @@ fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
 }
 
 #[test]
+fn tool_output_compression_event_fingerprints_args_after_redaction() {
+    let result = ToolOutputCompressionResult {
+        output: "compressed".to_string(),
+        before_tokens: 12,
+        after_tokens: 4,
+        saved_tokens: 8,
+        saved_pct: 66,
+        canonical_tool: "bash".to_string(),
+        family: "generic".to_string(),
+        mode: ToolOutputCompressionMode::Standard,
+        redacted: false,
+        capped: false,
+        deduped: false,
+        strategies: Vec::new(),
+    };
+    let event_for = |args: &IndexMap<String, Value>| {
+        super::compression::compression_event(
+            super::compression::CompressionEventInput {
+                tool_call_id: Some("call_shell"),
+                tool_name: "bash",
+                message_index: 1,
+                tool_result_index: 1,
+                args: Some(args),
+                input_output: "raw",
+                request_debug: None,
+            },
+            &result,
+        )
+    };
+
+    let mut secret_args = IndexMap::new();
+    secret_args.insert("token".to_string(), json!("sk-abcdefghijklmnopqrstuvwxyz"));
+    let mut redacted_args = IndexMap::new();
+    redacted_args.insert("token".to_string(), json!("[REDACTED_SECRET]"));
+
+    let secret_event = event_for(&secret_args);
+    let redacted_event = event_for(&redacted_args);
+
+    // A secret-bearing argument must fingerprint identically to its redacted
+    // form, otherwise the telemetry hash can be dictionary-correlated.
+    assert_eq!(
+        secret_event["args_fingerprint64"],
+        redacted_event["args_fingerprint64"]
+    );
+}
+
+#[test]
 fn tool_output_compression_event_includes_dictionary_method_when_present() {
     let result_for = |output: String| ToolOutputCompressionResult {
         output,
@@ -2730,11 +2777,76 @@ async fn tool_output_compression_dedups_repeated_tool_results_by_session() {
     assert!(!sent[0][2]["content"]
         .as_str()
         .expect("first content")
-        .contains("Duplicate of call"));
+        .contains("Duplicate of tool call"));
     assert!(sent[0][4]["content"]
         .as_str()
         .expect("second content")
-        .contains("Duplicate of call #"));
+        .contains("Duplicate of tool call call_one (bash)"));
+}
+
+#[tokio::test]
+async fn tool_output_compression_keeps_resent_tool_results_across_requests() {
+    let client = Arc::new(MockWorkflowContractClient::new(vec![
+        LLMResponse::Text(TextResponse::new("ok")),
+        LLMResponse::Text(TextResponse::new("ok")),
+    ]));
+    let repeated = (0..200)
+        .map(|idx| format!("large unique output line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = json!({
+        "messages": [
+            {"role": "user", "content": "summarize prior output"},
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_one",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{\"command\":\"custom-tool\"}"}
+                }]
+            },
+            {"role": "tool", "tool_call_id": "call_one", "name": "bash", "content": repeated}
+        ],
+        "model": "test-model",
+        "_forge": {
+            "tool_output_compression": {
+                "mode": "standard",
+                "session_id": "session-resend",
+                "dedup": true
+            }
+        }
+    });
+    let state = Arc::new(ToolOutputCompressionState::new());
+
+    for _ in 0..2 {
+        let ctx = Arc::new(Mutex::new(dummy_ctx()));
+        handle_chat_completions_with_scorers_and_tool_output_compression(
+            &body,
+            &client,
+            &ctx,
+            3,
+            true,
+            None,
+            None,
+            ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Disabled),
+            Some(state.clone()),
+        )
+        .await
+        .expect("handler result");
+    }
+
+    let sent = client.sent_messages();
+    // Clients re-send the full conversation every request. The same tool
+    // result arriving again under the same call id must keep its content
+    // instead of degrading into a duplicate marker that references a result
+    // no longer visible upstream.
+    let resent_content = sent[1][2]["content"].as_str().expect("resent content");
+    assert!(!resent_content.contains("Duplicate of tool call"));
+    assert_eq!(
+        resent_content,
+        sent[0][2]["content"].as_str().expect("first content")
+    );
 }
 
 #[tokio::test]

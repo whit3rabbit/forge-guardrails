@@ -13,7 +13,6 @@ pub struct ToolOutputCompressionState {
 struct DedupState {
     sessions: IndexMap<String, VecDeque<DedupRecord>>,
     session_order: VecDeque<String>,
-    next_call_index: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +20,7 @@ struct DedupRecord {
     hash: u64,
     output_len: usize,
     tool_name: String,
-    call_index: u64,
+    tool_call_id: String,
 }
 
 impl ToolOutputCompressionState {
@@ -33,12 +32,13 @@ impl ToolOutputCompressionState {
     pub(in crate::tool_output) fn deduplicate(
         &self,
         session_id: &str,
+        tool_call_id: &str,
         tool_name: &str,
         output: &str,
         max_sessions: usize,
         max_entries_per_session: usize,
     ) -> Option<String> {
-        if session_id.is_empty() || output.is_empty() {
+        if session_id.is_empty() || tool_call_id.is_empty() || output.is_empty() {
             return None;
         }
         let max_sessions = max_sessions.max(1);
@@ -53,9 +53,15 @@ impl ToolOutputCompressionState {
                     && record.hash == hash
                     && record.output_len == output_len
             }) {
+                // The same call re-sent in a later request must keep its
+                // content; only a different call with identical output is a
+                // true duplicate.
+                if record.tool_call_id == tool_call_id {
+                    return None;
+                }
                 return Some(format!(
-                    "[Duplicate of call #{} ({}) - see earlier result]",
-                    record.call_index, record.tool_name
+                    "[Duplicate of tool call {} ({}) - see earlier result]",
+                    record.tool_call_id, record.tool_name
                 ));
             }
         }
@@ -67,8 +73,6 @@ impl ToolOutputCompressionState {
                 .insert(session_id.to_string(), VecDeque::new());
         }
 
-        state.next_call_index = state.next_call_index.saturating_add(1);
-        let call_index = state.next_call_index;
         let records = state
             .sessions
             .get_mut(session_id)
@@ -77,7 +81,7 @@ impl ToolOutputCompressionState {
             hash,
             output_len,
             tool_name: tool_name.to_string(),
-            call_index,
+            tool_call_id: tool_call_id.to_string(),
         });
         while records.len() > max_entries_per_session {
             records.pop_front();

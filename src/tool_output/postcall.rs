@@ -222,8 +222,10 @@ impl ColumnSpec {
 
     fn observe(&mut self, value: &Value) -> Option<()> {
         let next = ScalarKind::from_value(value)?;
+        // Mixed-type columns abort the transform: an int 5 and a string "5"
+        // would render identically, breaking the lossless guarantee.
         self.kind = Some(match self.kind {
-            Some(existing) => existing.merge(next),
+            Some(existing) => existing.merge(next)?,
             None => next,
         });
         Some(())
@@ -247,7 +249,6 @@ enum ScalarKind {
     Int,
     Float,
     String,
-    Mixed,
 }
 
 impl ScalarKind {
@@ -267,12 +268,12 @@ impl ScalarKind {
         }
     }
 
-    fn merge(self, other: Self) -> Self {
+    fn merge(self, other: Self) -> Option<Self> {
         match (self, other) {
-            (Self::Null, kind) | (kind, Self::Null) => kind,
-            (Self::Int, Self::Float) | (Self::Float, Self::Int | Self::Float) => Self::Float,
-            (left, right) if left == right => left,
-            _ => Self::Mixed,
+            (Self::Null, kind) | (kind, Self::Null) => Some(kind),
+            (Self::Int, Self::Float) | (Self::Float, Self::Int) => Some(Self::Float),
+            (left, right) if left == right => Some(left),
+            _ => None,
         }
     }
 
@@ -283,7 +284,6 @@ impl ScalarKind {
             Self::Int => "int",
             Self::Float => "float",
             Self::String => "string",
-            Self::Mixed => "mixed",
         }
     }
 }
@@ -300,7 +300,12 @@ fn scalar_to_csv(value: &Value) -> String {
 }
 
 fn needs_csv_quote(value: &str) -> bool {
-    value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r')
+    // Empty strings are quoted so a bare empty cell always means null/missing.
+    value.is_empty()
+        || value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
 }
 
 fn csv_quote(value: &str) -> String {

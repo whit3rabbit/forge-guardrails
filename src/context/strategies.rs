@@ -268,7 +268,7 @@ fn compact_tool_result_for_phase1(msg: &Message) -> Message {
         ..ToolOutputCompressionConfig::default()
     };
     let tool_name = msg.tool_name.as_deref().unwrap_or("generic");
-    let compressed = compress_tool_output(tool_name, None, &msg.content, &config, None);
+    let compressed = compress_tool_output(tool_name, None, None, &msg.content, &config, None);
     if compressed.output == msg.content {
         msg.clone()
     } else {

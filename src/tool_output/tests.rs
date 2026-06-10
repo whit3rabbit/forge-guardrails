@@ -48,6 +48,7 @@ fn disabled_returns_original_output() {
     let result = compress_tool_output(
         "bash",
         None,
+        None,
         "unchanged",
         &ToolOutputCompressionConfig::disabled(),
         None,
@@ -60,6 +61,7 @@ fn disabled_returns_original_output() {
 fn safe_redacts_secret_like_values() {
     let result = compress_tool_output(
         "bash",
+        None,
         None,
         "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz",
         &safe_config(),
@@ -80,6 +82,7 @@ fn safe_redaction_can_be_disabled() {
     let result = compress_tool_output(
         "bash",
         None,
+        None,
         "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz",
         &config,
         None,
@@ -92,6 +95,7 @@ fn safe_redaction_can_be_disabled() {
 fn safe_strips_ansi_sequences() {
     let result = compress_tool_output(
         "bash",
+        None,
         None,
         "\u{1b}[31merror\u{1b}[0m",
         &safe_config(),
@@ -106,6 +110,7 @@ fn safe_redacts_secret_split_by_ansi_sequences() {
     let result = compress_tool_output(
         "bash",
         None,
+        None,
         "token sk-\u{1b}[31mabcdefghijklmnopqrstuvwxyz\u{1b}[0m",
         &safe_config(),
         None,
@@ -116,16 +121,38 @@ fn safe_redacts_secret_split_by_ansi_sequences() {
 }
 
 #[test]
+fn safe_redacts_single_line_private_key_without_swallowing_rest() {
+    let raw = "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBg-----END PRIVATE KEY-----\nimportant output line\n";
+    let result = compress_tool_output("bash", None, None, raw, &safe_config(), None);
+    assert!(result.redacted);
+    assert!(result.output.contains("[REDACTED_PRIVATE_KEY]"));
+    assert!(!result.output.contains("MIIEvQIBADANBg"));
+    assert!(result.output.contains("important output line"));
+}
+
+#[test]
+fn safe_redacts_github_fine_grained_and_slack_tokens() {
+    let raw = "pat github_pat_11ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef slack xoxb-1234567890-abcdefghijk";
+    let result = compress_tool_output("bash", None, None, raw, &safe_config(), None);
+    assert!(result.redacted);
+    assert!(!result
+        .output
+        .contains("github_pat_11ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"));
+    assert!(!result.output.contains("xoxb-1234567890-abcdefghijk"));
+    assert_eq!(result.output.matches("[REDACTED_SECRET]").count(), 2);
+}
+
+#[test]
 fn safe_preserves_thinking_blocks_from_tool_output() {
     let raw = "visible before\n<thinking>\nprivate chain\n</thinking>\nvisible after\n";
-    let result = compress_tool_output("bash", None, raw, &safe_config(), None);
+    let result = compress_tool_output("bash", None, None, raw, &safe_config(), None);
     assert_eq!(result.output, raw);
     assert!(!result.strategies.contains(&"strip_thinking".to_string()));
 }
 
 #[test]
 fn safe_suppresses_binary_output() {
-    let result = compress_tool_output("bash", None, "abc\0def", &safe_config(), None);
+    let result = compress_tool_output("bash", None, None, "abc\0def", &safe_config(), None);
     assert!(result.capped);
     assert!(result.output.contains("Binary output suppressed"));
 }
@@ -137,7 +164,7 @@ fn safe_caps_oversized_output() {
         max_output_bytes: 20,
         ..ToolOutputCompressionConfig::default()
     };
-    let result = compress_tool_output("bash", None, "a".repeat(200).as_str(), &config, None);
+    let result = compress_tool_output("bash", None, None, "a".repeat(200).as_str(), &config, None);
     assert!(result.capped);
     assert!(result.output.contains("Tool output capped"));
 }
@@ -151,7 +178,7 @@ fn safe_caps_oversized_unicode_output_on_char_boundaries() {
     };
     let raw = "alpha😀beta😀gamma😀delta";
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(result.capped);
     assert!(result.output.contains("Tool output capped"));
@@ -164,7 +191,7 @@ fn aggressive_binary_suppression_skips_later_filters() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
     let raw = format!("{}{}", "abc\0def", "2026-05-28T12:34:56Z ".repeat(20));
 
-    let result = compress_tool_output("bash", None, &raw, &config, None);
+    let result = compress_tool_output("bash", None, None, &raw, &config, None);
 
     assert!(result.capped);
     assert_eq!(
@@ -183,7 +210,14 @@ fn aggressive_binary_suppression_skips_later_filters() {
 #[test]
 fn standard_minifies_json_when_smaller() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
-    let result = compress_tool_output("read", None, "{\n  \"a\": 1,\n  \"b\": 2\n}", &config, None);
+    let result = compress_tool_output(
+        "read",
+        None,
+        None,
+        "{\n  \"a\": 1,\n  \"b\": 2\n}",
+        &config,
+        None,
+    );
     assert_eq!(result.output, "{\"a\":1,\"b\":2}");
 }
 
@@ -192,6 +226,7 @@ fn standard_routes_grep_output_by_file() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let result = compress_tool_output(
         "search",
+        None,
         None,
         "src/a.rs:10:fn alpha()\nsrc/a.rs:20:fn beta()\ntarget/x.rs:1:noise\n",
         &config,
@@ -210,7 +245,7 @@ C:\\repo\\src\\a.rs:11:fn beta()
 target\\debug\\noise.rs:1:ignored
 ";
 
-    let result = compress_tool_output("grep", None, raw, &config, None);
+    let result = compress_tool_output("grep", None, None, raw, &config, None);
 
     assert!(result.output.contains("C:\\repo\\src\\a.rs:"));
     assert!(result.output.contains("10: fn alpha()"));
@@ -229,7 +264,7 @@ src/a.rs:12:needle gamma
 target/noise.rs:1:needle ignored
 ";
 
-    let result = compress_tool_output("grep", None, raw, &config, None);
+    let result = compress_tool_output("grep", None, None, raw, &config, None);
 
     assert!(result.output.contains("diagnostics:"));
     assert!(result.output.contains("rg: warning: skipped hidden file"));
@@ -242,7 +277,7 @@ fn standard_grep_unknown_output_is_preserved() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "rg: regex parse error:\n    (?:\n    ^\nerror: unclosed group\n";
 
-    let result = compress_tool_output("grep", None, raw, &config, None);
+    let result = compress_tool_output("grep", None, None, raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.output.contains("(no matches)"));
@@ -253,7 +288,7 @@ fn standard_glob_all_noise_paths_are_preserved() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "target/debug/build.log\nnode_modules/pkg/index.js\n";
 
-    let result = compress_tool_output("glob", None, raw, &config, None);
+    let result = compress_tool_output("glob", None, None, raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.output.contains("(no matches)"));
@@ -266,7 +301,7 @@ fn standard_cargo_unknown_success_output_is_preserved() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "Compiling demo v0.1.0\nFinished dev [unoptimized] target(s) in 0.1s\n";
 
-    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+    let result = compress_tool_output("bash", None, Some(&args), raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.output.contains("compiled successfully"));
@@ -282,7 +317,7 @@ fn standard_cargo_json_diagnostics_are_summarized() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error[E0425]: missing value\\n --> src/lib.rs:1:1\\n\"}}\n{\"reason\":\"build-finished\",\"success\":false}\n";
 
-    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+    let result = compress_tool_output("bash", None, Some(&args), raw, &config, None);
 
     assert!(result.output.starts_with("Errors (1):\nerror[E0425]"));
     assert!(!result.output.contains("\"reason\""));
@@ -295,7 +330,7 @@ fn standard_test_unknown_success_output_is_preserved() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "custom harness completed without standard summary\n";
 
-    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+    let result = compress_tool_output("bash", None, Some(&args), raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.output.contains("all tests passed"));
@@ -314,7 +349,7 @@ fn standard_read_large_source_returns_outline() {
     source.push_str("pub struct Widget {\n    id: String,\n}\n");
     source.push_str("fn run_widget() {\n    println!(\"run\");\n}\n");
 
-    let result = compress_tool_output("read_file", Some(&args), &source, &config, None);
+    let result = compress_tool_output("read_file", None, Some(&args), &source, &config, None);
 
     assert!(result.output.starts_with("// src/example.rs ("));
     assert!(result.output.contains("L1: use crate"));
@@ -330,7 +365,7 @@ fn standard_read_keeps_config_files_verbatim() {
     args.insert("path".to_string(), json!("Cargo.toml"));
     let raw = "[package]\nname = \"forge\"\n\n[dependencies]\nserde = \"1\"\n";
 
-    let result = compress_tool_output("read_file", Some(&args), raw, &config, None);
+    let result = compress_tool_output("read_file", None, Some(&args), raw, &config, None);
 
     assert_eq!(result.output, raw);
 }
@@ -342,6 +377,7 @@ fn standard_detects_bash_family_from_command_args() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let result = compress_tool_output(
         "shell",
+        None,
         Some(&args),
         "Compiling x\nerror: failed\nlots of noise\n",
         &config,
@@ -368,7 +404,7 @@ index 111..222 100644
 +new value
 ";
 
-    let result = compress_tool_output("bash", Some(&args), raw, &config, None);
+    let result = compress_tool_output("bash", None, Some(&args), raw, &config, None);
 
     assert!(result.output.contains("Files changed: 1"));
     assert!(result.output.contains("src/lib.rs"));
@@ -389,7 +425,7 @@ fn standard_glob_drops_noise_paths_when_useful() {
     }
     let raw = lines.join("\n");
 
-    let result = compress_tool_output("glob", None, &raw, &config, None);
+    let result = compress_tool_output("glob", None, None, &raw, &config, None);
 
     assert!(result.output.contains("src/main.rs"));
     assert!(result.output.contains("src/lib.rs"));
@@ -411,7 +447,7 @@ fn opentoken_filter_fixture_cases_match_expected_outputs() {
         let tool = case["tool"].as_str().expect("case tool");
         let input = fixture_input(case);
         let args = fixture_args(case);
-        let result = compress_tool_output(tool, args.as_ref(), &input, &config, None);
+        let result = compress_tool_output(tool, None, args.as_ref(), &input, &config, None);
         let expected = case["expected_output"]
             .as_str()
             .unwrap_or_else(|| panic!("{name}: missing expected_output"));
@@ -449,7 +485,7 @@ fn compression_golden_fixture_cases_match_expected_outputs() {
             .collect::<Vec<_>>();
 
         let config = ToolOutputCompressionConfig::from_mode(mode);
-        let result = compress_tool_output(tool, None, input, &config, None);
+        let result = compress_tool_output(tool, None, None, input, &config, None);
 
         assert_eq!(result.output, expected, "{name}: output mismatch");
         assert_eq!(
@@ -463,7 +499,7 @@ fn compression_golden_fixture_cases_match_expected_outputs() {
 fn standard_filter_does_not_grow_output() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = "short";
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
     assert_eq!(result.output, raw);
 }
 
@@ -472,7 +508,7 @@ fn aggressive_normalizes_timestamps_and_hashes() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
     let raw = "2026-05-28T12:34:56Z completed artifact 0123456789abcdef0123456789abcdef\n";
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(result.output.contains("[timestamp]"));
     assert!(result.output.contains("[hash]"));
@@ -490,7 +526,7 @@ fn aggressive_converts_json_array_to_tabular_form_when_smaller() {
   {"long_status_name":"passed","long_duration_ms":30,"long_file_path":"src/c.rs"}
 ]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(result
         .output
@@ -508,7 +544,7 @@ fn aggressive_converts_sparse_json_array_to_nullable_schema_table() {
   {"long_identifier":3,"long_status":"failed","long_owner":"bob"}
 ]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(result
         .output
@@ -528,7 +564,7 @@ fn aggressive_json_array_table_quotes_csv_strings() {
   {"long_identifier":3,"long_message":"plain"}
 ]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(result.output.contains(r#""alice, lead""#));
     assert!(result.output.contains(r#""she said ""hi""""#));
@@ -544,7 +580,7 @@ fn aggressive_json_array_table_records_scalar_types() {
   {"long_identifier":3,"long_score":3.75,"long_ok":true,"long_name":"gamma"}
 ]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(result
         .output
@@ -562,7 +598,7 @@ fn aggressive_json_array_table_skips_nested_values() {
   {"long_identifier":3,"long_payload":{"nested":true}}
 ]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(!result.output.starts_with("[3]{"));
     assert!(!result.strategies.contains(&"toon_table".to_string()));
@@ -577,7 +613,7 @@ fn aggressive_json_array_table_skips_mixed_arrays() {
   {"long_identifier":3,"long_status":"failed"}
 ]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert!(!result.output.starts_with("[3]{"));
     assert!(!result.strategies.contains(&"toon_table".to_string()));
@@ -588,10 +624,43 @@ fn aggressive_json_array_table_skips_small_inputs() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
     let raw = r#"[{"a":1},{"a":2}]"#;
 
-    let result = compress_tool_output("bash", None, raw, &config, None);
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_skips_mixed_type_columns() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_status_value":5,"long_file_path":"src/alpha.rs"},
+  {"long_identifier":2,"long_status_value":"5","long_file_path":"src/beta.rs"},
+  {"long_identifier":3,"long_status_value":7,"long_file_path":"src/gamma.rs"}
+]"#;
+
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
+
+    assert!(!result.output.starts_with("[3]{"));
+    assert!(!result.strategies.contains(&"toon_table".to_string()));
+}
+
+#[test]
+fn aggressive_json_array_table_distinguishes_null_from_empty_string() {
+    let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
+    let raw = r#"[
+  {"long_identifier":1,"long_message":""},
+  {"long_identifier":2,"long_message":null},
+  {"long_identifier":3,"long_message":"plain text value"}
+]"#;
+
+    let result = compress_tool_output("bash", None, None, raw, &config, None);
+
+    let lines = result.output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "[3]{long_identifier:int,long_message:string?}");
+    assert_eq!(lines[1], "1,\"\"");
+    assert_eq!(lines[2], "2,");
+    assert_eq!(lines[3], "3,plain text value");
 }
 
 #[test]
@@ -599,7 +668,7 @@ fn standard_does_not_apply_lzw() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Standard);
     let raw = repeated_lzw_output();
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.strategies.contains(&"lzw_dictionary".to_string()));
@@ -614,7 +683,7 @@ fn standard_ignores_dictionary_method() {
     };
     let raw = repeated_lzw_output();
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert_eq!(result.output, raw);
     assert!(!result.output.starts_with("[Forge RePair Dictionary]"));
@@ -626,7 +695,7 @@ fn aggressive_lzw_records_strategy() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
     let raw = repeated_lzw_output();
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert!(result.output.starts_with("[Forge LZW Dictionary]"));
     assert!(result.strategies.contains(&"lzw_dictionary".to_string()));
@@ -641,7 +710,7 @@ fn aggressive_repair_records_strategy() {
     };
     let raw = repeated_lzw_output();
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert!(result.output.starts_with("[Forge RePair Dictionary]"));
     assert!(result.strategies.contains(&"repair_dictionary".to_string()));
@@ -658,7 +727,7 @@ fn aggressive_auto_uses_smaller_dictionary_output() {
     let lzw = compress_lzw_dictionary(&raw).expect("lzw output");
     let repair = compress_repair_dictionary(&raw).expect("repair output");
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert_eq!(result.output.len(), lzw.len().min(repair.len()));
     assert!(result.strategies.contains(&"auto_dictionary".to_string()));
@@ -669,7 +738,7 @@ fn aggressive_lzw_can_fire_after_table_whitespace_minimization() {
     let config = ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::Aggressive);
     let raw = repeated_table_dictionary_output();
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert!(result.output.starts_with("[Forge LZW Dictionary]"));
     assert!(result
@@ -687,7 +756,7 @@ fn aggressive_repair_can_fire_after_table_whitespace_minimization() {
     };
     let raw = repeated_table_dictionary_output();
 
-    let result = compress_tool_output("custom_tool", None, &raw, &config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &config, None);
 
     assert!(result.output.starts_with("[Forge RePair Dictionary]"));
     assert!(result
@@ -710,10 +779,10 @@ fn aggressive_auto_can_choose_dictionary_after_table_whitespace_minimization() {
         ..ToolOutputCompressionConfig::default()
     };
     let raw = repeated_table_dictionary_output();
-    let lzw = compress_tool_output("custom_tool", None, &raw, &lzw_config, None);
-    let repair = compress_tool_output("custom_tool", None, &raw, &repair_config, None);
+    let lzw = compress_tool_output("custom_tool", None, None, &raw, &lzw_config, None);
+    let repair = compress_tool_output("custom_tool", None, None, &raw, &repair_config, None);
 
-    let result = compress_tool_output("custom_tool", None, &raw, &auto_config, None);
+    let result = compress_tool_output("custom_tool", None, None, &raw, &auto_config, None);
 
     assert_eq!(
         result.output.len(),
@@ -737,11 +806,56 @@ fn dedup_returns_bounded_marker_for_repeated_output() {
         .map(|idx| format!("unique long content line {idx}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let first = compress_tool_output("bash", None, &raw, &config, Some(&state));
-    let second = compress_tool_output("bash", None, &raw, &config, Some(&state));
+    let first = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let second = compress_tool_output("bash", Some("call_2"), None, &raw, &config, Some(&state));
     assert!(!first.deduped);
     assert!(second.deduped);
-    assert!(second.output.contains("Duplicate of call #"));
+    assert!(second.output.contains("Duplicate of tool call call_1"));
+}
+
+#[test]
+fn dedup_keeps_content_when_same_tool_call_id_is_resent() {
+    let state = ToolOutputCompressionState::new();
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("s1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = (0..200)
+        .map(|idx| format!("unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The proxy re-walks the full conversation every request, so the same
+    // tool result re-arrives under the same call id and must keep its content.
+    let first = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let resent = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let duplicate = compress_tool_output("bash", Some("call_2"), None, &raw, &config, Some(&state));
+
+    assert!(!first.deduped);
+    assert!(!resent.deduped);
+    assert_eq!(resent.output, first.output);
+    assert!(duplicate.deduped);
+}
+
+#[test]
+fn dedup_skips_results_without_tool_call_id() {
+    let state = ToolOutputCompressionState::new();
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("s1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = (0..200)
+        .map(|idx| format!("unique long content line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let first = compress_tool_output("bash", None, None, &raw, &config, Some(&state));
+    let second = compress_tool_output("bash", None, None, &raw, &config, Some(&state));
+
+    assert!(!first.deduped);
+    assert!(!second.deduped);
 }
 
 #[test]
@@ -761,9 +875,30 @@ fn dedup_is_scoped_by_session() {
         ..first_config.clone()
     };
 
-    let first = compress_tool_output("bash", None, &raw, &first_config, Some(&state));
-    let second = compress_tool_output("bash", None, &raw, &second_config, Some(&state));
-    let third = compress_tool_output("bash", None, &raw, &first_config, Some(&state));
+    let first = compress_tool_output(
+        "bash",
+        Some("call_1"),
+        None,
+        &raw,
+        &first_config,
+        Some(&state),
+    );
+    let second = compress_tool_output(
+        "bash",
+        Some("call_2"),
+        None,
+        &raw,
+        &second_config,
+        Some(&state),
+    );
+    let third = compress_tool_output(
+        "bash",
+        Some("call_3"),
+        None,
+        &raw,
+        &first_config,
+        Some(&state),
+    );
 
     assert!(!first.deduped);
     assert!(!second.deduped);
@@ -783,9 +918,9 @@ fn dedup_is_scoped_by_tool_name() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let first = compress_tool_output("bash", None, &raw, &config, Some(&state));
-    let second = compress_tool_output("read", None, &raw, &config, Some(&state));
-    let third = compress_tool_output("bash", None, &raw, &config, Some(&state));
+    let first = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let second = compress_tool_output("read", Some("call_2"), None, &raw, &config, Some(&state));
+    let third = compress_tool_output("bash", Some("call_3"), None, &raw, &config, Some(&state));
 
     assert!(!first.deduped);
     assert!(!second.deduped);
@@ -810,10 +945,50 @@ fn dedup_evicts_oldest_entries_per_session() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(!compress_tool_output("bash", None, &first_raw, &config, Some(&state)).deduped);
-    assert!(!compress_tool_output("bash", None, &second_raw, &config, Some(&state)).deduped);
-    assert!(!compress_tool_output("bash", None, &first_raw, &config, Some(&state)).deduped);
-    assert!(compress_tool_output("bash", None, &first_raw, &config, Some(&state)).deduped);
+    assert!(
+        !compress_tool_output(
+            "bash",
+            Some("call_1"),
+            None,
+            &first_raw,
+            &config,
+            Some(&state)
+        )
+        .deduped
+    );
+    assert!(
+        !compress_tool_output(
+            "bash",
+            Some("call_2"),
+            None,
+            &second_raw,
+            &config,
+            Some(&state)
+        )
+        .deduped
+    );
+    assert!(
+        !compress_tool_output(
+            "bash",
+            Some("call_3"),
+            None,
+            &first_raw,
+            &config,
+            Some(&state)
+        )
+        .deduped
+    );
+    assert!(
+        compress_tool_output(
+            "bash",
+            Some("call_4"),
+            None,
+            &first_raw,
+            &config,
+            Some(&state)
+        )
+        .deduped
+    );
 }
 
 #[test]
@@ -833,10 +1008,10 @@ fn dedup_evicts_oldest_sessions() {
     let s1 = config_for_session("s1");
     let s2 = config_for_session("s2");
 
-    assert!(!compress_tool_output("bash", None, &raw, &s1, Some(&state)).deduped);
-    assert!(!compress_tool_output("bash", None, &raw, &s2, Some(&state)).deduped);
-    assert!(!compress_tool_output("bash", None, &raw, &s1, Some(&state)).deduped);
-    assert!(compress_tool_output("bash", None, &raw, &s1, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", Some("call_1"), None, &raw, &s1, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", Some("call_2"), None, &raw, &s2, Some(&state)).deduped);
+    assert!(!compress_tool_output("bash", Some("call_3"), None, &raw, &s1, Some(&state)).deduped);
+    assert!(compress_tool_output("bash", Some("call_4"), None, &raw, &s1, Some(&state)).deduped);
 }
 
 fn repeated_lzw_output() -> String {

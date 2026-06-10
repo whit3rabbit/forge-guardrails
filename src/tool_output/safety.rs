@@ -69,9 +69,11 @@ pub(super) fn apply_safe_filters(
 
 static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
+        // Also covers sk-ant- prefixed keys.
         r#"sk-[A-Za-z0-9_-]{20,}"#,
-        r#"sk-ant-[A-Za-z0-9_-]{20,}"#,
         r#"gh[pousr]_[A-Za-z0-9_]{20,}"#,
+        r#"github_pat_[A-Za-z0-9_]{20,}"#,
+        r#"xox[abprs]-[A-Za-z0-9-]{10,}"#,
         r#"AKIA[0-9A-Z]{16}"#,
         r#"(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\s*[:=]\s*["']?[^"'\s]{8,}"#,
         r#"(?i)(postgres|mysql|mongodb|redis)://[^ \n\r\t]+"#,
@@ -84,7 +86,7 @@ static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static ANSI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\x1b\[[0-9;?]*[ -/]*[@-~]"#).expect("valid ansi regex"));
 
-fn redact_secrets(output: &str) -> String {
+pub(crate) fn redact_secrets(output: &str) -> String {
     let mut redacted = output.to_string();
     for pattern in SECRET_PATTERNS.iter() {
         redacted = pattern
@@ -102,7 +104,9 @@ fn redact_private_key_blocks(output: &str) -> String {
             if !in_private_key {
                 result.push("[REDACTED_PRIVATE_KEY]".to_string());
             }
-            in_private_key = true;
+            // A single-line BEGIN...END key must not open a block that
+            // swallows the rest of the output.
+            in_private_key = !line.contains("-----END");
             continue;
         }
         if in_private_key {

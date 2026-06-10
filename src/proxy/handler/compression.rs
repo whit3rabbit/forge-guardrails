@@ -72,7 +72,14 @@ pub fn compress_proxy_tool_results(
                     .or(message.tool_name.as_deref())
                     .unwrap_or("generic");
                 let args = call.and_then(|call| call.args.as_ref());
-                let result = compress_tool_output(tool_name, args, &message.content, config, state);
+                let result = compress_tool_output(
+                    tool_name,
+                    message.tool_call_id.as_deref(),
+                    args,
+                    &message.content,
+                    config,
+                    state,
+                );
                 if result.output != message.content {
                     tracing::info!(
                         target: "forge.tool_output",
@@ -166,9 +173,11 @@ pub(super) fn compression_event(
         "deduped": result.deduped,
     });
     if let Some(args) = args {
+        // Fingerprint the redacted serialization so secret-bearing argument
+        // values cannot be dictionary-correlated from telemetry hashes.
         event["args_fingerprint64"] = json!(serde_json::to_string(args)
             .ok()
-            .map(|args| fingerprint64(&args)));
+            .map(|args| fingerprint64(&crate::tool_output::redact_secrets(&args))));
     }
     if let Some(method) = dictionary_method(&result.output) {
         event["dictionary_method"] = json!(method);

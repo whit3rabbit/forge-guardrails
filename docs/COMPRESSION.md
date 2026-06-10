@@ -135,7 +135,16 @@ Invalid mode, method, or field types return `400 Bad Request`.
 
 Dedup is session-scoped and bounded. A duplicate marker is emitted only when
 the current compressed output has the same canonical tool name, output byte
-length, and output hash as a prior entry in the same `session_id`.
+length, and output hash as a prior entry in the same `session_id`, and the
+match comes from a different tool call id. A tool result re-sent in a later
+request under the same tool call id keeps its content; without that rule,
+full-history resends would degrade every tool result into a marker whose
+referenced original is no longer visible upstream. Tool results without a
+tool call id are never deduplicated. The marker references the original call:
+
+```text
+[Duplicate of tool call call_abc123 (bash) - see earlier result]
+```
 
 ## Pipeline
 
@@ -157,7 +166,8 @@ When enabled, Forge applies transforms in this order:
 Standard and aggressive candidate transforms are kept only when they reduce the
 heuristic token estimate without growing the byte size. Safe filters can still
 replace dangerous or oversized content even when the replacement is not
-smaller.
+smaller. Capped output keeps a head and tail around a short cap marker, so a
+capped result can exceed `max_output_bytes` by the marker length.
 
 The aggressive JSON-array table transform is lossless for arrays of scalar
 objects. It skips small inputs, nested values, and mixed arrays. Accepted output
@@ -227,8 +237,9 @@ Each event includes strategy names, tool family, mode, token estimates, byte
 and line counts, bounded request debug metadata when provided by the caller,
 redaction/capping/dedup flags, and `dictionary_method` when an aggressive
 dictionary output was accepted. It also includes non-cryptographic 64-bit
-fingerprints for the original output, compressed output, and tool arguments so
-eval regressions can be correlated without logging raw payloads. Strategy
+fingerprints for the original output, compressed output, and the
+secret-redacted serialization of tool arguments so eval regressions can be
+correlated without logging raw payloads or fingerprinting raw secrets. Strategy
 totals are event-level and do not report marginal per-transform savings. It
 does not include raw or compressed tool output. Optional bounds are
 `FORGE_TOOL_OUTPUT_COMPRESSION_LOG_QUEUE_CAPACITY` and

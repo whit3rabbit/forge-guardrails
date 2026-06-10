@@ -27,6 +27,7 @@ use postcall::{
 };
 use repair::compress_repair_dictionary;
 use safety::apply_safe_filters;
+pub(crate) use safety::redact_secrets;
 pub use state::ToolOutputCompressionState;
 
 pub use config::{
@@ -39,8 +40,13 @@ pub use config::{
 };
 
 /// Compress one tool output using the requested mode and optional dedup state.
+///
+/// Dedup additionally requires `tool_call_id` so a tool result re-sent in a
+/// later request under the same call id keeps its content instead of being
+/// treated as a duplicate of itself.
 pub fn compress_tool_output(
     tool_name: &str,
+    tool_call_id: Option<&str>,
     args: Option<&IndexMap<String, Value>>,
     raw_output: &str,
     config: &ToolOutputCompressionConfig,
@@ -95,9 +101,12 @@ pub fn compress_tool_output(
     }
 
     if config.enable_dedup {
-        if let (Some(state), Some(session_id)) = (state, config.session_id.as_deref()) {
+        if let (Some(state), Some(session_id), Some(tool_call_id)) =
+            (state, config.session_id.as_deref(), tool_call_id)
+        {
             if let Some(marker) = state.deduplicate(
                 session_id,
+                tool_call_id,
                 &canonical_tool,
                 &output,
                 config.max_dedup_sessions,
