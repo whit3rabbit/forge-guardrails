@@ -38,6 +38,9 @@ impl ResumeState {
             return Ok(());
         }
         for row in read_jsonl_path(path)? {
+            if !reject_marks_capture_processed(&row) {
+                continue;
+            }
             if let Some(cap_key) = row.get("capture_key").and_then(Value::as_str) {
                 self.processed_capture_keys.insert(cap_key.to_string());
             } else if let Some(capture) = row.get("capture") {
@@ -85,6 +88,13 @@ impl ResumeState {
             }
         }
     }
+}
+
+fn reject_marks_capture_processed(row: &Value) -> bool {
+    let reason = row.get("reason").and_then(Value::as_str).unwrap_or("");
+    !reason.starts_with("corrected_positive_")
+        && !reason.starts_with("post_review_corrected_positive_")
+        && !reason.starts_with("targeted_alternative_")
 }
 
 #[cfg(test)]
@@ -218,5 +228,70 @@ mod tests {
         assert!(state
             .valid_real_capture_keys
             .contains(row["review"]["capture_key"].as_str().expect("capture key")));
+    }
+
+    #[test]
+    fn resume_state_ignores_auxiliary_corrected_positive_rejects() {
+        let capture = capture_row();
+        let reject_path = std::env::temp_dir().join(format!(
+            "forge-dataset-resume-rejects-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let reject = json!({
+            "schema_version": "forge-dataset-review-reject/v1",
+            "reason": "corrected_positive_verifier_rejected",
+            "detail": "optional corrected positive was not accepted",
+            "example_group_id": capture["example_group_id"],
+            "capture_key": capture_key(&capture),
+            "capture": capture,
+        });
+        std::fs::write(
+            &reject_path,
+            format!("{}\n", serde_json::to_string(&reject).expect("json")),
+        )
+        .expect("write rejects");
+
+        let state = ResumeState::load("target/does-not-exist/training.jsonl", &reject_path)
+            .expect("load resume");
+
+        assert!(state.processed_capture_keys.is_empty());
+        std::fs::remove_file(reject_path).expect("remove");
+    }
+
+    #[test]
+    fn resume_state_tracks_terminal_capture_rejects() {
+        let capture = capture_row();
+        let capture_key_value = capture_key(&capture);
+        let reject_path = std::env::temp_dir().join(format!(
+            "forge-dataset-resume-terminal-rejects-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let reject = json!({
+            "schema_version": "forge-dataset-review-reject/v1",
+            "reason": "verifier_rejected",
+            "detail": "label was rejected",
+            "example_group_id": capture["example_group_id"],
+            "capture_key": capture_key_value,
+            "capture": capture,
+        });
+        std::fs::write(
+            &reject_path,
+            format!("{}\n", serde_json::to_string(&reject).expect("json")),
+        )
+        .expect("write rejects");
+
+        let state = ResumeState::load("target/does-not-exist/training.jsonl", &reject_path)
+            .expect("load resume");
+
+        assert!(state.processed_capture_keys.contains(&capture_key_value));
+        std::fs::remove_file(reject_path).expect("remove");
     }
 }

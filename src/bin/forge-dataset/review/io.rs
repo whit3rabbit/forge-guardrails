@@ -39,13 +39,19 @@ pub(crate) fn read_jsonl_path(path: &Path) -> Result<Vec<Value>, String> {
 }
 
 pub(crate) fn append_jsonl(path: &str, row: &Value) -> Result<(), String> {
-    let line = serde_json::to_string(row).map_err(|err| err.to_string())?;
+    let mut line = serde_json::to_string(row).map_err(|err| err.to_string())?;
+    line.push('\n');
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|err| format!("failed to open {path}: {err}"))?;
-    writeln!(file, "{line}").map_err(|err| format!("failed to write {path}: {err}"))
+    file.write_all(line.as_bytes())
+        .map_err(|err| format!("failed to write {path}: {err}"))?;
+    file.flush()
+        .map_err(|err| format!("failed to flush {path}: {err}"))?;
+    file.sync_data()
+        .map_err(|err| format!("failed to sync {path}: {err}"))
 }
 
 pub(crate) fn append_reject(
@@ -81,13 +87,41 @@ pub(crate) fn append_reject_record(path: &Path, record: &RejectRecord) -> Result
 }
 
 pub(crate) fn append_jsonl_path(path: &Path, row: &Value) -> Result<(), String> {
-    let line = serde_json::to_string(row).map_err(|err| err.to_string())?;
+    let mut line = serde_json::to_string(row).map_err(|err| err.to_string())?;
+    line.push('\n');
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    writeln!(file, "{line}").map_err(|err| format!("failed to write {}: {err}", path.display()))
+    file.write_all(line.as_bytes())
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    file.flush()
+        .map_err(|err| format!("failed to flush {}: {err}", path.display()))?;
+    file.sync_data()
+        .map_err(|err| format!("failed to sync {}: {err}", path.display()))
+}
+
+pub(crate) fn touch_jsonl(path: &str) -> Result<(), String> {
+    ensure_parent_dir(path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("failed to open {path}: {err}"))?;
+    file.sync_data()
+        .map_err(|err| format!("failed to sync {path}: {err}"))
+}
+
+pub(crate) fn touch_jsonl_path(path: &Path) -> Result<(), String> {
+    ensure_parent_dir_path(path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("failed to open {}: {err}", path.display()))?;
+    file.sync_data()
+        .map_err(|err| format!("failed to sync {}: {err}", path.display()))
 }
 
 pub(crate) fn rejects_path(output: &str) -> PathBuf {
@@ -164,11 +198,42 @@ pub(crate) fn normalize_chat_completions_url(url: &str) -> String {
 mod tests {
     use super::*;
 
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "forge-dataset-io-{name}-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn rejects_path_is_sibling_jsonl() {
         assert_eq!(
             rejects_path("target/dataset/training.toolcall.jsonl"),
             PathBuf::from("target/dataset/training.toolcall.rejects.jsonl")
         );
+    }
+
+    #[test]
+    fn touch_jsonl_creates_empty_file() {
+        let path = temp_path("touch");
+        touch_jsonl(path.to_str().expect("path")).expect("touch");
+
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "");
+        std::fs::remove_file(path).expect("remove");
+    }
+
+    #[test]
+    fn append_jsonl_is_readable_after_return() {
+        let path = temp_path("append");
+        append_jsonl(path.to_str().expect("path"), &json!({"ok": true})).expect("append");
+
+        let rows = read_jsonl_path(&path).expect("read rows");
+        assert_eq!(rows, vec![json!({"ok": true})]);
+        std::fs::remove_file(path).expect("remove");
     }
 }

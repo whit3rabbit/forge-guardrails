@@ -16,6 +16,7 @@ use crate::stub_tools::{
 pub(crate) async fn run(cli: CaptureCli) -> Result<(), String> {
     let registries = registries_for_domains(&cli.domains)?;
     ensure_parent_dir(&cli.output)?;
+    touch_jsonl(&cli.output)?;
     let client = reqwest::Client::new();
     let chat_url = normalize_chat_completions_url(&cli.proxy_base_url);
     let scenarios_per_run = registries
@@ -375,13 +376,29 @@ fn normalize_chat_completions_url(url: &str) -> String {
 }
 
 fn append_jsonl(path: &str, row: &Value) -> Result<(), String> {
-    let line = serde_json::to_string(row).map_err(|err| err.to_string())?;
+    let mut line = serde_json::to_string(row).map_err(|err| err.to_string())?;
+    line.push('\n');
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|err| format!("failed to open {path}: {err}"))?;
-    writeln!(file, "{line}").map_err(|err| format!("failed to write {path}: {err}"))
+    file.write_all(line.as_bytes())
+        .map_err(|err| format!("failed to write {path}: {err}"))?;
+    file.flush()
+        .map_err(|err| format!("failed to flush {path}: {err}"))?;
+    file.sync_data()
+        .map_err(|err| format!("failed to sync {path}: {err}"))
+}
+
+fn touch_jsonl(path: &str) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("failed to open {path}: {err}"))?;
+    file.sync_data()
+        .map_err(|err| format!("failed to sync {path}: {err}"))
 }
 
 fn ensure_parent_dir(path: &str) -> Result<(), String> {

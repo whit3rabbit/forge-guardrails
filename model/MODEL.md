@@ -219,6 +219,21 @@ Passing the notebook gates is necessary but not sufficient. Promotion also
 requires FP32 ONNX parity, shadow release replay, false-objection mining, and a
 later clean advisory replay.
 
+Since the v5e notebook patch, `promotion_gate_report.json` is the single source
+of truth for notebook-side promotability. It carries `promotion_status`
+(`blocked` or `promotable_pending_replay`, never plain `promotable`),
+`blocked_reasons[]`, and `artifact_promotable`, which are mirrored into
+`artifact_manifest.json`, `thresholds.json`, `candidate_thresholds.json`,
+`test_metrics.json`, and `training_run_summary.json`; the notebook raises if
+any exported file claims promotability while the gate report is blocked. The
+per-eval `eval_checkpoint_constrained_promotable` flag is checkpoint-selection
+telemetry only and uses the strict core gates, replacing the old ambiguous
+`eval_constrained_promotable` key. The report also embeds diagnostic-only
+`threshold_sweep`, `confidence_margin_diagnostics`, and
+`per_source_diagnostics` keys that never block promotion, and the run exports
+`high_confidence_mistakes.jsonl` for manual audit of confident wrong
+predictions.
+
 ## Lessons Learned
 
 ### Do Not Threshold Around A Bad Boundary

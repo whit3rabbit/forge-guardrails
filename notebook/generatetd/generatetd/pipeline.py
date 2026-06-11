@@ -485,14 +485,39 @@ def mutate_missing_argument(row: dict[str, Any], mutation_type: str, options: Ge
 
 
 def mutate_wrong_tool(row: dict[str, Any], mutation_type: str, options: GenerateOptions) -> dict[str, Any] | None:
+    # TODO: implement wrong-tool mutation using real competing tools from multi-tool contexts.
+    # Returning None skips this mutation type entirely (no synthetic wrong_tool rows generated).
     return None
+
+
+# A pool of varied no-tool user requests used to create diverse tool_not_needed hard negatives.
+# Using a single hardcoded string produces near-duplicate rows with identical scorer_input_hashes
+# across all source rows (only the candidate_call differs), which dilutes training signal.
+_TOOL_NOT_NEEDED_REQUESTS: list[str] = [
+    "Reply briefly to a simple greeting. No tool call is needed.",
+    "What does the acronym API stand for?",
+    "Say hello back to the user.",
+    "Tell me a short fun fact about penguins.",
+    "What is 17 multiplied by 6?",
+    "Summarize what a REST API is in one sentence.",
+    "What is the capital of France?",
+    "Explain the difference between a list and a tuple in Python.",
+    "How do I say 'thank you' in Japanese?",
+    "What color is the sky on a clear day?",
+    "Give me a one-line definition of machine learning.",
+    "Respond to the user's farewell message.",
+]
 
 
 def mutate_tool_not_needed(row: dict[str, Any], mutation_type: str, options: GenerateOptions) -> dict[str, Any] | None:
     input_obj = deepcopy(row["input"])
-    input_obj["user_request"] = "Reply briefly to a simple greeting. No tool call is needed."
+    # Pick a request from the pool deterministically based on the source row id so
+    # reruns are stable, but different source rows get different requests.
+    source_id = row.get("id") or ""
+    idx = int(stable_id(source_id, "tool_not_needed_pool", length=4), 16) % len(_TOOL_NOT_NEEDED_REQUESTS)
+    input_obj["user_request"] = _TOOL_NOT_NEEDED_REQUESTS[idx]
     rationale = "Synthetic hard negative: preserved an unnecessary tool call for a direct no-tool user request."
-    return synthetic_tool_row(row, input_obj, "tool_not_needed", mutation_type, rationale, options, {})
+    return synthetic_tool_row(row, input_obj, "tool_not_needed", mutation_type, rationale, options, {"pool_index": idx})
 
 
 def synthetic_tool_row(

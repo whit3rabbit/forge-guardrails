@@ -25,7 +25,8 @@ use client::{reviewer_response_schema, verifier_response_schema, JsonLlmClient};
 use config::{resolve_provider_config, resolve_provider_config_for, EnvFile};
 use io::{
     append_jsonl, append_reject, append_reject_record, capture_key, count_jsonl_rows,
-    ensure_parent_dir, ensure_parent_dir_path, rejects_path, row_key,
+    ensure_parent_dir, ensure_parent_dir_path, rejects_path, row_key, touch_jsonl,
+    touch_jsonl_path,
 };
 use progress::ReviewProgress;
 use quality::post_review_quality_reject;
@@ -39,6 +40,8 @@ pub(crate) async fn run(cli: ReviewCli) -> Result<(), String> {
     ensure_parent_dir(&cli.output)?;
     let reject_path = rejects_path(&cli.output);
     ensure_parent_dir_path(&reject_path)?;
+    touch_jsonl(&cli.output)?;
+    touch_jsonl_path(&reject_path)?;
     let env_file = EnvFile::load(&cli.env_file);
     let reviewer_config = resolve_provider_config(&cli, &env_file, ReviewRole::Reviewer)?;
     let verifier_config = if cli.verifier_provider == "same"

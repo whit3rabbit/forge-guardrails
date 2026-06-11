@@ -205,6 +205,9 @@ A tool-call verifier artifact directory contains:
 artifact_manifest.json
 labels.json
 thresholds.json
+candidate_thresholds.json
+promotion_gate_report.json
+high_confidence_mistakes.jsonl
 input_schema.json
 input_schema_v1.json
 input_schema_v2.json
@@ -246,13 +249,36 @@ model_quantized.onnx
   "deployment_default": "shadow",
   "shadow_first_reason": "experimental verifier; promote only after eval replay",
   "supports_legacy_five_labels": false,
+  "promotion_status": "blocked",
+  "blocked_reasons": [
+    {
+      "split": "test",
+      "gate": "valid_false_objection_at_0_90",
+      "value": 0.011472275334608031,
+      "threshold": "<= 0.005"
+    }
+  ],
+  "artifact_promotable": false,
   "created_unix": 1779735826
 }
 ```
 
+`promotion_status`, `blocked_reasons`, and `artifact_promotable` are derived only
+from `promotion_gate_report.json` and mirrored into `artifact_manifest.json`,
+`thresholds.json`, `candidate_thresholds.json`, `test_metrics.json`, and
+`training_run_summary.json`. `promotion_status` is `blocked` or
+`promotable_pending_replay`; it is never plain `promotable`, because ONNX
+parity, shadow replay, and advisory replay gates live outside the notebook. The
+notebook raises if any exported file claims promotability while the gate report
+is blocked.
+
 ### `thresholds.json`
 
 `deterministic_invalid` must stay non-authoritative. For six-label artifacts, `wrong_arguments_semantic` should be calibrated separately from `wrong_tool_semantic`.
+
+New artifacts also carry the `promotion_status`, `blocked_reasons`, and
+`artifact_promotable` fields described under `artifact_manifest.json`, in both
+`thresholds.json` and `candidate_thresholds.json`.
 
 ```json
 {
@@ -293,6 +319,31 @@ model_quantized.onnx
   }
 }
 ```
+
+### `promotion_gate_report.json`
+
+`promotion_gate_report.json` is the single source of truth for notebook-side
+promotability. Schema `toolcall-verifier-promotion-gates/v1` with:
+
+- `validation` / `test`: per-split gate evaluations (`gates[]`, `passed`).
+- `promotion_status`: `blocked` or `promotable_pending_replay`.
+- `blocked_reasons[]`: `{split, gate, value, threshold}` for every failed gate.
+- `artifact_promotable`: `validation.passed and test.passed`.
+- `threshold_sweep`: per-split valid false-block rates and per-label objection
+  precision at confidence `0.80`, `0.90`, `0.95`, `0.98`, `0.99`. Diagnostic
+  only; the blocking false-objection gate stays at confidence `0.90`.
+- `confidence_margin_diagnostics`: valid false-objection rates over a
+  confidence x top1-top2-margin grid. Diagnostic only.
+- `per_source_diagnostics`: per-source accuracy, valid false objection, and
+  wrong-tool recall gates for sources with at least `100` rows; smaller sources
+  report `insufficient_support`. Diagnostic only; never added to the blocking
+  gate list.
+
+`test_metrics.json` carries `eval_checkpoint_constrained_promotable`, a
+checkpoint-selection signal computed against the strict core gates. It is not
+artifact promotability; the old ambiguous `eval_constrained_promotable` key is
+no longer exported. `high_confidence_mistakes.jsonl` lists wrong predictions at
+confidence `>= 0.99` across validation and test for manual audit.
 
 ## Final-Response Training Row
 

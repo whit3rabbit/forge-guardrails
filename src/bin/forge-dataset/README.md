@@ -157,8 +157,8 @@ cargo run --bin forge-dataset -- review \
   --chunk-size 100
 ```
 
-`review` appends accepted rows and rejects as it goes. If interrupted, resume
-against the same output and sibling rejects file:
+`review` appends and syncs accepted rows and rejects as it goes. If interrupted,
+resume against the same output and sibling rejects file:
 
 ```bash
 cargo run --bin forge-dataset -- review \
@@ -167,6 +167,22 @@ cargo run --bin forge-dataset -- review \
   --provider openrouter \
   --verifier-provider minimax \
   --resume
+```
+
+The wrapper can resume the same review without starting the proxy or capturing
+again:
+
+```bash
+scripts/run_dataset_workflow.sh \
+  --resume-review \
+  --provider openrouter \
+  --verifier-provider same \
+  --openrouter-model deepseek/deepseek-v4-flash \
+  --review-concurrency 4 \
+  --review-chunk-size 100 \
+  --include-agent-logs \
+  --split-validation-ratio 0.10 \
+  --out-dir target/dataset/openrouter-ministral-v4-flash-3k
 ```
 
 `--concurrency N` overlaps reviewer/verifier API calls for the main capture

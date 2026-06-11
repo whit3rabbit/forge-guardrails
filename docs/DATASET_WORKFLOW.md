@@ -32,6 +32,38 @@ Generated rows are private by default:
 }
 ```
 
+## Prerequisites
+
+When using `--include-agent-logs`, the script calls `notebook/generatetd` as a
+Python subprocess. The packages listed in
+`notebook/generatetd/pyproject.toml` (`requests`, `jsonschema`) must be
+importable by the Python interpreter on your `PATH` before the script starts.
+The script performs this check **before** starting the proxy or any capture
+work, so a missing environment is caught immediately with a remediation hint.
+
+Choose one of:
+
+```bash
+# Option A – activate the generatetd venv (created by uv or pip):
+source notebook/generatetd/.venv/bin/activate
+scripts/run_dataset_workflow.sh --include-agent-logs ...
+
+# Option B – install generatetd in editable mode into your active env:
+pip install -e notebook/generatetd
+scripts/run_dataset_workflow.sh --include-agent-logs ...
+
+# Option C – point PYTHON at the venv interpreter directly (no activation needed):
+PYTHON=notebook/generatetd/.venv/bin/python3 \
+  scripts/run_dataset_workflow.sh --include-agent-logs ...
+
+# Option D – use uv run (resolves the project env automatically):
+uv run --project notebook/generatetd \
+  scripts/run_dataset_workflow.sh --include-agent-logs ...
+```
+
+`--include-agent-logs` is not required for basic capture+review runs; the
+Python dependency only applies to that flag.
+
 ## One-Command Run
 
 ```bash
@@ -192,8 +224,9 @@ cargo run --bin forge-dataset -- review \
   --verifier-provider same
 ```
 
-`review` appends verifier-approved rows as soon as each row is accepted. It no
-longer keeps all accepted rows in memory until the end of the run. If review is
+`review` appends and syncs verifier-approved rows as soon as each row is
+accepted. It no longer keeps all accepted rows in memory until the end of the
+run. Reject rows are also appended and synced as they happen. If review is
 interrupted, resume against the same capture/output/reject files:
 
 ```bash
@@ -209,6 +242,32 @@ cargo run --bin forge-dataset -- review \
 `training.toolcall.jsonl` or the sibling rejects file. To retry previously
 rejected reviewer/verifier failures with a different provider, use a fresh
 output path or move the rejects file aside.
+
+The one-command wrapper exposes the same review resume path. Use it when capture
+has already completed and review was interrupted or failed after writing partial
+`training.toolcall.jsonl` / `training.toolcall.rejects.jsonl` files:
+
+```bash
+scripts/run_dataset_workflow.sh \
+  --resume-review \
+  --provider openrouter \
+  --verifier-provider same \
+  --openrouter-model deepseek/deepseek-v4-flash \
+  --review-concurrency 4 \
+  --review-chunk-size 100 \
+  --review-max-alternatives-per-group 4 \
+  --review-max-alternative-ratio 0.50 \
+  --include-agent-logs \
+  --agent-log-limit 1000 \
+  --agent-log-synthetic-balanced 250 \
+  --split-validation-ratio 0.10 \
+  --out-dir target/dataset/openrouter-ministral-v4-flash-3k
+```
+
+`--resume-review` reuses existing `capture.jsonl`, skips proxy startup and
+capture, passes `--resume` to `forge-dataset review`, and then reruns assemble
+and split. If `agent_logs/tool_call_training.jsonl` already exists, the wrapper
+reuses it instead of mining logs again.
 
 `--concurrency N` parallelizes the main capture review pass while keeping JSONL
 writes ordered and single-threaded. Start with `4`; higher values can hit

@@ -268,7 +268,12 @@ def test_synthetic_tool_rows_are_bounded_and_labeled(tmp_path):
     ]
     assert all(item["review"]["synthetic"] is True for item in synthetic)
     assert synthetic[0]["input"]["candidate_call"]["arguments"] == {}
-    assert synthetic[1]["input"]["user_request"].startswith("Reply briefly")
+    # The tool_not_needed request is now chosen from a pool deterministically per
+    # source row id, so we check it is one of the pool strings rather than a
+    # specific hardcoded value.
+    from generatetd.pipeline import _TOOL_NOT_NEEDED_REQUESTS
+    assert synthetic[1]["input"]["user_request"] in _TOOL_NOT_NEEDED_REQUESTS
+    assert "pool_index" in synthetic[1]["review"]["synthetic_mutation"]
 
 
 def tool_observation(tmp_path):
