@@ -3,7 +3,7 @@
 target/
 
 # Python pycache files
-tests/__pycache__
+**/__pycache__/
 *.pyc
 
 # Cargo.lock is kept out of .gitignore by default for libraries/workspaces,
