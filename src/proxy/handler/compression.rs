@@ -93,6 +93,8 @@ pub fn compress_proxy_tool_results(
                         redacted = result.redacted,
                         capped = result.capped,
                         deduped = result.deduped,
+                        memo_reused = result.memo_reused,
+                        memo_changed = result.memo_changed,
                         strategies = %result.strategies.join(","),
                         "compressed proxy tool output"
                     );
@@ -171,6 +173,8 @@ pub(super) fn compression_event(
         "redacted": result.redacted,
         "capped": result.capped,
         "deduped": result.deduped,
+        "memo_reused": result.memo_reused,
+        "memo_changed": result.memo_changed,
     });
     if let Some(args) = args {
         // Fingerprint the redacted serialization so secret-bearing argument

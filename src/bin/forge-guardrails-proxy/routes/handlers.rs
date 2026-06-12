@@ -98,6 +98,7 @@ pub async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Res
             state.config.tool_output_compression.clone(),
             Some(state.tool_output_state.clone()),
             state.config.tool_call_policy.clone(),
+            state.config.schema_compression,
         )
         .await,
     ) {
@@ -196,6 +197,7 @@ async fn anthropic_messages_with_request_client<C: LLMClient + 'static>(
             config.tool_output_compression.clone(),
             Some(tool_output_state),
             config.tool_call_policy.clone(),
+            config.schema_compression,
             anthropic_headers,
         )
         .await,

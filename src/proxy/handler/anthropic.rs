@@ -1,6 +1,7 @@
 use crate::clients::base::{LLMClient, LLMUsageDetails};
 use crate::context::manager::ContextManager;
 use crate::guardrails::{FinalResponseScorer, ToolCallScorer};
+use crate::schema_compression::SchemaCompressionMode;
 use crate::tool_output::{ToolOutputCompressionConfig, ToolOutputCompressionState};
 use crate::tool_policy::ToolCallPolicyConfig;
 use anyllm_translate::anthropic::MessageCreateRequest;
@@ -156,6 +157,7 @@ pub async fn handle_anthropic_messages_with_scorers_and_tool_controls<C: LLMClie
         default_tool_output_compression,
         tool_output_state,
         default_tool_call_policy,
+        SchemaCompressionMode::Disabled,
         None,
     )
     .await
@@ -178,6 +180,7 @@ pub async fn handle_anthropic_messages_with_scorers_tool_controls_and_headers<
     default_tool_output_compression: ToolOutputCompressionConfig,
     tool_output_state: Option<Arc<ToolOutputCompressionState>>,
     default_tool_call_policy: ToolCallPolicyConfig,
+    default_schema_compression: SchemaCompressionMode,
     anthropic_headers: Option<Vec<(String, String)>>,
 ) -> Result<AnthropicHandlerResult, AnthropicHandlerError> {
     let config = anyllm_translate::TranslationConfig::default();
@@ -206,6 +209,7 @@ pub async fn handle_anthropic_messages_with_scorers_tool_controls_and_headers<
         default_tool_output_compression,
         tool_output_state,
         default_tool_call_policy,
+        default_schema_compression,
     )
     .await
     .map_err(chat_error_to_anthropic)?

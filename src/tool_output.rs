@@ -29,14 +29,16 @@ use repair::compress_repair_dictionary;
 use safety::apply_safe_filters;
 pub(crate) use safety::redact_secrets;
 pub use state::ToolOutputCompressionState;
+use state::{config_fingerprint, MemoLookup, MemoRecord};
 
 pub use config::{
     dictionary_has_meaningful_savings, is_dictionary_compressed_output,
     ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
     ToolOutputCompressionResult, DEFAULT_MAX_DEDUP_ENTRIES_PER_SESSION, DEFAULT_MAX_DEDUP_SESSIONS,
     DEFAULT_MAX_OUTPUT_BYTES, DICTIONARY_MAX_DICT_SIZE, DICTIONARY_MAX_INPUT_BYTES,
-    DICTIONARY_MIN_NET_SAVINGS_BYTES, DICTIONARY_MIN_NET_SAVINGS_PERCENT,
-    DICTIONARY_MIN_OCCURRENCES, LZW_DICTIONARY_HEADER, REPAIR_DICTIONARY_HEADER,
+    DICTIONARY_MIN_ENTRY_SAVINGS_BYTES, DICTIONARY_MIN_NET_SAVINGS_BYTES,
+    DICTIONARY_MIN_NET_SAVINGS_PERCENT, DICTIONARY_MIN_OCCURRENCES, LZW_DICTIONARY_HEADER,
+    REPAIR_DICTIONARY_HEADER,
 };
 
 /// Compress one tool output using the requested mode and optional dedup state.
@@ -67,9 +69,70 @@ pub fn compress_tool_output(
             redacted: false,
             capped: false,
             deduped: false,
+            memo_reused: false,
+            memo_changed: false,
             strategies: Vec::new(),
         });
     }
+
+    // Memo lookup: if the same call id was compressed before with identical
+    // input and config, reuse the stored bytes to keep prompt-cache prefixes
+    // byte-stable across full-history resends.
+    let memo_key = if config.enable_memo {
+        if let (Some(state), Some(session_id), Some(tool_call_id)) =
+            (state, config.session_id.as_deref(), tool_call_id)
+        {
+            let input_hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                raw_output.hash(&mut h);
+                h.finish()
+            };
+            let input_len = raw_output.len();
+            let config_fp = config_fingerprint(config);
+            match state.lookup_memo(session_id, tool_call_id, input_hash, input_len, config_fp) {
+                MemoLookup::Hit(cached) => {
+                    return compression_result(CompressionResultInput {
+                        output: cached,
+                        before_tokens,
+                        canonical_tool,
+                        family,
+                        mode: config.mode,
+                        redacted: false,
+                        capped: false,
+                        deduped: false,
+                        memo_reused: true,
+                        memo_changed: false,
+                        strategies: vec!["memo_reuse".to_string()],
+                    });
+                }
+                MemoLookup::Changed => Some((
+                    state,
+                    session_id,
+                    tool_call_id,
+                    input_hash,
+                    input_len,
+                    config_fp,
+                    true,
+                )),
+                MemoLookup::Miss => Some((
+                    state,
+                    session_id,
+                    tool_call_id,
+                    input_hash,
+                    input_len,
+                    config_fp,
+                    false,
+                )),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let memo_changed = memo_key.as_ref().is_some_and(|k| k.6);
 
     let mut output = raw_output.to_string();
     let mut redacted = false;
@@ -121,6 +184,22 @@ pub fn compress_tool_output(
         }
     }
 
+    // Store the final post-dedup output in the memo so full-history resends
+    // return byte-identical bytes (preserving upstream prompt-cache prefixes).
+    if let Some((state, session_id, tool_call_id, input_hash, input_len, config_fp, _)) = memo_key {
+        state.store_memo(
+            session_id,
+            tool_call_id,
+            MemoRecord {
+                input_hash,
+                input_len,
+                config_fingerprint: config_fp,
+                output: output.clone(),
+            },
+            config.max_dedup_sessions,
+        );
+    }
+
     compression_result(CompressionResultInput {
         output,
         before_tokens,
@@ -130,6 +209,8 @@ pub fn compress_tool_output(
         redacted,
         capped,
         deduped,
+        memo_reused: false,
+        memo_changed,
         strategies,
     })
 }
@@ -235,13 +316,82 @@ fn family_for_command(command: &str) -> String {
     .to_string()
 }
 
-/// Estimate tokens with the same lightweight heuristic used for proxy metrics.
-pub fn estimate_tokens(value: &str) -> i64 {
-    if value.is_empty() {
-        0
+/// Extra alphabetic chars per additional token beyond a run's first token.
+const ALPHA_CHARS_PER_EXTRA_TOKEN: usize = 7;
+/// Digit chars per token; BPE vocabularies group digits in short chunks.
+const DIGIT_CHARS_PER_TOKEN: usize = 3;
+/// Punctuation/symbol chars per token; JSON and logs tokenize densely.
+const PUNCT_CHARS_PER_TOKEN: usize = 2;
+/// Space/tab chars per token within an indentation run after the first.
+const SPACE_RUN_CHARS_PER_TOKEN: usize = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenRunClass {
+    Alpha,
+    Digit,
+    Space,
+    Newline,
+    Punct,
+}
+
+fn token_run_class(c: char) -> TokenRunClass {
+    if c.is_alphabetic() || c == '_' {
+        TokenRunClass::Alpha
+    } else if c.is_ascii_digit() {
+        TokenRunClass::Digit
+    } else if c == ' ' || c == '\t' {
+        TokenRunClass::Space
+    } else if c == '\n' {
+        TokenRunClass::Newline
     } else {
-        value.chars().count().div_ceil(4) as i64
+        TokenRunClass::Punct
     }
+}
+
+fn run_token_cost(class: TokenRunClass, len: usize, next: Option<TokenRunClass>) -> usize {
+    match class {
+        TokenRunClass::Alpha => 1 + (len - 1) / ALPHA_CHARS_PER_EXTRA_TOKEN,
+        TokenRunClass::Digit => len.div_ceil(DIGIT_CHARS_PER_TOKEN),
+        TokenRunClass::Punct => len.div_ceil(PUNCT_CHARS_PER_TOKEN),
+        // A single space merges into a following word token for free; spaces
+        // before punctuation, newlines, or end-of-text are their own tokens,
+        // and longer runs are indentation that BPE splits into chunks.
+        TokenRunClass::Space => {
+            let merges_into_word = matches!(
+                next,
+                Some(TokenRunClass::Alpha) | Some(TokenRunClass::Digit)
+            );
+            if merges_into_word {
+                (len - 1).div_ceil(SPACE_RUN_CHARS_PER_TOKEN)
+            } else {
+                len.div_ceil(SPACE_RUN_CHARS_PER_TOKEN).max(1)
+            }
+        }
+        TokenRunClass::Newline => len,
+    }
+}
+
+/// Estimate tokens with the same lightweight heuristic used for proxy metrics.
+///
+/// Run-classifier heuristic: word, digit, punctuation, and whitespace runs
+/// are weighted separately so punctuation-heavy output (JSON, logs) estimates
+/// closer to real BPE behavior than a flat chars/4. Deterministic; transform
+/// acceptance additionally keeps a byte-size gate.
+pub fn estimate_tokens(value: &str) -> i64 {
+    let mut runs: Vec<(TokenRunClass, usize)> = Vec::new();
+    for c in value.chars() {
+        let class = token_run_class(c);
+        match runs.last_mut() {
+            Some((current, len)) if *current == class => *len += 1,
+            _ => runs.push((class, 1)),
+        }
+    }
+    let mut total = 0usize;
+    for (idx, &(class, len)) in runs.iter().enumerate() {
+        let next = runs.get(idx + 1).map(|&(next_class, _)| next_class);
+        total += run_token_cost(class, len, next);
+    }
+    total as i64
 }
 
 fn apply_standard_filters(
@@ -380,6 +530,8 @@ struct CompressionResultInput {
     redacted: bool,
     capped: bool,
     deduped: bool,
+    memo_reused: bool,
+    memo_changed: bool,
     strategies: Vec<String>,
 }
 
@@ -403,6 +555,8 @@ fn compression_result(input: CompressionResultInput) -> ToolOutputCompressionRes
         redacted: input.redacted,
         capped: input.capped,
         deduped: input.deduped,
+        memo_reused: input.memo_reused,
+        memo_changed: input.memo_changed,
         strategies: input.strategies,
     }
 }

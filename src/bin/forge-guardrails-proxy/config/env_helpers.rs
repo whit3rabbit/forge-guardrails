@@ -2,8 +2,9 @@ use std::env;
 use std::str::FromStr;
 
 use forge_guardrails::{
-    ClassifierModelKind, ScorerMode, ToolCallPolicyConfig, ToolCallPolicyMode,
-    ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
+    ClassifierModelKind, SchemaCompressionMode, ScorerMode, ToolCallPolicyConfig,
+    ToolCallPolicyMode, ToolOutputCompressionConfig, ToolOutputCompressionMethod,
+    ToolOutputCompressionMode,
 };
 
 pub(crate) fn env_string(keys: &[&str], default: &str) -> String {
@@ -46,6 +47,13 @@ pub(crate) fn env_tool_call_policy() -> Result<ToolCallPolicyConfig, String> {
             ToolCallPolicyMode::from_str(&mode)?,
         )),
         None => Ok(ToolCallPolicyConfig::disabled()),
+    }
+}
+
+pub(crate) fn env_schema_compression() -> Result<SchemaCompressionMode, String> {
+    match env_optional_string("FORGE_SCHEMA_COMPRESSION") {
+        Some(mode) => SchemaCompressionMode::from_str(&mode),
+        None => Ok(SchemaCompressionMode::Disabled),
     }
 }
 

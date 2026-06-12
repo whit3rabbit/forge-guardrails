@@ -555,6 +555,10 @@ ONNX parity reports must compare:
 - Latency for FP32 and quantized variants when eval replay is run.
 
 If quantized ONNX drifts on the target scenarios, use FP32 for quality experiments and keep quantized in shadow telemetry only.
+Rust enforces this for tool-call artifacts: quantized `advisory` and `enforce`
+loads are rejected when `artifact_manifest.json` marks
+`quantized_active_status: "failed_shadow_only"` or
+`quantized_active_allowed: false`.
 
 ## Eval Hard-Negative Files
 

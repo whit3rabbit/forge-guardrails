@@ -33,7 +33,7 @@ pub use classifier_artifact::{
     EXPECTED_LABELS, FINAL_RESPONSE_ARTIFACT_SCHEMA_VERSION, FINAL_RESPONSE_EXPECTED_LABELS,
     FINAL_RESPONSE_INPUT_SCHEMA_VERSION, FINAL_RESPONSE_SERIALIZER,
     FINAL_RESPONSE_THRESHOLDS_SCHEMA_VERSION, LEGACY_EXPECTED_LABELS, NEXT_INPUT_SCHEMA_VERSION,
-    NEXT_SERIALIZER,
+    NEXT_SERIALIZER, V3_SERIALIZER,
 };
 pub use error_tracker::ErrorTracker;
 pub use guardrails::{CheckResult, GuardAction, Guardrails, TerminalTool};
@@ -52,8 +52,9 @@ pub use scoring::{
     ScorerMode, ScoringExecutor, ScoringPipeline, ToolCallClass, ToolCallScore, ToolCallScorer,
 };
 pub use scoring_context::{
-    recent_errors_from_messages, serialize_state_v1, serialize_state_v2, CandidateCallForScoring,
-    ScoringContext, ScoringMetadata, ToolSpecForScoring, WorkflowStateForScoring,
+    recent_errors_from_messages, serialize_state_v1, serialize_state_v2, serialize_state_v3,
+    CandidateCallForScoring, ScoringContext, ScoringMetadata, ToolSpecForScoring,
+    WorkflowStateForScoring,
 };
 pub use step_enforcer::{StepCheck, StepEnforcer, StepPrerequisite};
 

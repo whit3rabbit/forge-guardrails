@@ -19,6 +19,8 @@ pub mod guardrails;
 pub mod prompts;
 /// HTTP and OpenAI-compatible proxy interface.
 pub mod proxy;
+/// Opt-in tool schema description compression for proxy-intercepted requests.
+pub mod schema_compression;
 /// In-process server backend manager.
 pub mod server;
 /// Tool-output compression for proxy-forwarded tool result messages.
@@ -73,7 +75,7 @@ pub use error::{
 pub use guardrails::{
     final_response_top_k_from_logits, recent_errors_from_messages, score_final_response_async,
     score_tool_call_async, serialize_final_response_state_v1, serialize_state_v1,
-    serialize_state_v2, tool_call_top_k_from_logits, validate_tool_arguments,
+    serialize_state_v2, serialize_state_v3, tool_call_top_k_from_logits, validate_tool_arguments,
     validate_tool_call_batch, ArgValidationError, ArgValidationKind, ArtifactManifest,
     CandidateCallForScoring, CheckResult, ClassifierAction, ClassifierArtifact,
     ClassifierModelKind, ClassifierTopKEntry, ErrorTracker, FinalResponseClass,
@@ -88,7 +90,7 @@ pub use guardrails::{
     EXPECTED_LABELS, FINAL_RESPONSE_ARTIFACT_SCHEMA_VERSION, FINAL_RESPONSE_EXPECTED_LABELS,
     FINAL_RESPONSE_INPUT_SCHEMA_VERSION, FINAL_RESPONSE_SERIALIZER,
     FINAL_RESPONSE_THRESHOLDS_SCHEMA_VERSION, LEGACY_EXPECTED_LABELS, NEXT_INPUT_SCHEMA_VERSION,
-    NEXT_SERIALIZER,
+    NEXT_SERIALIZER, V3_SERIALIZER,
 };
 #[cfg(feature = "classifier")]
 pub use guardrails::{
@@ -114,6 +116,10 @@ pub use proxy::{
     text_to_sse_events, tool_calls_to_openai, tool_calls_to_sse_events, AnthropicEventStream,
     AnthropicHandlerError, AnthropicHandlerResult, HTTPServer, HandlerError, HandlerResult,
     OpenAiEventStream, OpenAiMessageError,
+};
+pub use schema_compression::{
+    compress_tool_schemas, patch_anthropic_tool_schemas, SchemaCompressionMode,
+    SchemaCompressionStats,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tool_output::{

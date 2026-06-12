@@ -12,11 +12,14 @@ use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 use crate::clients::base::ToolCall;
 use crate::guardrails::classifier_artifact::{
     ClassifierArtifact, ClassifierModelKind, Thresholds, DEFAULT_CLASSIFIER_REPO, NEXT_SERIALIZER,
+    V3_SERIALIZER,
 };
 use crate::guardrails::scoring::{
     ClassifierAction, ScorerMode, ToolCallClass, ToolCallScore, ToolCallScorer,
 };
-use crate::guardrails::scoring_context::{serialize_state_v1, serialize_state_v2, ScoringContext};
+use crate::guardrails::scoring_context::{
+    serialize_state_v1, serialize_state_v2, serialize_state_v3, ScoringContext,
+};
 
 use super::cache::ScoreCache;
 use super::{build_session_pool, softmax, OnnxScorerOptions, DEFAULT_ONNX_SCORE_CACHE_CAPACITY};
@@ -68,6 +71,8 @@ impl OnnxToolCallScorer {
     ) -> anyhow::Result<Self> {
         let options = options.validate()?;
         let artifact = ClassifierArtifact::from_dir(path)?;
+        let mode = mode_override.unwrap_or_default();
+        artifact.validate_runtime_mode(model_kind, mode)?;
         let tokenizer_path = artifact.dir.join("tokenizer.json");
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|err| anyhow::anyhow!("failed to load {}: {err}", tokenizer_path.display()))?;
@@ -90,7 +95,7 @@ impl OnnxToolCallScorer {
             tokenizer,
             labels: artifact.labels.labels,
             thresholds: artifact.thresholds,
-            mode: mode_override.unwrap_or_default(),
+            mode,
             model_version: DEFAULT_CLASSIFIER_REPO.to_string(),
             input_schema_version: artifact.manifest.input_schema_version,
             serializer: artifact.manifest.serializer,
@@ -156,6 +161,7 @@ impl ToolCallScorer for OnnxToolCallScorer {
         ctx_for_artifact.schema_version = self.input_schema_version.clone();
         let text = match self.serializer.as_str() {
             NEXT_SERIALIZER => serialize_state_v2(&ctx_for_artifact, candidate),
+            V3_SERIALIZER => serialize_state_v3(&ctx_for_artifact, candidate),
             _ => serialize_state_v1(&ctx_for_artifact, candidate),
         };
         if let Some(mut cached) = self

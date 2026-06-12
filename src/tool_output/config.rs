@@ -20,6 +20,8 @@ pub const DICTIONARY_MAX_INPUT_BYTES: usize = 50_000;
 pub const DICTIONARY_MIN_OCCURRENCES: usize = 3;
 /// Minimum net savings in bytes required to accept dictionary compression.
 pub const DICTIONARY_MIN_NET_SAVINGS_BYTES: usize = 32;
+/// Minimum per-entry savings in bytes for a dictionary entry to be committed.
+pub const DICTIONARY_MIN_ENTRY_SAVINGS_BYTES: usize = 16;
 /// Minimum net savings in percentage required to accept dictionary compression.
 pub const DICTIONARY_MIN_NET_SAVINGS_PERCENT: usize = 3;
 
@@ -142,6 +144,8 @@ pub struct ToolOutputCompressionConfig {
     pub redact_secrets: bool,
     /// Whether repeated compressed outputs are replaced with bounded references.
     pub enable_dedup: bool,
+    /// Whether per-call compressed output is memoized for byte-stable resends.
+    pub enable_memo: bool,
     /// Optional client/session key used for dedup.
     pub session_id: Option<String>,
     /// Maximum bytes retained before safe capping.
@@ -159,6 +163,7 @@ impl Default for ToolOutputCompressionConfig {
             method: ToolOutputCompressionMethod::Lzw,
             redact_secrets: true,
             enable_dedup: true,
+            enable_memo: true,
             session_id: None,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             max_dedup_entries_per_session: DEFAULT_MAX_DEDUP_ENTRIES_PER_SESSION,
@@ -212,6 +217,10 @@ pub struct ToolOutputCompressionResult {
     pub capped: bool,
     /// Whether output was replaced by a dedup reference.
     pub deduped: bool,
+    /// Whether memoized compressed bytes were reused unchanged.
+    pub memo_reused: bool,
+    /// Whether an existing memo entry was invalidated by changed input or config.
+    pub memo_changed: bool,
     /// Names of transforms that changed output.
     pub strategies: Vec<String>,
 }

@@ -14,7 +14,7 @@ Latest local eval review: 2026-05-30, documented in
 
 | Artifact | Hugging Face repo | Latest checked revision | Runtime status |
 |---|---|---|---|
-| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` | Runnable by Rust ONNX scorer; pinned for reproducibility, shadow-only due metric regression |
+| Tool-call verifier | [`cowWhySo/toolcall-verifier-classifier-production`](https://huggingface.co/cowWhySo/toolcall-verifier-classifier-production) | `f4f5cfe96aa93fd6b3bf028157895b7ec0113c89` | Runnable by Rust ONNX scorer; pinned for reproducibility, shadow-only due to strict false-objection gate fail |
 | Final-response verifier | [`cowWhySo/final-response-verifier-classifier-production`](https://huggingface.co/cowWhySo/final-response-verifier-classifier-production) | `bb11f0aaece9cae6f9b553e7522cb6d75d9cafbc` | Runnable by Rust ONNX scorer; experimental/shadow-only |
 
 Both artifacts are DeBERTa-v3-small text classifiers exported as FP32 ONNX and
@@ -33,10 +33,7 @@ stricter than the current downloaded threshold metadata for
 `wrong_arguments_semantic`, `tool_not_needed`, and all final-response non-valid
 labels.
 
-The current tool-call pin is worse than the previous strong default revision
-`b35b9734b6a3195e335ceb0a11b49d6782fec3b4`: macro F1 dropped from `0.9830` to
-`0.6813`, and valid-call recall dropped to `0.41`. Do not promote it beyond
-shadow mode without a new replay-backed reason.
+The default tool-call pin was updated to `f4f5cfe96aa93fd6b3bf028157895b7ec0113c89`, resolving the metric regression of `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` (held-out F1 recovered to `0.9014` on test, and `valid` recall recovered to `0.9824`). However, it still fails the strict `0.005` false objection promotion gate (obtaining `0.0068`), so it should remain in `shadow` mode.
 
 ## Download
 

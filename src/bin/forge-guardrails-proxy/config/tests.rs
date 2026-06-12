@@ -29,6 +29,7 @@ fn sample_config() -> ProxyConfig {
         final_response_classifier_max_latency_ms: None,
         tool_output_compression: ToolOutputCompressionConfig::disabled(),
         tool_call_policy: ToolCallPolicyConfig::disabled(),
+        schema_compression: SchemaCompressionMode::Disabled,
     }
 }
 

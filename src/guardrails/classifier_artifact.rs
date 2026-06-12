@@ -7,12 +7,12 @@ use std::str::FromStr;
 use anyhow::{Context, Result as AnyResult};
 use serde::Deserialize;
 
-use crate::guardrails::scoring::{FinalResponseClass, ToolCallClass};
+use crate::guardrails::scoring::{FinalResponseClass, ScorerMode, ToolCallClass};
 
 /// Default Hugging Face model repository for the tool-call verifier.
 pub const DEFAULT_CLASSIFIER_REPO: &str = "cowWhySo/toolcall-verifier-classifier-production";
 /// Pinned Hugging Face revision used by the downloader unless overridden.
-pub const DEFAULT_CLASSIFIER_REVISION: &str = "b8e292b4de5725250bd1698eb5c795ffcb1a4cde";
+pub const DEFAULT_CLASSIFIER_REVISION: &str = "f4f5cfe96aa93fd6b3bf028157895b7ec0113c89";
 /// Default Hugging Face model repository for the final-response verifier.
 pub const DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO: &str =
     "cowWhySo/final-response-verifier-classifier-production";
@@ -29,8 +29,12 @@ pub const NEXT_INPUT_SCHEMA_VERSION: &str = "toolcall-verifier-input/v2";
 pub const EXPECTED_SERIALIZER: &str = "serialize_state_v1";
 /// Metadata-aware classifier serializer name.
 pub const NEXT_SERIALIZER: &str = "serialize_state_v2";
+/// V3 classifier serializer name.
+pub const V3_SERIALIZER: &str = "serialize_state_v3";
 /// Expected classifier thresholds schema version.
 pub const EXPECTED_THRESHOLDS_SCHEMA_VERSION: &str = "toolcall-verifier-thresholds/v1";
+/// Quantized artifact status used when ONNX parity failed and only shadow telemetry is safe.
+pub const QUANTIZED_FAILED_SHADOW_ONLY_STATUS: &str = "failed_shadow_only";
 /// Expected final-response artifact schema version.
 pub const FINAL_RESPONSE_ARTIFACT_SCHEMA_VERSION: &str = "final-response-verifier-artifact/v1";
 /// Expected final-response input schema version.
@@ -129,6 +133,12 @@ pub struct ArtifactManifest {
     /// Artifact creation timestamp, if present.
     #[serde(default)]
     pub created_unix: Option<i64>,
+    /// Quantized ONNX promotion status, if published by the notebook.
+    #[serde(default)]
+    pub quantized_active_status: Option<String>,
+    /// Whether the quantized ONNX artifact passed active-use gates.
+    #[serde(default)]
+    pub quantized_active_allowed: Option<bool>,
 }
 
 impl ArtifactManifest {
@@ -186,6 +196,17 @@ impl ArtifactManifest {
             "final-response classifier max_length must be positive"
         );
         Ok(())
+    }
+
+    /// Return the reason this quantized artifact must stay telemetry-only.
+    pub fn quantized_shadow_only_reason(&self) -> Option<&str> {
+        if self.quantized_active_status.as_deref() == Some(QUANTIZED_FAILED_SHADOW_ONLY_STATUS) {
+            return Some(QUANTIZED_FAILED_SHADOW_ONLY_STATUS);
+        }
+        if self.quantized_active_allowed == Some(false) {
+            return Some("quantized_active_allowed=false");
+        }
+        None
     }
 }
 
@@ -414,6 +435,26 @@ impl ClassifierArtifact {
         };
         self.dir.join(file)
     }
+
+    /// Validate that the requested model can run in the requested scorer mode.
+    pub fn validate_runtime_mode(
+        &self,
+        model_kind: ClassifierModelKind,
+        mode: ScorerMode,
+    ) -> AnyResult<()> {
+        if model_kind != ClassifierModelKind::Quantized
+            || matches!(mode, ScorerMode::Disabled | ScorerMode::Shadow)
+        {
+            return Ok(());
+        }
+
+        if let Some(reason) = self.manifest.quantized_shadow_only_reason() {
+            anyhow::bail!(
+                "quantized classifier artifact is marked {reason}; use --classifier-model full for advisory/enforce or keep quantized in shadow"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Parsed final-response classifier artifact files from a local directory.
@@ -507,6 +548,7 @@ fn validate_tool_call_serializer_pair(input_schema: &str, serializer: &str) -> A
     match (input_schema, serializer) {
         (EXPECTED_INPUT_SCHEMA_VERSION, EXPECTED_SERIALIZER) => Ok(()),
         (NEXT_INPUT_SCHEMA_VERSION, NEXT_SERIALIZER) => Ok(()),
+        (NEXT_INPUT_SCHEMA_VERSION, V3_SERIALIZER) => Ok(()),
         _ => {
             anyhow::bail!(
                 "unsupported classifier input schema '{}' with serializer '{}'",

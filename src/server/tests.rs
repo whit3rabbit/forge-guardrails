@@ -117,8 +117,13 @@ fn free_port() -> i64 {
     for _ in 0..8_000 {
         let next = NEXT_TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let port = 41_000 + i64::from(next % 8_000);
-        if TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
-            return port;
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port as u16));
+        if let Ok(listener) = TcpListener::bind(addr) {
+            drop(listener);
+            // Double check that it's not actually accepting connections from a wildcard or stale listener
+            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(5)).is_err() {
+                return port;
+            }
         }
     }
 

@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use super::{
     dictionary_has_meaningful_savings, is_dictionary_compressed_output, DICTIONARY_MAX_DICT_SIZE,
-    DICTIONARY_MAX_INPUT_BYTES, DICTIONARY_MIN_OCCURRENCES,
+    DICTIONARY_MAX_INPUT_BYTES, DICTIONARY_MIN_ENTRY_SAVINGS_BYTES, DICTIONARY_MIN_OCCURRENCES,
     LZW_DICTIONARY_HEADER as DICTIONARY_HEADER,
 };
 
@@ -194,29 +194,49 @@ fn select_non_overlapping<'a>(
     candidates: &[Candidate<'a>],
     nonce: &str,
 ) -> Vec<SelectedEntry<'a>> {
+    // Lazy-greedy selection: start with stale estimated savings; re-evaluate
+    // realized savings (accounting for used positions) before committing. If
+    // realized savings fall below the next candidate's current estimate,
+    // reinsert at the realized value so a better candidate can be selected
+    // first, bounded by MAX_REEVALS to keep the loop terminating.
+    let mut heap = BinaryHeap::<(isize, usize)>::with_capacity(candidates.len());
+    for (idx, c) in candidates.iter().enumerate() {
+        heap.push((c.savings, idx));
+    }
+
     let mut selected = Vec::new();
     let mut used = vec![false; text.len()];
+    let mut reeval_count = 0usize;
+    const MAX_REEVALS: usize = 256;
 
-    for candidate in candidates {
+    while let Some((estimate, idx)) = heap.pop() {
         if selected.len() >= DICTIONARY_MAX_DICT_SIZE {
             break;
         }
-
+        let candidate = &candidates[idx];
         let marker = marker_for(nonce, selected.len() + 1);
         if text.contains(&marker) {
             continue;
         }
-
         let positions = non_overlapping_positions(text, candidate.original, &used);
         if positions.len() < DICTIONARY_MIN_OCCURRENCES {
             continue;
         }
-
-        let savings = estimated_savings(candidate.original, positions.len(), marker.len());
-        if savings <= 0 {
+        let realized = estimated_savings(candidate.original, positions.len(), marker.len());
+        // C3: per-entry savings floor — skip entries that won't pay off.
+        if realized < DICTIONARY_MIN_ENTRY_SAVINGS_BYTES as isize {
             continue;
         }
-
+        // C2: if realized savings dropped below the next candidate's estimate
+        // and we still have reeval budget, reinsert at the realized value.
+        if realized < estimate {
+            let next_best = heap.peek().map(|&(s, _)| s).unwrap_or(isize::MIN);
+            if realized < next_best && reeval_count < MAX_REEVALS {
+                heap.push((realized, idx));
+                reeval_count += 1;
+                continue;
+            }
+        }
         for pos in &positions {
             mark_range(&mut used, *pos, candidate.original.len());
         }
@@ -318,12 +338,12 @@ fn dictionary_entry_len(original: &str, marker_len: usize) -> usize {
 }
 
 fn marker_for(nonce: &str, index: usize) -> String {
-    format!("<<FORGE_LZW_{nonce}_{index}>>")
+    format!("<<F{nonce}:{index}>>")
 }
 
 fn collision_free_nonce(text: &str) -> Option<String> {
     for nonce in 1..=999usize {
-        let prefix = format!("<<FORGE_LZW_{nonce}_");
+        let prefix = format!("<<F{nonce}:");
         if !text.contains(&prefix) {
             return Some(nonce.to_string());
         }
@@ -411,10 +431,10 @@ mod tests {
 
     #[test]
     fn aggressive_lzw_handles_marker_collisions() {
-        let raw = format!("<<FORGE_LZW_1_1>>\n{}", repeated_output());
+        let raw = format!("<<F1:1>>\n{}", repeated_output());
         let compressed = compress_lzw_dictionary(&raw).expect("compressible");
 
-        assert!(compressed.contains("<<FORGE_LZW_2_"));
+        assert!(compressed.contains("<<F2:"));
         assert_eq!(decompress_lzw_dictionary(&compressed), raw);
     }
 
@@ -428,7 +448,7 @@ mod tests {
 
     #[test]
     fn aggressive_lzw_skips_already_compressed_output() {
-        let raw = format!("{DICTIONARY_HEADER}\n<<FORGE_LZW_1_1>> = \"value\"\n\nbody");
+        let raw = format!("{DICTIONARY_HEADER}\n<<F1:1>> = \"value\"\n\nbody");
 
         assert_eq!(compress_lzw_dictionary(&raw), None);
     }
@@ -436,7 +456,7 @@ mod tests {
     #[test]
     fn aggressive_lzw_skips_repair_dictionary_output() {
         let raw = format!(
-            "{}\n<<FORGE_REPAIR_1_1>> = \"value\"\n\nbody",
+            "{}\n<<R1:1>> = \"value\"\n\nbody",
             super::super::REPAIR_DICTIONARY_HEADER
         );
 
