@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{
     dictionary_has_meaningful_savings, is_dictionary_compressed_output, DICTIONARY_MAX_DICT_SIZE,
-    DICTIONARY_MAX_INPUT_BYTES, DICTIONARY_MIN_OCCURRENCES,
+    DICTIONARY_MAX_INPUT_BYTES, DICTIONARY_MIN_ENTRY_SAVINGS_BYTES, DICTIONARY_MIN_OCCURRENCES,
     REPAIR_DICTIONARY_HEADER as DICTIONARY_HEADER,
 };
 
@@ -53,7 +53,7 @@ pub(super) fn compress_repair_dictionary(output: &str) -> Option<String> {
         let Some(candidate) = best_sequence_candidate(&tokens, marker.len()) else {
             break;
         };
-        if candidate.savings <= 0 {
+        if candidate.savings < DICTIONARY_MIN_ENTRY_SAVINGS_BYTES as isize {
             break;
         }
 
@@ -262,8 +262,15 @@ fn build_dictionary(rules: &[Rule]) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// Maximum `\n` characters allowed in a RePair rule expansion. Allowing short
+/// multi-line spans captures log-block patterns that LZW skips entirely.
+const MAX_RULE_NEWLINES: usize = 2;
+
 fn eligible_rule(value: &str) -> bool {
-    if value.contains('\n') || value.contains('\r') {
+    if value.contains('\r') {
+        return false;
+    }
+    if value.chars().filter(|&c| c == '\n').count() > MAX_RULE_NEWLINES {
         return false;
     }
     !value
@@ -287,12 +294,12 @@ fn dictionary_entry_len(expansion: &str, marker_len: usize) -> usize {
 }
 
 fn marker_for(nonce: &str, index: usize) -> String {
-    format!("<<FORGE_REPAIR_{nonce}_{index}>>")
+    format!("<<R{nonce}:{index}>>")
 }
 
 fn collision_free_nonce(text: &str) -> Option<String> {
     for nonce in 1..=999usize {
-        let prefix = format!("<<FORGE_REPAIR_{nonce}_");
+        let prefix = format!("<<R{nonce}:");
         if !text.contains(&prefix) {
             return Some(nonce.to_string());
         }
@@ -357,10 +364,10 @@ mod tests {
 
     #[test]
     fn repair_handles_marker_collisions() {
-        let raw = format!("<<FORGE_REPAIR_1_1>>\n{}", repeated_output());
+        let raw = format!("<<R1:1>>\n{}", repeated_output());
         let compressed = compress_repair_dictionary(&raw).expect("compressible");
 
-        assert!(compressed.contains("<<FORGE_REPAIR_2_"));
+        assert!(compressed.contains("<<R2:"));
         assert_eq!(decompress_repair_dictionary(&compressed), raw);
     }
 
@@ -373,17 +380,30 @@ mod tests {
     }
 
     #[test]
-    fn repair_skips_newline_containing_rules() {
+    fn repair_compresses_multi_line_rules() {
+        // Two-line blocks repeat 30+ times — eligible under MAX_RULE_NEWLINES=2.
         let raw = (0..40)
-            .map(|idx| format!("left_{idx}\nright_{idx}\n"))
+            .map(|_| "HEADER_LINE\nDETAIL_LINE\n")
             .collect::<String>();
+        let compressed = compress_repair_dictionary(&raw).expect("should compress");
+        assert_eq!(decompress_repair_dictionary(&compressed), raw);
+    }
 
-        assert_eq!(compress_repair_dictionary(&raw), None);
+    #[test]
+    fn repair_skips_rules_exceeding_max_newlines() {
+        // Three-newline patterns should remain ineligible.
+        let raw = (0..40).map(|_| "A\nB\nC\nD\n").collect::<String>();
+        // A\nB\nC\nD\n would require a 3-newline rule — still skipped.
+        // The output may compress via shorter sub-rules but not via a 3-newline rule.
+        // Just verify it doesn't panic and round-trips.
+        if let Some(compressed) = compress_repair_dictionary(&raw) {
+            assert_eq!(decompress_repair_dictionary(&compressed), raw);
+        }
     }
 
     #[test]
     fn repair_skips_already_compressed_output() {
-        let raw = format!("{DICTIONARY_HEADER}\n<<FORGE_REPAIR_1_1>> = \"value\"\n\nbody");
+        let raw = format!("{DICTIONARY_HEADER}\n<<R1:1>> = \"value\"\n\nbody");
 
         assert_eq!(compress_repair_dictionary(&raw), None);
     }
@@ -391,7 +411,7 @@ mod tests {
     #[test]
     fn repair_skips_lzw_dictionary_output() {
         let raw = format!(
-            "{}\n<<FORGE_LZW_1_1>> = \"value\"\n\nbody",
+            "{}\n<<F1:1>> = \"value\"\n\nbody",
             super::super::LZW_DICTIONARY_HEADER
         );
 

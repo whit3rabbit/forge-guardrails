@@ -217,20 +217,35 @@ impl ServerManager {
             .try_into()
             .map_err(|_| BackendError::new(0, format!("Invalid backend port: {}", self.port)))?;
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Err(BackendError::new(
-                0,
-                format!("Backend port {} is already accepting connections", port),
-            ));
+
+        let mut last_err = None;
+        for i in 0..10 {
+            if i > 0 {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+                last_err = Some(BackendError::new(
+                    0,
+                    format!("Backend port {} is already accepting connections", port),
+                ));
+                continue;
+            }
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = Some(BackendError::new(
+                        0,
+                        format!("Backend port {} is not available on 127.0.0.1: {}", port, e),
+                    ));
+                }
+            }
         }
-        let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
-            BackendError::new(
-                0,
-                format!("Backend port {} is not available on 127.0.0.1: {}", port, e),
-            )
-        })?;
-        drop(listener);
-        Ok(())
+        Err(last_err.unwrap_or_else(|| {
+            BackendError::new(0, format!("Backend port {} is not available", port))
+        }))
     }
 
     pub(super) fn wait_until_ready(

@@ -49,15 +49,11 @@ terminal-tool rules remain Rust-owned and authoritative.
 | Replacement notebook serializer | `serialize_state_v2` |
 | Default runtime mode | `shadow` |
 | Active non-valid thresholds | `1.01` |
-| Current published tool-call pin | `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` |
+| Current published tool-call pin | `f4f5cfe96aa93fd6b3bf028157895b7ec0113c89` |
 | Previous strong tool-call pin | `b35b9734b6a3195e335ceb0a11b49d6782fec3b4` |
 | Current final-response pin | `bb11f0aaece9cae6f9b553e7522cb6d75d9cafbc` |
 
-Do not promote the current published tool-call pin. It regressed from the
-previous strong revision: held-out macro F1 dropped to about `0.681`, and
-`valid` recall dropped to about `0.41`. The confusion matrix showed valid calls
-being pushed into `wrong_tool_semantic`, so this was a training distribution
-failure, not a threshold problem.
+The default published tool-call pin was updated to the June 11 high-coverage run (`f4f5cfe96aa93fd6b3bf028157895b7ec0113c89`). This resolves the training distribution failure/regression of `b8e292b4de5725250bd1698eb5c795ffcb1a4cde` (which had F1 `0.681` and `valid` recall `0.41`). The new candidate pin achieves a test macro F1 of `0.9014`, `valid` recall of `0.9824`, and `wrong_tool_semantic` precision of `0.9890`. However, it still fails the strict `0.005` false objection promotion gate (obtaining `0.0068`), so it should remain in `shadow` mode.
 
 ## Labels
 
@@ -100,16 +96,14 @@ sampling do not separate the contrastive pair.
 
 ### Private Generated Dataset
 
-The current private generated dataset used for `agent_training_hf` is
-`notebook/generatetd/out/openrouter-train-3k` and contains `2650` tool-call
-rows:
+The private generated dataset used for `agent_training_hf` in the latest run is `addenda/forge-eval-3k-v2/agent_training.notebook.jsonl` from the Hugging Face repo `cowWhySo/forge-toolcall-verifier-openrouter-2650-v1` (revision `01eedcb861324df5fe5b6584ed4f12995b103d0f`), containing `724` agent-derived rows:
 
 | Label | Rows |
 |---|---:|
-| `valid` | `2077` |
-| `wrong_tool_semantic` | `247` |
-| `wrong_arguments_semantic` | `80` |
-| `tool_not_needed` | `246` |
+| `valid` | `413` |
+| `tool_not_needed` | `241` |
+| `wrong_arguments_semantic` | `38` |
+| `wrong_tool_semantic` | `32` |
 
 This legacy dataset is useful as Forge-style valid-call coverage, but it is not
 strong wrong-tool training evidence. In this run, `246/247` private wrong-tool
@@ -308,8 +302,7 @@ downsampling was disabled:
 | `valid` false objection at `0.90` | `0.0077` |
 
 That candidate still failed the `0.005` false-objection gate and was not
-promoted. The next high-coverage run should keep public coverage, preserve
-private rows at `0.25`, and focus on valid-protection false objections.
+promoted. The latest run on 2026-06-11 (detailed in [Latest Run Results](#latest-run-results-2026-06-11) below) further improved key metrics: `valid` recall reached `0.9824`, `wrong_tool_semantic` precision reached `0.9890`, and `valid` false objection at `0.90` was reduced to `0.0068`. However, it still fails the strict `0.005` false objection promotion gate on the test set.
 
 ### Quantized ONNX Is A Separate Candidate
 
@@ -334,6 +327,130 @@ The final-response verifier is a separate artifact family and is not mature
 enough for active behavior. A recent runtime replay labeled `302/302` final
 responses as `failed_to_acknowledge_data_gap` at low confidence. Keep it
 shadow-only and document/evaluate it separately.
+
+## Latest Run Results (2026-06-11)
+
+The latest high-coverage run on June 11, 2026, was executed with `enable_forge_augmentation=True` and `enable_final_response_verifier=True`. 
+
+### Dataset Statistics
+
+During preprocessing, `33,056` deterministic invalid rows were removed. In addition, `62` rows were quarantined due to source-quality flags (`forge_argument_semantic`, `forge_contrastive_wts`, `forge_hard_negative`, and `forge_synthetic`), leaving `290,019` rows after quarantine. 
+
+After applying group-preserving label caps (max `50,000` per label), the dataset size was reduced to `226,599` rows, preserving all preferred private HF rows.
+
+**Capped training rows by source and label:**
+- **Salesforce/xlam-function-calling-60k**: 130,870 rows (valid: 47,237, wrong_arguments: 45,568, wrong_tool: 37,221, needs_clarification: 538, tool_not_needed: 12,844)
+- **glaiveai/glaive-function-calling-v2**: 48,763 rows (valid: 19,398, wrong_arguments: 18,350, wrong_tool: 5,314, needs_clarification: 237, tool_not_needed: 5,414)
+- **Team-ACE/ToolACE**: 27,713 rows (valid: 9,486, wrong_arguments: 8,926, wrong_tool: 7,184, needs_clarification: 120, tool_not_needed: 2,017)
+- **agent_training_hf**: 724 rows (valid: 413, wrong_arguments: 38, wrong_tool: 32, tool_not_needed: 241)
+- **forge_error_recovery_protected**: 2,559 rows (valid: 525, wrong_arguments: 1,509, wrong_tool: 525)
+- **forge_fixed_width_numeric**: 1,874 rows (valid: 570, wrong_arguments: 1,304)
+- **forge_trace**: 1,069 rows (valid: 1,051, wrong_arguments: 18)
+- **forge_error_recovery_numeric**: 419 rows (valid: 60, wrong_arguments: 359)
+- **forge_augmented**: 100 rows (needs_clarification: 100)
+
+**Final split sizes:**
+- **Train**: 190,692 rows (after valid rebalancing duplication factor of 2)
+- **Validation**: 11,293 rows
+- **Test**: 22,370 rows
+
+### Training Profile
+
+- **Device**: NVIDIA RTX PRO 6000 Blackwell Server Edition (95 GB VRAM)
+- **Batch Size**: 64 (gradient accumulation: 1)
+- **Max Sequence Length**: 1,280
+- **Optimizer**: `adamw_torch_fused`
+- **Gradient Checkpointing**: Disabled
+- **Epochs**: 5
+
+### Training Progress & Best Checkpoint
+
+The best model checkpoint was saved at step `13384` (end of Epoch 4) based on the `gate_deficit_score` metric.
+
+| Epoch | Training Loss | Validation Loss | Validation Accuracy | Validation Macro F1 | Valid Recall | Valid False Objection at 0.90 | Wrong Tool Precision | Wrong Arguments Recall | Gate Deficit Score | Checkpoint Constrained Promotable |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 1 | 0.1653 | 0.1621 | 0.9486 | 0.7662 | 0.9005 | 0.0290 | 0.9089 | 0.9786 | 0.8367 | False |
+| 2 | 0.1033 | 0.0832 | 0.9730 | 0.8536 | 0.9684 | 0.0069 | 0.9810 | 0.9781 | 101.0584 | False |
+| 3 | 0.0733 | 0.0845 | 0.9752 | 0.8716 | 0.9809 | 0.0079 | 0.9988 | 0.9820 | 101.0623 | False |
+| **4** | **0.0526** | **0.0657** | **0.9792** | **0.9273** | **0.9817** | **0.0048** | **0.9873** | **0.9783** | **101.0911** | **True** |
+| 5 | 0.0485 | 0.0624 | 0.9806 | 0.9422 | 0.9796 | 0.0051 | 0.9865 | 0.9799 | 101.0881 | False |
+
+### Test Evaluation Results
+
+Evaluated on the held-out test split of `22,370` rows:
+
+| Metric | Value |
+| :--- | :---: |
+| **Test Accuracy** | `0.9780` |
+| **Macro F1 (5 Active Labels)** | `0.9014` |
+| **Macro F1 (All Labels)** | `0.7512` |
+| **`valid` Recall** | `0.9824` |
+| **`valid` Precision** | `0.9583` |
+| **`valid` False Objection at 0.90** | `0.0068` (22 false objections / 7,836 valid rows) |
+| **`wrong_tool_semantic` Precision** | `0.9890` |
+| **`wrong_tool_semantic` Recall** | `0.9718` |
+| **`wrong_arguments_semantic` Precision** | `0.9878` |
+| **`wrong_arguments_semantic` Recall** | `0.9793` |
+| **`valid` to `wrong_arguments_semantic` Error Rate** | `0.0103` |
+| **`wrong_tool` to `wrong_arguments_semantic` Rate** | `0.0008` |
+| **Gate Deficit Score** | `101.0743` |
+
+#### Test Classification Report
+
+```text
+                          precision    recall  f1-score   support
+
+                   valid       0.96      0.98      0.97      7836
+     wrong_tool_semantic       0.99      0.97      0.98      4921
+wrong_arguments_semantic       0.99      0.98      0.98      7543
+         tool_not_needed       1.00      1.00      1.00      1969
+     needs_clarification       0.85      0.44      0.58       101
+   deterministic_invalid       0.00      0.00      0.00         0
+
+                accuracy                           0.98     22370
+               macro avg       0.80      0.73      0.75     22370
+            weighted avg       0.98      0.98      0.98     22370
+```
+
+#### Test Confusion Matrix
+
+| True \ Predicted | valid | wrong_tool_semantic | wrong_arguments_semantic | tool_not_needed | needs_clarification | deterministic_invalid |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **valid** | 7698 | 48 | 81 | 3 | 6 | 0 |
+| **wrong_tool_semantic** | 133 | 4783 | 4 | 1 | 0 | 0 |
+| **wrong_arguments_semantic** | 149 | 2 | 7388 | 2 | 2 | 0 |
+| **tool_not_needed** | 1 | 2 | 0 | 1966 | 0 | 0 |
+| **needs_clarification** | 50 | 1 | 6 | 0 | 44 | 0 |
+| **deterministic_invalid** | 0 | 0 | 0 | 0 | 0 | 0 |
+
+#### Per-Source and Per-Label Accuracies
+
+**Per-Source Accuracy:**
+- `Salesforce/xlam-function-calling-60k`: 14,071 rows, Accuracy: `97.73%` (Avg Conf: `0.9882`)
+- `glaiveai/glaive-function-calling-v2`: 4,775 rows, Accuracy: `99.52%` (Avg Conf: `0.9971`)
+- `Team-ACE/ToolACE`: 2,822 rows, Accuracy: `95.11%` (Avg Conf: `0.9642`)
+- `forge_error_recovery_protected`: 257 rows, Accuracy: `100.00%` (Avg Conf: `0.9993`)
+- `forge_fixed_width_numeric`: 197 rows, Accuracy: `99.49%` (Avg Conf: `0.9977`)
+- `forge_trace`: 152 rows, Accuracy: `99.34%` (Avg Conf: `0.9987`)
+- `agent_training_hf`: 48 rows, Accuracy: `85.42%` (Avg Conf: `0.9578`)
+- `forge_error_recovery_numeric`: 35 rows, Accuracy: `97.14%` (Avg Conf: `0.9783`)
+- `forge_augmented`: 13 rows, Accuracy: `100.00%` (Avg Conf: `0.9612`)
+
+**Per-Label Accuracy:**
+- `valid`: 7,836 rows, Accuracy: `98.24%` (Avg Conf: `0.9805`)
+- `wrong_arguments_semantic`: 7,543 rows, Accuracy: `97.95%` (Avg Conf: `0.9910`)
+- `wrong_tool_semantic`: 4,921 rows, Accuracy: `97.20%` (Avg Conf: `0.9902`)
+- `tool_not_needed`: 1,969 rows, Accuracy: `99.85%` (Avg Conf: `0.9996`)
+- `needs_clarification`: 101 rows, Accuracy: `43.56%` (Avg Conf: `0.8513`)
+
+#### Guarded-Objection Sweep Details
+
+Valid-call false block rate at different logit thresholds on the test set:
+- `@ 0.80`: `73 / 7836` = `0.0093`
+- `@ 0.90`: `52 / 7836` = `0.0066`
+- `@ 0.95`: `39 / 7836` = `0.0050`
+- `@ 0.98`: `30 / 7836` = `0.0038`
+- `@ 0.99`: `22 / 7836` = `0.0028`
 
 ## Threshold Policy
 

@@ -154,6 +154,10 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "disabled|standard")]
     pub(crate) tool_call_policy: Option<String>,
 
+    /// Tool schema description compression mode.
+    #[arg(long, value_name = "disabled|minify")]
+    pub(crate) schema_compression: Option<String>,
+
     /// Disable rescue parsing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_rescue: bool,

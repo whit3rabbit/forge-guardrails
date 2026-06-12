@@ -4,8 +4,9 @@ use crate::cli::Cli;
 #[cfg(feature = "classifier")]
 use forge_guardrails::default_tool_call_classifier_artifact_dir;
 use forge_guardrails::{
-    ClassifierModelKind, ScorerMode, ToolCallPolicyConfig, ToolCallPolicyMode,
-    ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
+    ClassifierModelKind, SchemaCompressionMode, ScorerMode, ToolCallPolicyConfig,
+    ToolCallPolicyMode, ToolOutputCompressionConfig, ToolOutputCompressionMethod,
+    ToolOutputCompressionMode,
 };
 
 pub(crate) const DEFAULT_PROXY_PORT: u16 = 8081;
@@ -25,8 +26,8 @@ mod tests;
 
 use env_helpers::{
     env_bool, env_classifier_model, env_final_response_classifier_model, env_first_string, env_i32,
-    env_i64, env_optional_string, env_optional_u64, env_scoring_mode, env_string,
-    env_tool_call_policy, env_tool_output_compression,
+    env_i64, env_optional_string, env_optional_u64, env_schema_compression, env_scoring_mode,
+    env_string, env_tool_call_policy, env_tool_output_compression,
 };
 
 #[cfg(test)]
@@ -61,6 +62,7 @@ pub(crate) struct ProxyConfig {
     pub(crate) final_response_classifier_max_latency_ms: Option<u64>,
     pub(crate) tool_output_compression: ToolOutputCompressionConfig,
     pub(crate) tool_call_policy: ToolCallPolicyConfig,
+    pub(crate) schema_compression: SchemaCompressionMode,
 }
 
 impl ProxyConfig {
@@ -108,6 +110,7 @@ impl ProxyConfig {
             )?,
             tool_output_compression: env_tool_output_compression()?,
             tool_call_policy: env_tool_call_policy()?,
+            schema_compression: env_schema_compression()?,
         })
     }
 }
@@ -164,6 +167,7 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     }
     config.tool_output_compression = tool_output_compression_from_env_cli(cli)?;
     config.tool_call_policy = tool_call_policy_from_env_cli(cli)?;
+    config.schema_compression = schema_compression_from_env_cli(cli)?;
     Ok(())
 }
 
@@ -194,6 +198,14 @@ pub(crate) fn tool_call_policy_from_env_cli(cli: &Cli) -> Result<ToolCallPolicyC
         config = ToolCallPolicyConfig::from_mode(ToolCallPolicyMode::from_str(mode)?);
     }
     Ok(config)
+}
+
+pub(crate) fn schema_compression_from_env_cli(cli: &Cli) -> Result<SchemaCompressionMode, String> {
+    let mut mode = env_schema_compression()?;
+    if let Some(s) = cli.schema_compression.as_deref() {
+        mode = SchemaCompressionMode::from_str(s)?;
+    }
+    Ok(mode)
 }
 
 pub(crate) fn classifier_settings_from_env_cli(

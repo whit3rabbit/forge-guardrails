@@ -10,7 +10,9 @@ use forge_guardrails::guardrails::{
     WorkflowStateForScoring,
 };
 use forge_guardrails::streaming::{LLMResponse, ToolCall};
-use forge_guardrails::{serialize_state_v1, serialize_state_v2, ToolSpecForScoring};
+use forge_guardrails::{
+    serialize_state_v1, serialize_state_v2, serialize_state_v3, ToolSpecForScoring,
+};
 #[cfg(feature = "classifier")]
 use forge_guardrails::{OnnxScorerOptions, MAX_ONNX_SESSION_POOL_SIZE};
 use indexmap::IndexMap;
@@ -30,6 +32,9 @@ fn candidate_from_fixture(value: &Value) -> ToolCall {
 }
 
 fn scoring_context_from_fixture(value: &Value) -> ScoringContext {
+    let metadata: Option<ScoringMetadata> = value["input"]
+        .get("metadata")
+        .and_then(|m| serde_json::from_value(m.clone()).ok());
     ScoringContext {
         schema_version: value["input"]["schema_version"]
             .as_str()
@@ -43,7 +48,7 @@ fn scoring_context_from_fixture(value: &Value) -> ScoringContext {
             .expect("workflow_state"),
         available_tools: serde_json::from_value(value["input"]["available_tools"].clone())
             .expect("available_tools"),
-        metadata: None,
+        metadata,
     }
 }
 
@@ -239,6 +244,20 @@ fn serialize_state_matches_hf_fixture() {
 }
 
 #[test]
+fn serialize_state_v3_matches_hf_fixture() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "fixtures/classifier/serializer_fixture_v3.json"
+    ))
+    .expect("fixture");
+    let ctx = scoring_context_from_fixture(&fixture);
+    let candidate = candidate_from_fixture(&fixture);
+
+    let actual = serialize_state_v3(&ctx, &candidate);
+
+    assert_eq!(actual, fixture["serialized"].as_str().expect("serialized"));
+}
+
+#[test]
 fn serialize_final_response_state_v1_matches_fixture_text() {
     let ctx = FinalResponseContext {
         schema_version: "final-response-verifier-input/v1".to_string(),
@@ -378,6 +397,55 @@ fn six_label_v2_artifact_metadata_loads_from_dir() {
         .for_label(&ToolCallClass::WrongArgumentsSemantic);
     assert_eq!(threshold.advisory_min_confidence, 0.90);
     assert_eq!(threshold.enforce_min_confidence, 0.995);
+}
+
+#[test]
+fn quantized_failed_shadow_only_blocks_action_modes() {
+    let labels = labels_file(&[
+        "valid",
+        "wrong_tool_semantic",
+        "wrong_arguments_semantic",
+        "tool_not_needed",
+        "needs_clarification",
+        "deterministic_invalid",
+    ]);
+    let dir = write_artifact_dir(labels, six_label_thresholds()).expect("artifact dir");
+    let manifest_path = dir.join("artifact_manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read manifest"))
+            .expect("manifest json");
+    manifest["quantized_active_status"] = json!("failed_shadow_only");
+    manifest["quantized_active_allowed"] = json!(false);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("manifest bytes"),
+    )
+    .expect("write manifest");
+
+    let artifact = ClassifierArtifact::from_dir(&dir).expect("artifact");
+
+    artifact
+        .validate_runtime_mode(
+            forge_guardrails::ClassifierModelKind::Quantized,
+            ScorerMode::Shadow,
+        )
+        .expect("quantized shadow stays available");
+    artifact
+        .validate_runtime_mode(
+            forge_guardrails::ClassifierModelKind::Full,
+            ScorerMode::Advisory,
+        )
+        .expect("full model can be used for advisory replay");
+    let err = artifact
+        .validate_runtime_mode(
+            forge_guardrails::ClassifierModelKind::Quantized,
+            ScorerMode::Advisory,
+        )
+        .expect_err("quantized advisory blocked");
+
+    assert!(err
+        .to_string()
+        .contains("quantized classifier artifact is marked failed_shadow_only"));
 }
 
 #[test]

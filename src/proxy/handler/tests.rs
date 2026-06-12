@@ -7,10 +7,10 @@ use crate::clients::AnthropicClient;
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
 use crate::core::tool_spec::ToolSpec;
 use crate::{
-    ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore, ToolCallClass,
-    ToolCallPolicyConfig, ToolCallScore, ToolCallScorer, ToolOutputCompressionConfig,
-    ToolOutputCompressionMethod, ToolOutputCompressionMode, ToolOutputCompressionResult,
-    ToolOutputCompressionState,
+    ClassifierAction, FinalResponseClass, FinalResponseContext, FinalResponseScore,
+    SchemaCompressionMode, ToolCallClass, ToolCallPolicyConfig, ToolCallScore, ToolCallScorer,
+    ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
+    ToolOutputCompressionResult, ToolOutputCompressionState,
 };
 use anyllm_translate::anthropic::MessageCreateRequest;
 use indexmap::IndexMap;
@@ -201,6 +201,8 @@ fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
         redacted: true,
         capped: false,
         deduped: false,
+        memo_reused: false,
+        memo_changed: false,
         strategies: vec!["strip_ansi".to_string(), "redact_secrets".to_string()],
     };
 
@@ -255,6 +257,8 @@ fn tool_output_compression_event_fingerprints_args_after_redaction() {
         redacted: false,
         capped: false,
         deduped: false,
+        memo_reused: false,
+        memo_changed: false,
         strategies: Vec::new(),
     };
     let event_for = |args: &IndexMap<String, Value>| {
@@ -302,6 +306,8 @@ fn tool_output_compression_event_includes_dictionary_method_when_present() {
         redacted: false,
         capped: false,
         deduped: false,
+        memo_reused: false,
+        memo_changed: false,
         strategies: vec!["auto_dictionary".to_string()],
     };
 
@@ -316,7 +322,7 @@ fn tool_output_compression_event_includes_dictionary_method_when_present() {
             request_debug: None,
         },
         &result_for(format!(
-            "{}\n<<FORGE_LZW_1_1>> = \"value\"\n\n<<FORGE_LZW_1_1>>",
+            "{}\n<<F1:1>> = \"value\"\n\n<<F1:1>>",
             crate::tool_output::LZW_DICTIONARY_HEADER
         )),
     );
@@ -331,7 +337,7 @@ fn tool_output_compression_event_includes_dictionary_method_when_present() {
             request_debug: None,
         },
         &result_for(format!(
-            "{}\n<<FORGE_REPAIR_1_1>> = \"value\"\n\n<<FORGE_REPAIR_1_1>>",
+            "{}\n<<R1:1>> = \"value\"\n\n<<R1:1>>",
             crate::tool_output::REPAIR_DICTIONARY_HEADER
         )),
     );
@@ -2777,11 +2783,11 @@ async fn tool_output_compression_dedups_repeated_tool_results_by_session() {
     assert!(!sent[0][2]["content"]
         .as_str()
         .expect("first content")
-        .contains("Duplicate of tool call"));
+        .contains("Duplicate of"));
     assert!(sent[0][4]["content"]
         .as_str()
         .expect("second content")
-        .contains("Duplicate of tool call call_one (bash)"));
+        .contains("Duplicate of call_one (bash)"));
 }
 
 #[tokio::test]
@@ -2842,7 +2848,7 @@ async fn tool_output_compression_keeps_resent_tool_results_across_requests() {
     // instead of degrading into a duplicate marker that references a result
     // no longer visible upstream.
     let resent_content = sent[1][2]["content"].as_str().expect("resent content");
-    assert!(!resent_content.contains("Duplicate of tool call"));
+    assert!(!resent_content.contains("Duplicate of"));
     assert_eq!(
         resent_content,
         sent[0][2]["content"].as_str().expect("first content")
@@ -3083,6 +3089,7 @@ async fn tool_call_policy_lsp_nudge_fires_only_when_replacement_tool_exists() {
         ToolOutputCompressionConfig::disabled(),
         None,
         ToolCallPolicyConfig::disabled(),
+        SchemaCompressionMode::Disabled,
     )
     .await
     .expect("handler result");
@@ -3124,6 +3131,7 @@ async fn tool_call_policy_lsp_nudge_fires_only_when_replacement_tool_exists() {
         ToolOutputCompressionConfig::disabled(),
         None,
         ToolCallPolicyConfig::disabled(),
+        SchemaCompressionMode::Disabled,
     )
     .await
     .expect("handler result");
@@ -3169,6 +3177,7 @@ async fn tool_call_policy_quiet_command_never_mutates_and_nudges_once() {
         ToolOutputCompressionConfig::disabled(),
         None,
         ToolCallPolicyConfig::disabled(),
+        SchemaCompressionMode::Disabled,
     )
     .await
     .expect("handler result");

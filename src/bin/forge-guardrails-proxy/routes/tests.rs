@@ -11,8 +11,8 @@ use tokio::sync::Mutex as TokioMutex;
 
 use forge_guardrails::{
     ApiFormat, BackendError, ChunkStream, ChunkType, ClassifierModelKind, ContextDiscoveryError,
-    LLMRequestOptions, LLMResponse, SamplingParams, ScorerMode, StreamChunk, StreamError,
-    TextResponse, ToolCallPolicyConfig, ToolOutputCompressionConfig, ToolSpec,
+    LLMRequestOptions, LLMResponse, SamplingParams, SchemaCompressionMode, ScorerMode, StreamChunk,
+    StreamError, TextResponse, ToolCallPolicyConfig, ToolOutputCompressionConfig, ToolSpec,
 };
 
 use super::handlers::{
@@ -45,6 +45,7 @@ fn test_config() -> Arc<ProxyConfig> {
         final_response_classifier_max_latency_ms: None,
         tool_output_compression: ToolOutputCompressionConfig::disabled(),
         tool_call_policy: ToolCallPolicyConfig::disabled(),
+        schema_compression: SchemaCompressionMode::Disabled,
     })
 }
 

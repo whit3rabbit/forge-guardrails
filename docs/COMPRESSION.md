@@ -143,8 +143,52 @@ referenced original is no longer visible upstream. Tool results without a
 tool call id are never deduplicated. The marker references the original call:
 
 ```text
-[Duplicate of tool call call_abc123 (bash) - see earlier result]
+[Duplicate of call_abc123 (bash); see earlier result]
 ```
+
+The later duplicate is collapsed, not the earlier one. Collapsing the earlier
+message would rewrite an already-cached prompt prefix on every subsequent
+request, defeating the purpose of upstream prompt-caching. Near-duplicate delta
+encoding (storing only a diff from a base entry) was considered and rejected
+because FIFO eviction can remove the base entry, which makes the delta
+un-expandable and breaks determinism. A marker-format change busts the cache
+prefix once for sessions that span the deploy; subsequent resends are
+byte-stable with the new format.
+
+## Memoization and prompt-cache stability
+
+When a `session_id` is set, Forge memoizes the final compressed output for each
+tool call id. On subsequent requests that resend the same tool result with the
+same content and compression config, the stored bytes are returned without
+recompression. This keeps prior messages byte-identical across full-history
+resends, which preserves upstream prompt-cache prefixes (Anthropic
+`cache_control`, OpenAI automatic caching) and skips redundant CPU work.
+
+The memo is keyed by `(session_id, tool_call_id)`. A hit requires both the
+input bytes and the compression config to match; a config change (mode, method,
+redact_secrets, dedup, max_output_bytes) invalidates the entry and triggers a
+fresh pass, setting `memo_changed = true` in telemetry as a cache-buster signal.
+Outputs larger than 16 KB are not memoized. Per-session storage is bounded at
+512 KB with FIFO eviction. The memo is process-local and clears on restart.
+
+Memoization is enabled by default when `session_id` is present. Disable it for
+a request with:
+
+```json
+{
+  "_forge": {
+    "tool_output_compression": {
+      "mode": "standard",
+      "session_id": "my-session",
+      "memo": false
+    }
+  }
+}
+```
+
+Telemetry fields `memo_reused` and `memo_changed` are emitted in every
+compression JSONL event. Use `memo_changed` spikes to detect config or content
+churn that busts the prompt-cache prefix on re-sends.
 
 ## Pipeline
 
@@ -164,10 +208,21 @@ When enabled, Forge applies transforms in this order:
    bounded duplicate marker.
 
 Standard and aggressive candidate transforms are kept only when they reduce the
-heuristic token estimate without growing the byte size. Safe filters can still
+heuristic token estimate without growing the byte size. The token estimate is
+a structure-aware heuristic: word, digit, punctuation, and whitespace runs are
+weighted separately so punctuation-heavy output (JSON, logs) is priced closer
+to real BPE behavior than a flat character ratio. The same estimate feeds the
+telemetry `before_tokens`/`after_tokens` fields and the live-eval
+telemetry-estimate fallback, so threshold values calibrated against the old
+flat chars/4 estimate may need small adjustments. Safe filters can still
 replace dangerous or oversized content even when the replacement is not
 smaller. Capped output keeps a head and tail around a short cap marker, so a
-capped result can exceed `max_output_bytes` by the marker length.
+capped result can exceed `max_output_bytes` by the marker length. When the
+plain head/tail split would drop a line carrying an error signal (`error:`,
+`panicked at`, `Traceback`, `FAILED`, and similar), capping instead keeps a
+third bounded window anchored at the first such line and reports the
+`cap_error_window` strategy; windows that touch merge, so at most two cap
+markers are emitted.
 
 The aggressive JSON-array table transform is lossless for arrays of scalar
 objects. It skips small inputs, nested values, and mixed arrays. Accepted output
@@ -186,16 +241,16 @@ Dictionary compression emits readable model-visible headers:
 
 ```text
 [Forge LZW Dictionary]
-<<FORGE_LZW_1_1>> = "error: repeated dependency resolution failure"
+<<F1:1>> = "error: repeated dependency resolution failure"
 
-<<FORGE_LZW_1_1>> in crate alpha
+<<F1:1>> in crate alpha
 ```
 
 ```text
 [Forge RePair Dictionary]
-<<FORGE_REPAIR_1_1>> = "workspace crate alpha"
+<<R1:1>> = "workspace crate alpha"
 
-error in <<FORGE_REPAIR_1_1>>
+error in <<R1:1>>
 ```
 
 The dictionary stages are bounded:
@@ -203,8 +258,9 @@ The dictionary stages are bounded:
 - Inputs over 50,000 bytes are skipped.
 - Dictionary entries are capped at 20.
 - Repeated entries require at least 3 occurrences.
-- Entries containing newlines are skipped.
+- LZW entries containing newlines are skipped; RePair rules may contain up to 2 newlines.
 - Compression must produce meaningful net savings.
+- Per-entry savings below 16 bytes are skipped.
 - Existing Forge dictionary output is not compressed again.
 
 LZW uses rolling hashes over selected substring lengths and verifies hash hits
@@ -273,6 +329,83 @@ usage, the comparator falls back to the compressed run's
 the savings threshold and labels the report as a telemetry estimate. Behavior
 regression checks remain strict. The live eval should not replace
 deterministic unit and proxy tests.
+
+## Schema Compression
+
+In addition to tool-output compression, Forge can minify tool schema
+descriptions before forwarding a request upstream. This is a separate opt-in
+surface that reduces the fixed per-request token cost from verbose tool
+descriptions, not the variable cost from tool-result history.
+
+### What is compressed
+
+Only description strings inside tool schemas:
+
+- The top-level `description` of each tool.
+- Every `"description"` string inside each tool's JSON Schema (parameter
+  descriptions), recursed up to depth 32.
+
+Nothing else is touched: tool names, parameter names, types, `required` arrays,
+and all other schema structure are never modified. System prompts and final
+responses are excluded.
+
+### Transforms applied (Minify mode)
+
+- Trailing whitespace trimmed from each line.
+- Consecutive blank lines collapsed to at most one blank line.
+- Internal runs of spaces or tabs collapsed to a single space, outside fenced
+  code blocks (content between ` ``` ` fences is passed through with only
+  trailing whitespace trimmed).
+- Empty `"description": ""` keys dropped entirely.
+
+All transforms are deterministic and idempotent: applying minification twice
+produces the same result as applying it once.
+
+### Cache note
+
+Tool schemas live in the cached prefix of the conversation. Enabling schema
+compression busts that prefix once on deploy. After the first request with
+minification enabled, the smaller prefix is stable across all subsequent
+requests as long as the tool set and mode do not change.
+
+### Configuration
+
+CLI flag (overrides env):
+
+```bash
+forge-guardrails-proxy --schema-compression minify
+```
+
+Environment variable:
+
+```bash
+FORGE_SCHEMA_COMPRESSION=minify
+```
+
+Per-request override via `_forge.schema_compression`:
+
+```json
+{
+  "_forge": { "schema_compression": "minify" },
+  "tools": [...],
+  "messages": [...]
+}
+```
+
+Valid values: `disabled` (default), `minify`. An invalid value returns HTTP 400.
+
+### Dual-path parity
+
+Tool schemas flow through the proxy via two paths:
+
+- **OpenAI path**: schemas are parsed into `ToolSpec` structs via
+  `parse_tool_specs`, then `compress_tool_schemas` minifies in place.
+- **Anthropic path**: the original Anthropic body is preserved as
+  `inbound_anthropic_body`; `patch_anthropic_tool_schemas` walks
+  `tools[*].description` and `tools[*].input_schema`.
+
+Both paths call the same `minify_description` function, so the resulting
+description strings are byte-identical.
 
 ## Package Notes
 

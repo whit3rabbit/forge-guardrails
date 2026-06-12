@@ -1,0 +1,79 @@
+{
+  "input": {
+    "schema_version": "toolcall-verifier-input/v2",
+    "user_request": "Generate a sales report from the Q4 2024 dataset.",
+    "workflow_state": {
+      "required_steps": [
+        "fetch_sales_data",
+        "analyze_sales"
+      ],
+      "completed_steps": [],
+      "pending_steps": [
+        "fetch_sales_data",
+        "analyze_sales"
+      ],
+      "terminal_tools": [
+        "report"
+      ],
+      "recent_errors": []
+    },
+    "available_tools": [
+      {
+        "name": "report",
+        "description": "Produce final report.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "summary"
+          ]
+        }
+      },
+      {
+        "name": "fetch_sales_data",
+        "description": "Fetch sales data.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "quarter": {
+              "type": "integer"
+            },
+            "year": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "quarter",
+            "year"
+          ]
+        }
+      },
+      {
+        "name": "analyze_sales",
+        "description": "Analyze sales.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "candidate_call": {
+      "name": "report",
+      "arguments": {
+        "summary": "Done."
+      }
+    },
+    "metadata": {
+      "scenario_family": "argument_transformation",
+      "requires_transform": true,
+      "requires_synthesis": false,
+      "requires_all_tool_facts": true,
+      "must_acknowledge_missing_data": false
+    }
+  },
+  "serialized": "SCHEMA_VERSION:\ntoolcall-verifier-input/v2\n\nUSER_REQUEST:\nGenerate a sales report from the Q4 2024 dataset.\n\nCANDIDATE_CALL:\n{\"arguments\": {\"summary\": \"Done.\"}, \"name\": \"report\"}\n\nCANDIDATE_TOOL_SCHEMA:\nreport: Produce final report.\nPARAMETERS: {\"properties\": {\"summary\": {\"type\": \"string\"}}, \"required\": [\"summary\"], \"type\": \"object\"}\n\nWORKFLOW_STATE:\nrequired_steps=['fetch_sales_data', 'analyze_sales']\ncompleted_steps=[]\npending_steps=['fetch_sales_data', 'analyze_sales']\nterminal_tools=['report']\nrecent_errors=[]\n\nOTHER_AVAILABLE_TOOLS:\nfetch_sales_data: Fetch sales data.\nanalyze_sales: Analyze sales.\n\nSCORING_METADATA:\nscenario_family=\"argument_transformation\"\nrequires_transform=true\nrequires_synthesis=false\nrequires_all_tool_facts=true\nmust_acknowledge_missing_data=false"
+}

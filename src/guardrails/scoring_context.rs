@@ -382,3 +382,130 @@ pub fn serialize_state_v2(ctx: &ScoringContext, candidate: &ToolCall) -> String 
 
     out
 }
+
+/// Serialize candidate tool parameter schema only.
+pub fn serialize_candidate_tool_schema(
+    tools: &[ToolSpecForScoring],
+    candidate: &ToolCall,
+) -> String {
+    let target = &candidate.tool;
+    for t in tools {
+        if &t.name == target {
+            return format!(
+                "{}: {}\nPARAMETERS: {}",
+                t.name,
+                t.description,
+                compact_json(&t.parameters, 2400)
+            );
+        }
+    }
+    String::new()
+}
+
+/// Serialize name + description only (no parameters) for non-candidate tools.
+pub fn serialize_competing_tool_signatures(
+    tools: &[ToolSpecForScoring],
+    candidate: &ToolCall,
+    max_competing: usize,
+) -> String {
+    let target = &candidate.tool;
+    let mut lines = Vec::new();
+    for t in tools {
+        if &t.name != target {
+            lines.push(format!("{}: {}", t.name, t.description));
+            if lines.len() >= max_competing {
+                break;
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+fn compact_json(value: &Value, max_chars: usize) -> String {
+    let s = python_json_dumps_sort_keys(value);
+    if s.chars().count() > max_chars {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}...<truncated>", truncated)
+    } else {
+        s
+    }
+}
+
+/// Serialize classifier input with the metadata-aware candidate-first `serialize_state_v3` format.
+pub fn serialize_state_v3(ctx: &ScoringContext, candidate: &ToolCall) -> String {
+    let ws = &ctx.workflow_state;
+    let metadata = ctx.metadata.as_ref();
+
+    let candidate_schema = serialize_candidate_tool_schema(&ctx.available_tools, candidate);
+    let competing_sigs = serialize_competing_tool_signatures(&ctx.available_tools, candidate, 12);
+
+    let candidate_json = Value::Object(
+        [
+            (
+                "arguments".to_string(),
+                value_from_index_map(&candidate.args),
+            ),
+            ("name".to_string(), Value::String(candidate.tool.clone())),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    let front = format!(
+        "SCHEMA_VERSION:\n{}\n\nUSER_REQUEST:\n{}\n\nCANDIDATE_CALL:\n{}\n\nCANDIDATE_TOOL_SCHEMA:\n{}\n\nWORKFLOW_STATE:\nrequired_steps={}\ncompleted_steps={}\npending_steps={}\nterminal_tools={}\nrecent_errors={}",
+        ctx.schema_version,
+        ctx.user_request,
+        compact_json(&candidate_json, 2400),
+        candidate_schema,
+        py_list(&ws.required_steps),
+        py_list(&ws.completed_steps),
+        py_list(&ws.pending_steps),
+        py_list(&ws.terminal_tools),
+        py_list(&ws.recent_errors),
+    );
+
+    let tail = format!(
+        "SCORING_METADATA:\nscenario_family={}\nrequires_transform={}\nrequires_synthesis={}\nrequires_all_tool_facts={}\nmust_acknowledge_missing_data={}",
+        optional_json_string(metadata.and_then(|value| value.scenario_family.as_deref())),
+        optional_json_bool(metadata.and_then(|value| value.requires_transform)),
+        optional_json_bool(metadata.and_then(|value| value.requires_synthesis)),
+        optional_json_bool(metadata.and_then(|value| value.requires_all_tool_facts)),
+        optional_json_bool(metadata.and_then(|value| value.must_acknowledge_missing_data)),
+    );
+
+    let other_header = "\n\nOTHER_AVAILABLE_TOOLS:\n";
+    let max_length = 1280usize;
+    let char_budget = ((max_length as f64) * 3.5) as usize;
+
+    let front_len = front.chars().count();
+    let tail_len = tail.chars().count();
+    let header_len = other_header.chars().count();
+
+    let mut competing_block = String::new();
+    if char_budget > front_len + tail_len + header_len + 2 {
+        let remaining = char_budget - front_len - tail_len - header_len - 2;
+        let sig_lines: Vec<&str> = competing_sigs
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut kept_lines: Vec<String> = Vec::new();
+        let mut used = 0;
+        for line in &sig_lines {
+            let cost = line.chars().count() + 1;
+            if used + cost > remaining {
+                break;
+            }
+            kept_lines.push(line.to_string());
+            used += cost;
+        }
+        let dropped = sig_lines.len() - kept_lines.len();
+        if dropped > 0 {
+            kept_lines.push(format!("...<+{} more tools>", dropped));
+        }
+        competing_block = kept_lines.join("\n");
+    }
+
+    format!("{}{}{}\n\n{}", front, other_header, competing_block, tail)
+        .trim()
+        .to_string()
+}

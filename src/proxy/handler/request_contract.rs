@@ -1,6 +1,7 @@
 use super::HandlerError;
 use crate::clients::base::LLMRequestOptions;
 use crate::core::tool_spec::ToolSpec;
+use crate::schema_compression::SchemaCompressionMode;
 use crate::tool_output::{
     ToolOutputCompressionConfig, ToolOutputCompressionMethod, ToolOutputCompressionMode,
 };
@@ -18,6 +19,7 @@ pub(super) const FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD: &str =
     "return_raw_on_guardrail_failure";
 pub(super) const FORGE_TOOL_CALL_POLICY_FIELD: &str = "tool_call_policy";
 pub(super) const FORGE_TOOL_OUTPUT_COMPRESSION_FIELD: &str = "tool_output_compression";
+pub(super) const FORGE_SCHEMA_COMPRESSION_FIELD: &str = "schema_compression";
 pub(super) const FORGE_DEBUG_FIELD: &str = "debug";
 const MAX_REQUEST_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_DEBUG_FIELDS: usize = 16;
@@ -297,6 +299,13 @@ fn parse_tool_output_compression_value(
                     ))
                 })?;
             }
+            if let Some(memo) = obj.get("memo") {
+                config.enable_memo = memo.as_bool().ok_or_else(|| {
+                    HandlerError::BadRequest(format!(
+                        "{FORGE_EXTENSION_FIELD}.{FORGE_TOOL_OUTPUT_COMPRESSION_FIELD}.memo must be a boolean"
+                    ))
+                })?;
+            }
             if let Some(redact) = obj.get("redact_secrets") {
                 config.redact_secrets = redact.as_bool().ok_or_else(|| {
                     HandlerError::BadRequest(format!(
@@ -514,4 +523,22 @@ fn validate_guarded_anthropic_tool_choice(
         )),
         _ => Ok(()),
     }
+}
+
+pub(super) fn extract_schema_compression(
+    body: &Value,
+    default: SchemaCompressionMode,
+) -> Result<SchemaCompressionMode, HandlerError> {
+    let Some(forge_obj) = forge_object(body)? else {
+        return Ok(default);
+    };
+    let Some(value) = forge_obj.get(FORGE_SCHEMA_COMPRESSION_FIELD) else {
+        return Ok(default);
+    };
+    let Some(mode_str) = value.as_str() else {
+        return Err(HandlerError::BadRequest(format!(
+            "{FORGE_EXTENSION_FIELD}.{FORGE_SCHEMA_COMPRESSION_FIELD} must be a string"
+        )));
+    };
+    SchemaCompressionMode::from_str(mode_str).map_err(HandlerError::BadRequest)
 }

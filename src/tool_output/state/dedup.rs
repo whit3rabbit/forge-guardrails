@@ -3,10 +3,13 @@ use std::collections::{hash_map::DefaultHasher, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
-/// Bounded in-memory dedup state for compressed tool outputs.
+use super::memo::{MemoLookup, MemoRecord, MemoState};
+
+/// Bounded in-memory dedup and memo state for compressed tool outputs.
 #[derive(Debug, Default)]
 pub struct ToolOutputCompressionState {
     inner: Mutex<DedupState>,
+    memo: Mutex<MemoState>,
 }
 
 #[derive(Debug, Default)]
@@ -59,8 +62,15 @@ impl ToolOutputCompressionState {
                 if record.tool_call_id == tool_call_id {
                     return None;
                 }
+                // Collapse the LATER duplicate, not the earlier one. The
+                // earlier message anchors the prompt-cache prefix; rewriting
+                // it on every resend would bust the prefix on every subsequent
+                // request. The later message is cheapest to replace: it has
+                // not yet been cached. Near-duplicate delta encoding was
+                // considered and rejected because it breaks determinism when
+                // the base entry is evicted under FIFO pressure.
                 return Some(format!(
-                    "[Duplicate of tool call {} ({}) - see earlier result]",
+                    "[Duplicate of {} ({}); see earlier result]",
                     record.tool_call_id, record.tool_name
                 ));
             }
@@ -100,6 +110,38 @@ impl ToolOutputCompressionState {
         }
 
         None
+    }
+
+    pub(in crate::tool_output) fn lookup_memo(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        input_hash: u64,
+        input_len: usize,
+        config_fp: u64,
+    ) -> MemoLookup {
+        self.memo.lock().expect("tool output memo lock").lookup(
+            session_id,
+            tool_call_id,
+            input_hash,
+            input_len,
+            config_fp,
+        )
+    }
+
+    pub(in crate::tool_output) fn store_memo(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        record: MemoRecord,
+        max_sessions: usize,
+    ) {
+        self.memo.lock().expect("tool output memo lock").store(
+            session_id,
+            tool_call_id,
+            record,
+            max_sessions,
+        );
     }
 }
 

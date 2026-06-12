@@ -6,9 +6,9 @@ use crate::client::ClientFactory;
 use crate::config::{
     apply_env_cli_overrides, classifier_settings_from_env_cli, cli_host, cli_max_retries,
     cli_model, cli_port, final_response_classifier_settings_from_env_cli, normalized_extra_flags,
-    resolve_serialize, tool_call_policy_from_env_cli, tool_output_compression_from_env_cli,
-    validate_nonempty, validate_positive_i64, DEFAULT_ENV_CONTEXT_TOKENS,
-    DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_INTERNAL_MODEL,
+    resolve_serialize, schema_compression_from_env_cli, tool_call_policy_from_env_cli,
+    tool_output_compression_from_env_cli, validate_nonempty, validate_positive_i64,
+    DEFAULT_ENV_CONTEXT_TOKENS, DEFAULT_EXTERNAL_CONTEXT_TOKENS, DEFAULT_INTERNAL_MODEL,
 };
 use crate::upstream::{
     direct_anthropic_api_key, direct_local_openai_upstream_from_env, direct_openai_api_key,
@@ -80,6 +80,7 @@ pub(super) fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Sta
     ) = final_response_classifier_settings_from_env_cli(cli)?;
     let tool_output_compression = tool_output_compression_from_env_cli(cli)?;
     let tool_call_policy = tool_call_policy_from_env_cli(cli)?;
+    let schema_compression = schema_compression_from_env_cli(cli)?;
     let config = crate::config::ProxyConfig {
         host: cli_host(cli)?,
         port: cli_port(cli)?,
@@ -101,6 +102,7 @@ pub(super) fn build_external_startup(cli: &Cli, backend_url: &str) -> Result<Sta
         final_response_classifier_max_latency_ms: cli.final_response_classifier_max_latency_ms,
         tool_output_compression,
         tool_call_policy,
+        schema_compression,
     };
     let client_factory = match (cli.backend_protocol, cli.mode) {
         (CliBackendProtocol::Anthropic, _) => ClientFactory::DirectAnthropic {

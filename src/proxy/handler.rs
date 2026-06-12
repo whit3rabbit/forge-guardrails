@@ -12,6 +12,9 @@ use crate::proxy::{
     extract_passthrough, extract_sampling, openai_to_messages, strip_respond_calls,
     OpenAiMessageError,
 };
+use crate::schema_compression::{
+    compress_tool_schemas, patch_anthropic_tool_schemas, SchemaCompressionMode,
+};
 use crate::tool_output::{ToolOutputCompressionConfig, ToolOutputCompressionState};
 use crate::tool_policy::{
     evaluate_tool_call_policy, ToolCallPolicyConfig, ToolCallPolicyRequestState,
@@ -63,10 +66,11 @@ use prior_tool_results::record_completed_proxy_tool_results;
 use request_contract::sanitize_guarded_anthropic_body;
 use request_contract::{
     add_proxy_respond_tool_if_needed, extract_forge_bool_field, extract_forge_debug_context,
-    extract_proxy_step_contract, extract_stream_include_usage, extract_tool_call_policy_config,
-    extract_tool_output_compression_config, sanitize_guarded_request_options,
-    strip_forge_extension_from_body, validate_proxy_step_contract, FORGE_EXTENSION_FIELD,
-    FORGE_REQUIRED_STEPS_FIELD, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
+    extract_proxy_step_contract, extract_schema_compression, extract_stream_include_usage,
+    extract_tool_call_policy_config, extract_tool_output_compression_config,
+    sanitize_guarded_request_options, strip_forge_extension_from_body,
+    validate_proxy_step_contract, FORGE_EXTENSION_FIELD, FORGE_REQUIRED_STEPS_FIELD,
+    FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD,
 };
 #[cfg(test)]
 use response_shape::{collect_anthropic_events, collect_openai_events};
@@ -282,6 +286,7 @@ pub async fn handle_chat_completions_with_scorers<C: LLMClient + 'static>(
         ToolOutputCompressionConfig::disabled(),
         None,
         ToolCallPolicyConfig::disabled(),
+        SchemaCompressionMode::Disabled,
     )
     .await
 }
@@ -312,6 +317,7 @@ pub async fn handle_chat_completions_with_scorers_and_tool_output_compression<
         default_tool_output_compression,
         tool_output_state,
         ToolCallPolicyConfig::disabled(),
+        SchemaCompressionMode::Disabled,
     )
     .await
 }
@@ -329,6 +335,7 @@ pub async fn handle_chat_completions_with_scorers_and_tool_controls<C: LLMClient
     default_tool_output_compression: ToolOutputCompressionConfig,
     tool_output_state: Option<Arc<ToolOutputCompressionState>>,
     default_tool_call_policy: ToolCallPolicyConfig,
+    default_schema_compression: SchemaCompressionMode,
 ) -> Result<HandlerResult, HandlerError> {
     handle_chat_completions_impl(
         body,
@@ -343,6 +350,7 @@ pub async fn handle_chat_completions_with_scorers_and_tool_controls<C: LLMClient
         default_tool_output_compression,
         tool_output_state,
         default_tool_call_policy,
+        default_schema_compression,
     )
     .await
 }
@@ -361,6 +369,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     default_tool_output_compression: ToolOutputCompressionConfig,
     tool_output_state: Option<Arc<ToolOutputCompressionState>>,
     default_tool_call_policy: ToolCallPolicyConfig,
+    default_schema_compression: SchemaCompressionMode,
 ) -> Result<HandlerResult, HandlerError> {
     let messages = body
         .get("messages")
@@ -392,6 +401,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
         extract_forge_bool_field(body, FORGE_RETURN_RAW_ON_GUARDRAIL_FAILURE_FIELD)?;
     let tool_output_compression =
         extract_tool_output_compression_config(body, &default_tool_output_compression)?;
+    let schema_compression = extract_schema_compression(body, default_schema_compression)?;
     let forge_debug_context = extract_forge_debug_context(body)?;
     let tool_call_policy = extract_tool_call_policy_config(body, &default_tool_call_policy)?;
 
@@ -428,6 +438,15 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                 tracing::warn!(
                     "failed to patch compressed tool outputs into Anthropic request body; falling back to rebuilt body which may discard custom metadata or cache_control flags"
                 );
+            }
+        }
+    }
+    // Patch schema descriptions in the Anthropic body before locking it in.
+    if schema_compression != SchemaCompressionMode::Disabled {
+        if let Some(body) = request_options.inbound_anthropic_body.as_ref() {
+            let mut patched = body.as_ref().clone();
+            if patch_anthropic_tool_schemas(&mut patched, schema_compression) {
+                request_options.inbound_anthropic_body = Some(Arc::new(patched));
             }
         }
     }
@@ -469,6 +488,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
     // Parse client tools strictly, then add Forge's reserved terminal tool only
     // when the request has not declared a real terminal tool.
     let mut tool_specs = parse_tool_specs(&tools_raw)?;
+    compress_tool_schemas(&mut tool_specs, schema_compression);
     let respond_injected =
         add_proxy_respond_tool_if_needed(&mut tool_specs, step_contract.as_ref());
 

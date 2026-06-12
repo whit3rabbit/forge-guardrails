@@ -297,7 +297,7 @@ cargo run --features classifier --bin download-classifier -- \
 
 The downloader defaults to the pinned Hugging Face revision used by Rust's
 `DEFAULT_CLASSIFIER_REVISION`, currently
-`b8e292b4de5725250bd1698eb5c795ffcb1a4cde` for
+`f4f5cfe96aa93fd6b3bf028157895b7ec0113c89` for
 `cowWhySo/toolcall-verifier-classifier-production`. It writes the runnable ONNX
 artifact under `target/classifier-artifacts/onnx` and also downloads published
 schema/report sidecars such as `input_schema_v1.json`,
@@ -355,6 +355,10 @@ probability entries for calibration and label-collapse checks. Also inspect
 In enforce mode it can retry/block only labels whose artifact threshold is met;
 labels with thresholds above `1.0` remain telemetry-only, and deterministic
 guardrails remain authoritative for schema/protocol invalidity.
+If a tool-call artifact marks its quantized ONNX as `failed_shadow_only` or
+`quantized_active_allowed=false`, Forge refuses quantized `advisory` and
+`enforce`; use `--classifier-model full` for action-mode replay or keep
+quantized in `shadow`.
 `scripts/run_local_eval.sh` writes proxy classifier telemetry to
 `proxy_classifier_<budget>.jsonl` whenever a tool-call classifier or
 final-response verifier is enabled, using the `FORGE_CLASSIFIER_LOG`

@@ -44,6 +44,90 @@ fn method_parse_accepts_expected_values() {
 }
 
 #[test]
+fn estimate_tokens_pins_run_classifier_weights() {
+    assert_eq!(estimate_tokens(""), 0);
+    // One token per short word; single spaces merge into the next word.
+    assert_eq!(estimate_tokens("hello world"), 2);
+    // Long identifiers split every ALPHA_CHARS_PER_EXTRA_TOKEN extra chars.
+    assert_eq!(estimate_tokens("very_long_identifier_name"), 4);
+    // Digits group at DIGIT_CHARS_PER_TOKEN per token.
+    assert_eq!(estimate_tokens("1234567890"), 4);
+    // Punctuation runs cost PUNCT_CHARS_PER_TOKEN per token.
+    assert_eq!(estimate_tokens("{\"a\":1,\"b\":2}"), 9);
+    // Newlines are one token each.
+    assert_eq!(estimate_tokens("a\n\n\nb"), 5);
+    // Indentation runs chunk at SPACE_RUN_CHARS_PER_TOKEN.
+    assert_eq!(estimate_tokens("        x"), 2);
+    // Spaces around punctuation do not merge into words.
+    assert_eq!(estimate_tokens("a | b"), 4);
+    assert_eq!(estimate_tokens("a|b"), 3);
+}
+
+#[test]
+fn estimate_tokens_prices_json_denser_than_prose() {
+    let json = r#"{"id":1,"status":"ok","path":"src/a.rs"}"#;
+    let prose = "the quick brown fox jumps over the lazy dog and naps";
+    // Tokens-per-char must be higher for punctuation-heavy JSON.
+    assert!(
+        estimate_tokens(json) * (prose.chars().count() as i64)
+            > estimate_tokens(prose) * (json.chars().count() as i64)
+    );
+}
+
+#[test]
+fn estimate_tokens_is_monotone_under_append() {
+    let samples = ["error: failed", "a ", "{\"k\":", "  indent", "line\n"];
+    for base in samples {
+        for suffix in samples {
+            let combined = format!("{base}{suffix}");
+            assert!(
+                estimate_tokens(&combined) >= estimate_tokens(base),
+                "append lowered estimate: {base:?} + {suffix:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fold_repeated_lines_folds_period_three_cycles() {
+    let output = "alpha\nbeta\ngamma\nalpha\nbeta\ngamma\nalpha\nbeta\ngamma\ntail";
+    let folded = fold_repeated_lines(output).expect("folded");
+    assert_eq!(folded, "3x [alpha, beta, gamma]\ntail");
+}
+
+#[test]
+fn fold_repeated_lines_folds_period_four_cycles() {
+    let output = "a\nb\nc\nd\na\nb\nc\nd";
+    let folded = fold_repeated_lines(output).expect("folded");
+    assert_eq!(folded, "2x [a, b, c, d]");
+}
+
+#[test]
+fn fold_repeated_lines_prefers_smallest_period() {
+    let output = "x\nx\nx\nx\nend";
+    let folded = fold_repeated_lines(output).expect("folded");
+    assert_eq!(folded, "4x x\nend");
+}
+
+#[test]
+fn fold_repeated_lines_keeps_alternating_pair_format() {
+    let output = "one\ntwo\none\ntwo\none\ntwo";
+    let folded = fold_repeated_lines(output).expect("folded");
+    assert_eq!(folded, "3x [one, two]");
+}
+
+#[test]
+fn fold_repeated_lines_preserves_trailing_newline() {
+    let folded = fold_repeated_lines("x\nx\nx\n").expect("folded");
+    assert_eq!(folded, "3x x\n");
+}
+
+#[test]
+fn fold_repeated_lines_leaves_non_cyclic_output_unchanged() {
+    assert_eq!(fold_repeated_lines("a\nb\nc\nd"), None);
+}
+
+#[test]
 fn disabled_returns_original_output() {
     let result = compress_tool_output(
         "bash",
@@ -183,6 +267,80 @@ fn safe_caps_oversized_unicode_output_on_char_boundaries() {
     assert!(result.capped);
     assert!(result.output.contains("Tool output capped"));
     assert!(result.output.is_char_boundary(result.output.len()));
+    assert!(!result.output.contains('\u{fffd}'));
+}
+
+#[test]
+fn error_aware_capping_retains_mid_output_error_signal() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        max_output_bytes: 100,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = format!(
+        "{}error: disk on fire\n{}",
+        "head filler line\n".repeat(30),
+        "tail filler line\n".repeat(30)
+    );
+
+    let result = compress_tool_output("bash", None, None, &raw, &config, None);
+
+    assert!(result.capped);
+    assert!(result.output.contains("error: disk on fire"));
+    assert!(result.strategies.contains(&"cap_oversized".to_string()));
+    assert!(result.strategies.contains(&"cap_error_window".to_string()));
+    assert_eq!(result.output.matches("Tool output capped").count(), 2);
+}
+
+#[test]
+fn error_aware_capping_is_deterministic() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        max_output_bytes: 100,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = format!(
+        "{}error: disk on fire\n{}",
+        "head filler line\n".repeat(30),
+        "tail filler line\n".repeat(30)
+    );
+
+    let first = compress_tool_output("bash", None, None, &raw, &config, None);
+    let second = compress_tool_output("bash", None, None, &raw, &config, None);
+
+    assert_eq!(first.output, second.output);
+    assert_eq!(first.strategies, second.strategies);
+}
+
+#[test]
+fn capping_without_error_signals_keeps_single_marker() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        max_output_bytes: 20,
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    let result = compress_tool_output("bash", None, None, "a".repeat(200).as_str(), &config, None);
+
+    assert!(result.capped);
+    assert!(!result.strategies.contains(&"cap_error_window".to_string()));
+    assert_eq!(result.output.matches("Tool output capped").count(), 1);
+}
+
+#[test]
+fn error_aware_capping_respects_char_boundaries() {
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Safe,
+        max_output_bytes: 60,
+        ..ToolOutputCompressionConfig::default()
+    };
+    let raw = format!("{}\nerror: bad\n{}", "😀".repeat(50), "😀".repeat(50));
+
+    let result = compress_tool_output("bash", None, None, &raw, &config, None);
+
+    assert!(result.capped);
+    assert!(result.output.contains("error: bad"));
+    assert!(result.strategies.contains(&"cap_error_window".to_string()));
     assert!(!result.output.contains('\u{fffd}'));
 }
 
@@ -810,7 +968,7 @@ fn dedup_returns_bounded_marker_for_repeated_output() {
     let second = compress_tool_output("bash", Some("call_2"), None, &raw, &config, Some(&state));
     assert!(!first.deduped);
     assert!(second.deduped);
-    assert!(second.output.contains("Duplicate of tool call call_1"));
+    assert!(second.output.contains("Duplicate of call_1"));
 }
 
 #[test]
@@ -1012,6 +1170,124 @@ fn dedup_evicts_oldest_sessions() {
     assert!(!compress_tool_output("bash", Some("call_2"), None, &raw, &s2, Some(&state)).deduped);
     assert!(!compress_tool_output("bash", Some("call_3"), None, &raw, &s1, Some(&state)).deduped);
     assert!(compress_tool_output("bash", Some("call_4"), None, &raw, &s1, Some(&state)).deduped);
+}
+
+#[test]
+fn memo_reuse_returns_identical_bytes_on_second_call() {
+    let state = ToolOutputCompressionState::new();
+    let raw = "line 1\nline 2\nline 3\n".repeat(10);
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("sess1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    let first = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let second = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+
+    assert!(!first.memo_reused, "first call should not be a memo hit");
+    assert!(
+        second.memo_reused,
+        "second call with same input should hit memo"
+    );
+    assert_eq!(
+        first.output, second.output,
+        "memo hit must return identical bytes"
+    );
+    assert!(second.strategies.contains(&"memo_reuse".to_string()));
+}
+
+#[test]
+fn memo_changed_set_when_input_differs_for_same_call_id() {
+    let state = ToolOutputCompressionState::new();
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("sess1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    let raw1 = "original output\n".repeat(10);
+    let raw2 = "different output\n".repeat(10);
+
+    let first = compress_tool_output("bash", Some("call_1"), None, &raw1, &config, Some(&state));
+    let second = compress_tool_output("bash", Some("call_1"), None, &raw2, &config, Some(&state));
+
+    assert!(!first.memo_changed);
+    assert!(
+        second.memo_changed,
+        "changed input for same call id should set memo_changed"
+    );
+    assert!(!second.memo_reused);
+}
+
+#[test]
+fn memo_recomputes_on_config_change() {
+    let state = ToolOutputCompressionState::new();
+    let raw = "line\n".repeat(20);
+    let config_std = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("sess1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+    let config_agg = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Aggressive,
+        session_id: Some("sess1".to_string()),
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    compress_tool_output(
+        "bash",
+        Some("call_1"),
+        None,
+        &raw,
+        &config_std,
+        Some(&state),
+    );
+    let result = compress_tool_output(
+        "bash",
+        Some("call_1"),
+        None,
+        &raw,
+        &config_agg,
+        Some(&state),
+    );
+
+    assert!(!result.memo_reused, "config change must invalidate memo");
+    assert!(result.memo_changed, "config change must set memo_changed");
+}
+
+#[test]
+fn memo_disabled_does_not_cache() {
+    let state = ToolOutputCompressionState::new();
+    let raw = "line\n".repeat(10);
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: Some("sess1".to_string()),
+        enable_memo: false,
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let second = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+
+    assert!(!second.memo_reused, "memo disabled must not cache");
+    assert!(!second.memo_changed);
+}
+
+#[test]
+fn memo_requires_session_id_to_cache() {
+    let state = ToolOutputCompressionState::new();
+    let raw = "line\n".repeat(10);
+    let config = ToolOutputCompressionConfig {
+        mode: ToolOutputCompressionMode::Standard,
+        session_id: None,
+        ..ToolOutputCompressionConfig::default()
+    };
+
+    compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+    let second = compress_tool_output("bash", Some("call_1"), None, &raw, &config, Some(&state));
+
+    assert!(!second.memo_reused, "no session_id means no memo");
 }
 
 fn repeated_lzw_output() -> String {

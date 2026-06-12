@@ -64,6 +64,8 @@ pub(super) fn looks_like_jsonl(output: &str) -> bool {
     count > 0
 }
 
+const MAX_FOLD_PERIOD: usize = 4;
+
 pub(super) fn fold_repeated_lines(output: &str) -> Option<String> {
     let lines = output.lines().collect::<Vec<_>>();
     if lines.len() < 3 {
@@ -74,36 +76,17 @@ pub(super) fn fold_repeated_lines(output: &str) -> Option<String> {
     let mut changed = false;
     let mut idx = 0usize;
     while idx < lines.len() {
-        if idx + 3 < lines.len()
-            && lines[idx] == lines[idx + 2]
-            && lines[idx + 1] == lines[idx + 3]
-            && lines[idx] != lines[idx + 1]
-        {
-            let first = lines[idx];
-            let second = lines[idx + 1];
-            let mut count = 2usize;
-            let mut next = idx + 4;
-            while next + 1 < lines.len() && lines[next] == first && lines[next + 1] == second {
-                count += 1;
-                next += 2;
+        if let Some((period, count)) = repeated_cycle_at(&lines, idx) {
+            if period == 1 {
+                result.push(format!("{count}x {}", lines[idx]));
+            } else {
+                result.push(format!(
+                    "{count}x [{}]",
+                    lines[idx..idx + period].join(", ")
+                ));
             }
-            result.push(format!("{count}x [{first}, {second}]"));
             changed = true;
-            idx = next;
-            continue;
-        }
-
-        if idx + 1 < lines.len() && lines[idx] == lines[idx + 1] {
-            let line = lines[idx];
-            let mut count = 2usize;
-            let mut next = idx + 2;
-            while next < lines.len() && lines[next] == line {
-                count += 1;
-                next += 1;
-            }
-            result.push(format!("{count}x {line}"));
-            changed = true;
-            idx = next;
+            idx += period * count;
             continue;
         }
 
@@ -112,6 +95,32 @@ pub(super) fn fold_repeated_lines(output: &str) -> Option<String> {
     }
 
     changed.then(|| preserve_trailing_newline(output, result.join("\n")))
+}
+
+/// Find the smallest cycle period at `idx` whose block repeats at least
+/// twice, with the repetition count of that cycle.
+///
+/// Periods are tried in ascending order so the smallest period wins. This
+/// also rejects blocks that are themselves periodic at a smaller divisor:
+/// such a block would already have matched at that divisor.
+fn repeated_cycle_at(lines: &[&str], idx: usize) -> Option<(usize, usize)> {
+    for period in 1..=MAX_FOLD_PERIOD {
+        if idx + 2 * period > lines.len() {
+            break;
+        }
+        let block = &lines[idx..idx + period];
+        if &lines[idx + period..idx + 2 * period] != block {
+            continue;
+        }
+        let mut count = 2usize;
+        let mut next = idx + 2 * period;
+        while next + period <= lines.len() && &lines[next..next + period] == block {
+            count += 1;
+            next += period;
+        }
+        return Some((period, count));
+    }
+    None
 }
 
 pub(super) fn normalize_whitespace(output: &str) -> Option<String> {
