@@ -75,8 +75,11 @@ fn request_body_rewrites_duplicate_tool_call_ids_across_transcript() {
     let first_id = messages[0]["tool_calls"][0]["id"].as_str().unwrap();
     let second_id = messages[2]["tool_calls"][0]["id"].as_str().unwrap();
 
-    assert_eq!(first_id, "dup");
-    assert_ne!(second_id, "dup");
+    // Duplicate incoming ids are rewritten to distinct Mistral-safe ids and the
+    // matching tool results are remapped to keep pairing intact.
+    assert!(is_mistral_safe_id(first_id), "{first_id}");
+    assert!(is_mistral_safe_id(second_id), "{second_id}");
+    assert_ne!(first_id, second_id);
     assert_eq!(messages[1]["tool_call_id"].as_str(), Some(first_id));
     assert_eq!(messages[3]["tool_call_id"].as_str(), Some(second_id));
 }
@@ -99,7 +102,87 @@ fn request_body_generates_missing_tool_call_ids() {
     );
     let id = body["messages"][0]["tool_calls"][0]["id"].as_str().unwrap();
 
-    assert!(id.starts_with("call_forge_"));
+    assert!(is_mistral_safe_id(id), "{id}");
+}
+
+/// Mistral requires every tool_call_id to match `^[a-zA-Z0-9]{9}$`.
+fn is_mistral_safe_id(id: &str) -> bool {
+    id.len() == 9 && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+#[test]
+fn request_body_rewrites_forge_internal_tool_call_ids_for_mistral() {
+    // Forge's internal ids are `call_000000000` (14 chars, underscore), which
+    // Mistral rejects. Every outbound id must become 9-char alphanumeric, stay
+    // unique, and keep each tool result paired with its assistant tool call.
+    let body = build_openai_request_body(
+        "mistralai/ministral-8b",
+        vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_000000000",
+                        "type": "function",
+                        "function": {"name": "a", "arguments": "{}"}
+                    },
+                    {
+                        "id": "call_000000001",
+                        "type": "function",
+                        "function": {"name": "b", "arguments": "{}"}
+                    }
+                ]
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_000000000",
+                "name": "a",
+                "content": "a result"
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_000000001",
+                "name": "b",
+                "content": "b result"
+            }),
+        ],
+        None,
+        LLMRequestOptions::default(),
+        false,
+    );
+    let messages = body["messages"].as_array().unwrap();
+    let id_a = messages[0]["tool_calls"][0]["id"].as_str().unwrap();
+    let id_b = messages[0]["tool_calls"][1]["id"].as_str().unwrap();
+
+    assert!(is_mistral_safe_id(id_a), "{id_a}");
+    assert!(is_mistral_safe_id(id_b), "{id_b}");
+    assert_ne!(id_a, id_b);
+    assert_eq!(messages[1]["tool_call_id"].as_str(), Some(id_a));
+    assert_eq!(messages[2]["tool_call_id"].as_str(), Some(id_b));
+}
+
+#[test]
+fn request_body_rewrites_orphan_tool_result_id() {
+    // A tool result whose tool_call_id has no matching assistant tool call (e.g.
+    // its tool-call message was dropped by compaction) must still be rewritten to
+    // a Mistral-safe id, otherwise a `call_*` id would leak to the upstream.
+    let body = build_openai_request_body(
+        "mistralai/ministral-8b",
+        vec![json!({
+            "role": "tool",
+            "tool_call_id": "call_000000000",
+            "name": "a",
+            "content": "orphan result"
+        })],
+        None,
+        LLMRequestOptions::default(),
+        false,
+    );
+    let id = body["messages"][0]["tool_call_id"].as_str().unwrap();
+
+    assert!(is_mistral_safe_id(id), "{id}");
+    assert_ne!(id, "call_000000000");
 }
 
 #[test]

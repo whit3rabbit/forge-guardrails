@@ -14,10 +14,19 @@ pub(super) fn build_openai_request_body(
 ) -> Value {
     let mut messages = messages;
     let normalization = normalize_openai_message_tool_call_ids(&mut messages);
-    if normalization.changed() {
+    // Tool-call ids are rewritten on every request, so a remap on its own is
+    // routine and logged at debug. A duplicate, missing, or orphan id is a real
+    // transcript anomaly worth a warning.
+    if normalization.has_anomaly() {
         tracing::warn!(
             duplicate_tool_call_ids = normalization.duplicate_tool_call_ids,
             missing_tool_call_ids = normalization.missing_tool_call_ids,
+            orphan_tool_results = normalization.orphan_tool_results,
+            remapped_tool_results = normalization.remapped_tool_results,
+            "normalized outbound OpenAI tool call ids with anomalies"
+        );
+    } else if normalization.changed() {
+        tracing::debug!(
             remapped_tool_results = normalization.remapped_tool_results,
             "normalized outbound OpenAI tool call ids"
         );
@@ -56,6 +65,11 @@ struct ToolCallIdNormalization {
     duplicate_tool_call_ids: usize,
     missing_tool_call_ids: usize,
     remapped_tool_results: usize,
+    /// Tool-result messages whose `tool_call_id` matched no assistant tool call
+    /// in the transcript. We still rewrite these to a Mistral-safe id, but an
+    /// unpaired tool result signals an upstream transcript problem (e.g. a
+    /// dropped tool-call message).
+    orphan_tool_results: usize,
 }
 
 impl ToolCallIdNormalization {
@@ -63,13 +77,38 @@ impl ToolCallIdNormalization {
         self.duplicate_tool_call_ids > 0
             || self.missing_tool_call_ids > 0
             || self.remapped_tool_results > 0
+            || self.orphan_tool_results > 0
+    }
+
+    fn has_anomaly(self) -> bool {
+        self.duplicate_tool_call_ids > 0
+            || self.missing_tool_call_ids > 0
+            || self.orphan_tool_results > 0
     }
 }
 
+/// Rewrite every outbound tool-call id to a 9-character alphanumeric form.
+///
+/// Mistral (including via OpenRouter) rejects any `tool_call_id` that does not
+/// match `^[a-zA-Z0-9]{9}$`: exactly 9 characters, alphanumeric only, with no
+/// `call_` prefix or underscore. Forge's internal ids are `call_000000000`
+/// (14 chars, underscore), which Mistral strips/truncates to a colliding
+/// `call00000`, surfacing as "Duplicate tool call id" (code 3230). OpenAI and
+/// llama.cpp treat ids as opaque, so a 9-digit numeric id is accepted by every
+/// OpenAI-compatible upstream. We rewrite unconditionally rather than sniffing
+/// the model name, because OpenRouter routing (e.g. `openrouter/free`) hides
+/// which provider ultimately serves the request.
+///
+/// Assistant `tool_calls[].id` and the matching `role:"tool"` `tool_call_id`
+/// are remapped to the same value so tool-call/tool-result pairing is preserved.
+/// A tool-result whose `tool_call_id` matches no assistant tool call (e.g. its
+/// tool-call message was dropped) is still rewritten to a fresh Mistral-safe id
+/// and counted as an orphan, so no `call_*` id can leak to the upstream.
 fn normalize_openai_message_tool_call_ids(messages: &mut [Value]) -> ToolCallIdNormalization {
-    let mut seen_call_ids = HashSet::new();
+    let mut seen_normalized: HashSet<String> = HashSet::new();
+    let mut seen_raw: HashSet<String> = HashSet::new();
     let mut pending_tool_call_ids: HashMap<String, VecDeque<String>> = HashMap::new();
-    let mut generated_counter = 0;
+    let mut counter: usize = 0;
     let mut stats = ToolCallIdNormalization::default();
 
     for message in messages {
@@ -86,20 +125,15 @@ fn normalize_openai_message_tool_call_ids(messages: &mut [Value]) -> ToolCallIdN
                         .and_then(Value::as_str)
                         .filter(|id| !id.is_empty())
                         .map(str::to_string);
-                    let had_raw_id = raw_id.is_some();
-                    let was_duplicate = raw_id
-                        .as_deref()
-                        .is_some_and(|id| seen_call_ids.contains(id));
-                    let normalized_id = unique_or_generated_call_id(
-                        raw_id.as_deref(),
-                        &mut seen_call_ids,
-                        &mut generated_counter,
-                    );
-                    if was_duplicate {
-                        stats.duplicate_tool_call_ids += 1;
-                    } else if !had_raw_id {
-                        stats.missing_tool_call_ids += 1;
+                    match raw_id.as_deref() {
+                        Some(id) => {
+                            if !seen_raw.insert(id.to_string()) {
+                                stats.duplicate_tool_call_ids += 1;
+                            }
+                        }
+                        None => stats.missing_tool_call_ids += 1,
                     }
+                    let normalized_id = next_numeric_call_id(&mut counter, &mut seen_normalized);
                     if let Some(raw_id) = raw_id {
                         pending_tool_call_ids
                             .entry(raw_id)
@@ -119,16 +153,25 @@ fn normalize_openai_message_tool_call_ids(messages: &mut [Value]) -> ToolCallIdN
                 .and_then(Value::as_str)
                 .map(str::to_string);
             if let Some(raw_id) = raw_id {
-                if let Some(normalized_id) = pending_tool_call_ids
+                let normalized_id = match pending_tool_call_ids
                     .get_mut(&raw_id)
                     .and_then(VecDeque::pop_front)
                 {
-                    if normalized_id != raw_id {
-                        stats.remapped_tool_results += 1;
+                    Some(paired_id) => {
+                        if paired_id != raw_id {
+                            stats.remapped_tool_results += 1;
+                        }
+                        paired_id
                     }
-                    if let Some(obj) = message.as_object_mut() {
-                        obj.insert("tool_call_id".to_string(), Value::String(normalized_id));
+                    // No matching assistant tool call: rewrite anyway so a
+                    // `call_*` id can never reach a strict upstream like Mistral.
+                    None => {
+                        stats.orphan_tool_results += 1;
+                        next_numeric_call_id(&mut counter, &mut seen_normalized)
                     }
+                };
+                if let Some(obj) = message.as_object_mut() {
+                    obj.insert("tool_call_id".to_string(), Value::String(normalized_id));
                 }
             }
         }
@@ -136,21 +179,15 @@ fn normalize_openai_message_tool_call_ids(messages: &mut [Value]) -> ToolCallIdN
     stats
 }
 
-fn unique_or_generated_call_id(
-    id: Option<&str>,
-    seen_call_ids: &mut HashSet<String>,
-    generated_counter: &mut usize,
-) -> String {
-    if let Some(id) = id {
-        if seen_call_ids.insert(id.to_string()) {
-            return id.to_string();
-        }
-    }
-
+/// Next unused 9-digit numeric id (`000000000`, `000000001`, ...). All digits,
+/// length 9, so it satisfies Mistral's `^[a-zA-Z0-9]{9}$`. The `seen` guard is a
+/// defensive check; the monotonic counter already guarantees uniqueness for any
+/// realistic transcript.
+fn next_numeric_call_id(counter: &mut usize, seen: &mut HashSet<String>) -> String {
     loop {
-        let id = format!("call_forge_{generated_counter:09}");
-        *generated_counter += 1;
-        if seen_call_ids.insert(id.clone()) {
+        let id = format!("{counter:09}");
+        *counter += 1;
+        if seen.insert(id.clone()) {
             return id;
         }
     }

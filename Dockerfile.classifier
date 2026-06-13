@@ -2,7 +2,7 @@
 
 FROM rust:trixie AS builder
 
-ARG ANYLLM_PROXY_VERSION=0.9.6
+ARG ANYLLM_PROXY_VERSION=0.9.8
 ARG CLASSIFIER_MODEL=quantized
 ARG CLASSIFIER_OUTPUT_DIR=/opt/forge/classifiers/tool-call
 ENV LD_LIBRARY_PATH=/usr/local/lib/forge-onnxruntime:/usr/local/lib

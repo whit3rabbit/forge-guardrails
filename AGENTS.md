@@ -346,6 +346,9 @@ git push origin v0.1.0
 - Keep the `forge` submodule pinned to a commit that is fetchable from its
   configured remote. Do not release a parent commit that points at a local-only
   submodule commit.
+- Before pushing a release commit or tag, verify `Dockerfile` and
+  `Dockerfile.classifier` are updated for release-relevant defaults, including
+  `ANYLLM_PROXY_VERSION` when the bundled anyllm proxy version changes.
 - The workflow publishes the crate with `cargo publish --locked`, builds
   platform archives for `forge-guardrails-proxy`, publishes the GitHub release,
   and updates `whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is set.
@@ -596,6 +599,7 @@ Refer to the [Python forge src](file:///Users/whit3rabbit/Documents/GitHub/forge
 
 Preserve these invariants:
 - Tool-call IDs and tool-result IDs must stay paired.
+- Outbound tool-call IDs to external OpenAI-compatible upstreams must be Mistral-safe (`^[a-zA-Z0-9]{9}$`, no `call_` prefix). Normalize at `build_openai_request_body` / `normalize_openai_message_tool_call_ids` in `src/clients/anyllm_proxy/request.rs`; never put forge's internal `call_000000000` ids on the wire.
 - Step enforcement must not leave invalid tool-call history behind.
 - Compaction must not produce protocol-invalid transcripts.
 - Backend adapters must keep their wire formats separate.

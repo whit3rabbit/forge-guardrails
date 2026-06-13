@@ -145,6 +145,44 @@ async fn anyllm_proxy_client_sends_request_and_parses_text() {
 }
 
 #[tokio::test]
+async fn anyllm_proxy_client_accepts_response_missing_openai_metadata() {
+    let mut server = mockito::Server::new_async().await;
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini").with_base_url(server.url());
+    let response = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("lax OpenAI-compatible response succeeds");
+
+    match response {
+        LLMResponse::Text(text) => assert_eq!(text.content, "hi"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    assert_eq!(client.last_usage().unwrap().total_tokens, 5);
+}
+
+#[tokio::test]
 async fn anyllm_proxy_client_preserves_cache_passthrough_and_records_cached_tokens() {
     let mut server = mockito::Server::new_async().await;
     let _mock = server
@@ -374,7 +412,7 @@ async fn anyllm_proxy_client_processes_final_unterminated_sse_line() {
     let mut server = mockito::Server::new_async().await;
     let sse = concat!(
         "data: {\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
-        "data:{\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}"
+        "data:{\"id\":\"chatcmpl-sidecar-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}"
     );
     let _mock = server
         .mock("POST", "/v1/chat/completions")
@@ -845,7 +883,7 @@ async fn anyllm_runtime_client_records_stream_usage() {
     let mut server = mockito::Server::new_async().await;
     let sse = concat!(
         "data: {\"id\":\"chatcmpl-runtime-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"id\":\"chatcmpl-runtime-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+        "data: {\"id\":\"chatcmpl-runtime-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
         "data: [DONE]\n\n"
     );
     let _mock = server

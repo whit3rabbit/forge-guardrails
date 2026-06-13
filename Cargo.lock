@@ -107,9 +107,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "anyllm_batch_engine"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f827a017339d05517b32dc952d9bbfd325e8ad10894f2719107b80453b37585f"
+checksum = "a33c743d3e66b8d705393bb06068cdec8d3400644fe566db99cb23c1f8a154e9"
 dependencies = [
  "anyllm_translate",
  "async-trait",
@@ -130,9 +130,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_client"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e86288c3f22220f117d69494c5995b066d40e63f9f2bc6e885ef7275200aabd"
+checksum = "a84032e9ec1d5b29cd26626d13794502e166cdc9128a38161f42672aec7b298b"
 dependencies = [
  "anyllm_translate",
  "bytes",
@@ -150,9 +150,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_providers"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17e14a8b6d59f3dc847c55f79cebfda1ffae87e4b89c6011e7cab907a6df8f03"
+checksum = "edeb1d1604bcbbb23696742a6c3edb5a6d1cb2fc7e3b2746a7d0e3dfbfc8ac35"
 dependencies = [
  "serde",
  "serde_json",
@@ -160,9 +160,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_proxy"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4af9148d23ba640f442928eded9d2cc60d9d7b5e37a26610bdb13f4ba6d3154f"
+checksum = "904845169d0bb9ba01f1ed7dce8c27dbf3d3c39dab4131cffb8fb4c561259195"
 dependencies = [
  "anyllm_batch_engine",
  "anyllm_client",
@@ -207,9 +207,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_translate"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15602cc816655ab1503ec53808fd42122b63fd5419a4c2c817614fb85e9f8270"
+checksum = "2cdbc0aa59e6baab017486a461598b851b523a47ca516107be34bcba7884f3a9"
 dependencies = [
  "serde",
  "serde_json",
