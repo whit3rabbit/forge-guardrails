@@ -37,6 +37,37 @@ fn inference_result_fields() {
     assert_eq!(result.attempts, 1);
 }
 
+#[test]
+fn next_unique_tool_call_id_skips_existing_history_ids() {
+    let messages = vec![
+        Message::new(
+            MessageRole::Assistant,
+            "",
+            MessageMeta::new(MessageType::ToolCall),
+        )
+        .with_tool_calls(vec![crate::core::message::ToolCallInfo::new(
+            "prior",
+            Some(IndexMap::new()),
+            "call_000000000",
+        )]),
+        Message::new(
+            MessageRole::Tool,
+            "prior result",
+            MessageMeta::new(MessageType::ToolResult),
+        )
+        .with_tool_name("prior")
+        .with_tool_call_id("call_000000000"),
+    ];
+    let mut seen = existing_tool_call_ids(&messages);
+    let mut counter = 0;
+
+    assert_eq!(
+        next_unique_tool_call_id(&mut counter, &mut seen),
+        "call_000000001"
+    );
+    assert_eq!(counter, 2);
+}
+
 struct RetryRecordingClient {
     raw_bodies: std::sync::Mutex<Vec<Option<Arc<Value>>>>,
     initial_messages: std::sync::Mutex<Vec<Option<Arc<[Value]>>>>,

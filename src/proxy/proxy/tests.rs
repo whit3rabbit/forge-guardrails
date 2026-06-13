@@ -98,6 +98,47 @@ fn openai_to_messages_rewrites_duplicate_tool_call_ids_and_results() {
 }
 
 #[test]
+fn openai_to_messages_rewrites_cross_turn_duplicate_tool_call_ids() {
+    let input = vec![
+        json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_0", "type": "function", "function": {"name": "first", "arguments": "{}"}}
+            ]
+        }),
+        json!({
+            "role": "tool",
+            "name": "first",
+            "tool_call_id": "call_0",
+            "content": "first result"
+        }),
+        json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call_0", "type": "function", "function": {"name": "second", "arguments": "{}"}}
+            ]
+        }),
+        json!({
+            "role": "tool",
+            "name": "second",
+            "tool_call_id": "call_0",
+            "content": "second result"
+        }),
+    ];
+
+    let msgs = openai_to_messages(&input).expect("messages");
+    let first_id = msgs[0].tool_calls.as_ref().unwrap()[0].call_id.as_str();
+    let second_id = msgs[2].tool_calls.as_ref().unwrap()[0].call_id.as_str();
+
+    assert_eq!(first_id, "call_0");
+    assert_ne!(second_id, "call_0");
+    assert_eq!(msgs[1].tool_call_id.as_deref(), Some(first_id));
+    assert_eq!(msgs[3].tool_call_id.as_deref(), Some(second_id));
+}
+
+#[test]
 fn openai_to_messages_empty_tool_calls_is_text() {
     let input = vec![json!({
         "role": "assistant",

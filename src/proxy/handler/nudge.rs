@@ -208,7 +208,7 @@ pub fn emit_proxy_assistant_tool_calls(
     }
 
     let mut infos = Vec::with_capacity(calls.len());
-    let mut seen_call_ids = HashSet::new();
+    let mut seen_call_ids = existing_proxy_tool_call_ids(messages);
     for tc in &mut calls {
         let call_id = if let Some(id) = tc.id.as_deref().filter(|id| !id.is_empty()) {
             if seen_call_ids.insert(id.to_string()) {
@@ -232,6 +232,23 @@ pub fn emit_proxy_assistant_tool_calls(
         .with_tool_calls(infos),
     );
     calls
+}
+
+fn existing_proxy_tool_call_ids(messages: &[Message]) -> HashSet<String> {
+    let mut seen_call_ids = HashSet::new();
+    for message in messages {
+        if let Some(calls) = message.tool_calls.as_ref() {
+            for call in calls {
+                if !call.call_id.is_empty() {
+                    seen_call_ids.insert(call.call_id.clone());
+                }
+            }
+        }
+        if let Some(id) = message.tool_call_id.as_ref().filter(|id| !id.is_empty()) {
+            seen_call_ids.insert(id.clone());
+        }
+    }
+    seen_call_ids
 }
 
 fn next_unique_proxy_tool_call_id(
@@ -306,5 +323,39 @@ mod tests {
             .map(|call| call.call_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(emitted_ids, ids);
+    }
+
+    #[test]
+    fn emit_proxy_assistant_tool_calls_skips_existing_history_ids() {
+        let mut messages = vec![
+            Message::new(
+                MessageRole::Assistant,
+                "",
+                MessageMeta::new(MessageType::ToolCall),
+            )
+            .with_tool_calls(vec![ToolCallInfo::new(
+                "prior",
+                Some(IndexMap::new()),
+                "call_000000000",
+            )]),
+            Message::new(
+                MessageRole::Tool,
+                "prior result",
+                MessageMeta::new(MessageType::ToolResult),
+            )
+            .with_tool_name("prior")
+            .with_tool_call_id("call_000000000"),
+        ];
+        let mut counter = 0;
+        let calls = vec![ToolCall::new("next", IndexMap::new())];
+
+        let calls = emit_proxy_assistant_tool_calls(calls, &mut messages, &mut counter, 0);
+
+        assert_eq!(calls[0].id.as_deref(), Some("call_000000001"));
+        assert_eq!(counter, 2);
+        assert_eq!(
+            messages[2].tool_calls.as_ref().unwrap()[0].call_id,
+            "call_000000001"
+        );
     }
 }

@@ -40,6 +40,7 @@ impl std::error::Error for OpenAiMessageError {}
 pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessageError> {
     let mut messages = Vec::new();
     let mut pending_tool_call_ids: HashMap<String, VecDeque<String>> = HashMap::new();
+    let mut seen_call_ids = HashSet::new();
     for (message_index, item) in input.iter().enumerate() {
         let content = extract_content(item, message_index)?;
         let role = parse_message_role(item, message_index)?;
@@ -57,7 +58,6 @@ pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessage
             if let Some(tcs) = item.get("tool_calls").and_then(|t| t.as_array()) {
                 if !tcs.is_empty() {
                     let mut infos = Vec::new();
-                    let mut seen_call_ids = HashSet::new();
                     for (tool_call_index, tc) in tcs.iter().enumerate() {
                         let name = tc
                             .get("function")

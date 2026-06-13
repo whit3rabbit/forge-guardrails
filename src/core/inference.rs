@@ -12,6 +12,7 @@ use crate::error::{ForgeError, StreamError, ToolCallError};
 use crate::guardrails::{ErrorTracker, ResponseValidator};
 use futures_util::StreamExt;
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// Tool call ID prefix for monotonic counter formatting.
 /// Matches Python: f"call_{tool_call_counter:09d}"
@@ -410,6 +411,7 @@ async fn run_inference_with_options_inner<C: LLMClient>(
 
                     // Unknown tool: emit reasoning (if present), tool_call, error results.
                     let mut tool_call_infos = Vec::new();
+                    let mut seen_call_ids = existing_tool_call_ids(messages);
                     for tc in calls {
                         if let Some(ref reasoning) = tc.reasoning {
                             let reasoning_msg = Message::new(
@@ -421,8 +423,8 @@ async fn run_inference_with_options_inner<C: LLMClient>(
                             messages.push(reasoning_msg.clone());
                             new_messages.push(reasoning_msg);
                         }
-                        let call_id = format_tool_call_id(*tool_call_counter);
-                        *tool_call_counter += 1;
+                        let call_id =
+                            next_unique_tool_call_id(tool_call_counter, &mut seen_call_ids);
                         let info = ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), &call_id);
                         tool_call_infos.push(info);
                     }
@@ -491,6 +493,36 @@ async fn run_inference_with_options_inner<C: LLMClient>(
     }
 
     Ok(None)
+}
+
+fn existing_tool_call_ids(messages: &[Message]) -> HashSet<String> {
+    let mut seen_call_ids = HashSet::new();
+    for message in messages {
+        if let Some(calls) = message.tool_calls.as_ref() {
+            for call in calls {
+                if !call.call_id.is_empty() {
+                    seen_call_ids.insert(call.call_id.clone());
+                }
+            }
+        }
+        if let Some(id) = message.tool_call_id.as_ref().filter(|id| !id.is_empty()) {
+            seen_call_ids.insert(id.clone());
+        }
+    }
+    seen_call_ids
+}
+
+fn next_unique_tool_call_id(
+    tool_call_counter: &mut i64,
+    seen_call_ids: &mut HashSet<String>,
+) -> String {
+    loop {
+        let id = format_tool_call_id(*tool_call_counter);
+        *tool_call_counter += 1;
+        if seen_call_ids.insert(id.clone()) {
+            return id;
+        }
+    }
 }
 
 /// Rough token estimate from a response for syncing the context manager.
