@@ -24,6 +24,8 @@ GGUF ?=
 OUTPUT_DIR ?=
 PROXY_PORT ?=
 BACKEND_PORT ?=
+UPSTREAM_BACKEND ?=
+OPENROUTER_BASE_URL ?=
 EVAL_ARGS ?=
 
 MODEL_ARGS := $(if $(strip $(MODEL)),--model "$(MODEL)",)
@@ -31,6 +33,8 @@ GGUF_ARGS := $(if $(strip $(GGUF)),--gguf "$(GGUF)",)
 OUTPUT_DIR_ARGS := $(if $(strip $(OUTPUT_DIR)),--output-dir "$(OUTPUT_DIR)",)
 PROXY_PORT_ARGS := $(if $(strip $(PROXY_PORT)),--proxy-port "$(PROXY_PORT)",)
 BACKEND_PORT_ARGS := $(if $(strip $(BACKEND_PORT)),--backend-port "$(BACKEND_PORT)",)
+UPSTREAM_BACKEND_ARGS := $(if $(strip $(UPSTREAM_BACKEND)),--upstream-backend "$(UPSTREAM_BACKEND)",)
+OPENROUTER_BASE_URL_ARGS := $(if $(strip $(OPENROUTER_BASE_URL)),--openrouter-base-url "$(OPENROUTER_BASE_URL)",)
 FINAL_RESPONSE_SHADOW_OUTPUT := $(if $(strip $(OUTPUT_DIR)),$(OUTPUT_DIR),$(FINAL_RESPONSE_SHADOW_OUTPUT_DIR))
 
 EVAL_COMMON_BASE_ARGS := \
@@ -41,7 +45,9 @@ EVAL_COMMON_BASE_ARGS := \
 	$(MODEL_ARGS) \
 	$(GGUF_ARGS) \
 	$(PROXY_PORT_ARGS) \
-	$(BACKEND_PORT_ARGS)
+	$(BACKEND_PORT_ARGS) \
+	$(UPSTREAM_BACKEND_ARGS) \
+	$(OPENROUTER_BASE_URL_ARGS)
 
 EVAL_COMMON_ARGS := \
 	$(EVAL_COMMON_BASE_ARGS) \
@@ -75,6 +81,7 @@ help:
 	@printf '%s\n' 'Common overrides: FEATURES=classifier RUNS=10 OUTPUT_DIR=target/local-eval/name'
 	@printf '%s\n' '                  CLASSIFIER_MODE=shadow FINAL_RESPONSE_CLASSIFIER_MODE=shadow RESOURCE_INTERVAL=1.0'
 	@printf '%s\n' '                  TOOL_OUTPUT_COMPRESSION=standard TOOL_OUTPUT_COMPRESSION_METHOD=lzw'
+	@printf '%s\n' '                  UPSTREAM_BACKEND=openrouter MODEL=openrouter/free OPENROUTER_BASE_URL=https://openrouter.ai/api/v1'
 	@printf '%s\n' '                  COMPRESSION_MIN_INPUT_TOKEN_SAVINGS=1 EVAL_ARGS="..."'
 
 build:

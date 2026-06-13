@@ -61,6 +61,43 @@ fn openai_to_messages_assistant_tool_call_empty_id_gets_fallback() {
 }
 
 #[test]
+fn openai_to_messages_rewrites_duplicate_tool_call_ids_and_results() {
+    let input = vec![
+        json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "dup", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+                {"id": "dup", "type": "function", "function": {"name": "write", "arguments": "{}"}}
+            ]
+        }),
+        json!({
+            "role": "tool",
+            "name": "read",
+            "tool_call_id": "dup",
+            "content": "read result"
+        }),
+        json!({
+            "role": "tool",
+            "name": "write",
+            "tool_call_id": "dup",
+            "content": "write result"
+        }),
+    ];
+
+    let msgs = openai_to_messages(&input).expect("messages");
+    let calls = msgs[0].tool_calls.as_ref().unwrap();
+    let first_id = calls[0].call_id.as_str();
+    let second_id = calls[1].call_id.as_str();
+
+    assert_eq!(first_id, "dup");
+    assert_ne!(second_id, "dup");
+    assert!(second_id.starts_with("call_"));
+    assert_eq!(msgs[1].tool_call_id.as_deref(), Some(first_id));
+    assert_eq!(msgs[2].tool_call_id.as_deref(), Some(second_id));
+}
+
+#[test]
 fn openai_to_messages_empty_tool_calls_is_text() {
     let input = vec![json!({
         "role": "assistant",
@@ -244,6 +281,33 @@ fn tool_calls_to_openai_preserves_existing_call_id() {
 }
 
 #[test]
+fn tool_calls_to_openai_rewrites_duplicate_existing_call_ids() {
+    let calls = vec![
+        ToolCall::new("search", IndexMap::new()).with_id("dup"),
+        ToolCall::new("read", IndexMap::new()).with_id("dup"),
+        ToolCall::new("write", IndexMap::new()).with_id("keep"),
+    ];
+    let result = tool_calls_to_openai(&calls, "test-model");
+    let ids: Vec<&str> = result["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| call["id"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(ids[0], "dup");
+    assert_ne!(ids[1], "dup");
+    assert_eq!(ids[2], "keep");
+    assert_eq!(
+        ids.iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        ids.len()
+    );
+}
+
+#[test]
 fn tool_calls_to_openai_fallback_ids_are_unique() {
     let calls: Vec<ToolCall> = (0..256)
         .map(|_| ToolCall::new("search", IndexMap::new()))
@@ -291,6 +355,24 @@ fn sse_tool_calls_preserves_existing_call_id() {
         events[0]["choices"][0]["delta"]["tool_calls"][0]["id"],
         "call_keep"
     );
+}
+
+#[test]
+fn sse_tool_calls_rewrites_duplicate_existing_call_ids() {
+    let calls = vec![
+        ToolCall::new("search", IndexMap::new()).with_id("dup"),
+        ToolCall::new("read", IndexMap::new()).with_id("dup"),
+    ];
+    let events = tool_calls_to_sse_events(&calls, "model");
+    let ids: Vec<&str> = events[0]["choices"][0]["delta"]["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| call["id"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(ids[0], "dup");
+    assert_ne!(ids[1], "dup");
 }
 
 #[test]

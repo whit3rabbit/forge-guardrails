@@ -1,8 +1,9 @@
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 
 use crate::clients::base::{LLMUsageDetails, TextResponse, TokenUsage, ToolCall};
 
-use super::id::{generate_call_id, generate_completion_id};
+use super::id::{generate_completion_id, unique_or_generated_call_id};
 
 pub(crate) fn text_delta_sse_event(
     completion_id: &str,
@@ -82,17 +83,13 @@ pub(crate) fn tool_calls_to_openai_with_usage_details(
 ) -> Value {
     let completion_id = generate_completion_id();
     let mut tool_calls_out = Vec::new();
+    let mut seen_call_ids = HashSet::new();
 
     let reasoning = calls.first().and_then(|c| c.reasoning.clone());
     let content: Option<String> = reasoning;
 
     for (i, tc) in calls.iter().enumerate() {
-        let call_id = tc
-            .id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(generate_call_id);
+        let call_id = unique_or_generated_call_id(tc.id.as_deref(), &mut seen_call_ids);
         let args_json = serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string());
         let mut func_map = Map::new();
         func_map.insert("name".into(), json!(tc.tool));
@@ -269,6 +266,7 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
     let completion_id = generate_completion_id();
     let usage_json = usage.map(|u| usage_to_openai_json_with_details(Some(u), usage_details));
     let reasoning = calls.first().and_then(|c| c.reasoning.clone());
+    let mut seen_call_ids = HashSet::new();
     let mut step = 0;
 
     std::iter::from_fn(move || {
@@ -283,12 +281,7 @@ pub(crate) fn tool_calls_to_sse_event_iter_with_usage_details<'a>(
             step = 2;
             let mut tc_deltas = Vec::new();
             for (i, tc) in calls.iter().enumerate() {
-                let call_id = tc
-                    .id
-                    .as_deref()
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(generate_call_id);
+                let call_id = unique_or_generated_call_id(tc.id.as_deref(), &mut seen_call_ids);
                 let args_json =
                     serde_json::to_string(&tc.args).unwrap_or_else(|_| "{}".to_string());
                 let mut func_map = Map::new();

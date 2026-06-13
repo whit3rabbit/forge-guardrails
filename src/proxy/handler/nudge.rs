@@ -4,6 +4,7 @@ use crate::guardrails::{ErrorTracker, StepCheck, StepEnforcer};
 use crate::tools::respond::RESPOND_TOOL_NAME;
 use indexmap::IndexMap;
 use serde_json::Value;
+use std::collections::HashSet;
 
 use super::telemetry::capture_guardrail_exhausted;
 
@@ -191,7 +192,7 @@ pub fn emit_proxy_user_classifier_nudge_or_error(
     Ok(())
 }
 
-/// Emits the assistant's reasoning and tool calls into the message history, generating IDs if missing.
+/// Emits the assistant's reasoning and tool calls into history with unique IDs.
 pub fn emit_proxy_assistant_tool_calls(
     mut calls: Vec<ToolCall>,
     messages: &mut Vec<Message>,
@@ -207,12 +208,17 @@ pub fn emit_proxy_assistant_tool_calls(
     }
 
     let mut infos = Vec::with_capacity(calls.len());
+    let mut seen_call_ids = HashSet::new();
     for tc in &mut calls {
-        let call_id = tc.id.clone().unwrap_or_else(|| {
-            let id = crate::core::inference::format_tool_call_id(*tool_call_counter);
-            *tool_call_counter += 1;
-            id
-        });
+        let call_id = if let Some(id) = tc.id.as_deref().filter(|id| !id.is_empty()) {
+            if seen_call_ids.insert(id.to_string()) {
+                id.to_string()
+            } else {
+                next_unique_proxy_tool_call_id(tool_call_counter, &mut seen_call_ids)
+            }
+        } else {
+            next_unique_proxy_tool_call_id(tool_call_counter, &mut seen_call_ids)
+        };
         tc.id = Some(call_id.clone());
         infos.push(ToolCallInfo::new(&tc.tool, Some(tc.args.clone()), call_id));
     }
@@ -226,6 +232,19 @@ pub fn emit_proxy_assistant_tool_calls(
         .with_tool_calls(infos),
     );
     calls
+}
+
+fn next_unique_proxy_tool_call_id(
+    tool_call_counter: &mut i64,
+    seen_call_ids: &mut HashSet<String>,
+) -> String {
+    loop {
+        let id = crate::core::inference::format_tool_call_id(*tool_call_counter);
+        *tool_call_counter += 1;
+        if seen_call_ids.insert(id.clone()) {
+            return id;
+        }
+    }
 }
 
 /// Emits guardrail nudge results into the message history for each tool call.
@@ -249,5 +268,43 @@ pub fn emit_proxy_guardrail_nudge_results(
             .with_tool_name(&tc.tool)
             .with_tool_call_id(call_id),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indexmap::IndexMap;
+
+    #[test]
+    fn emit_proxy_assistant_tool_calls_rewrites_duplicate_ids_in_history() {
+        let mut messages = Vec::new();
+        let mut counter = 0;
+        let calls = vec![
+            ToolCall::new("read", IndexMap::new()).with_id("dup"),
+            ToolCall::new("write", IndexMap::new()).with_id("dup"),
+            ToolCall::new("search", IndexMap::new()),
+        ];
+
+        let calls = emit_proxy_assistant_tool_calls(calls, &mut messages, &mut counter, 0);
+        let ids = calls
+            .iter()
+            .map(|call| call.id.as_deref().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids[0], "dup");
+        assert_ne!(ids[1], "dup");
+        assert_ne!(ids[2], "dup");
+        assert_ne!(ids[1], ids[2]);
+        assert_eq!(counter, 2);
+
+        let emitted_ids = messages[0]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|call| call.call_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(emitted_ids, ids);
     }
 }

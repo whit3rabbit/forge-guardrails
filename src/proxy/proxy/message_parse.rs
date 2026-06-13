@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use crate::core::message::{Message, MessageMeta, MessageRole, MessageType, ToolCallInfo};
@@ -38,6 +39,7 @@ impl std::error::Error for OpenAiMessageError {}
 /// empty string. Empty tool_calls list is treated as a text response.
 pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessageError> {
     let mut messages = Vec::new();
+    let mut pending_tool_call_ids: HashMap<String, VecDeque<String>> = HashMap::new();
     for (message_index, item) in input.iter().enumerate() {
         let content = extract_content(item, message_index)?;
         let role = parse_message_role(item, message_index)?;
@@ -55,6 +57,7 @@ pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessage
             if let Some(tcs) = item.get("tool_calls").and_then(|t| t.as_array()) {
                 if !tcs.is_empty() {
                     let mut infos = Vec::new();
+                    let mut seen_call_ids = HashSet::new();
                     for (tool_call_index, tc) in tcs.iter().enumerate() {
                         let name = tc
                             .get("function")
@@ -63,12 +66,21 @@ pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessage
                             .unwrap_or("");
                         let args_raw = tc.get("function").and_then(|f| f.get("arguments"));
                         let args = parse_args_value(args_raw, message_index, tool_call_index)?;
-                        let call_id = tc
+                        let raw_call_id = tc
                             .get("id")
                             .and_then(|i| i.as_str())
                             .filter(|id| !id.is_empty())
-                            .map(str::to_string)
-                            .unwrap_or_else(super::id::generate_call_id);
+                            .map(str::to_string);
+                        let call_id = super::id::unique_or_generated_call_id(
+                            raw_call_id.as_deref(),
+                            &mut seen_call_ids,
+                        );
+                        if let Some(raw_call_id) = raw_call_id {
+                            pending_tool_call_ids
+                                .entry(raw_call_id)
+                                .or_default()
+                                .push_back(call_id.clone());
+                        }
                         infos.push(ToolCallInfo::new(name, Some(args), call_id));
                     }
                     msg = msg.with_tool_calls(infos);
@@ -82,6 +94,10 @@ pub fn openai_to_messages(input: &[Value]) -> Result<Vec<Message>, OpenAiMessage
                 msg = msg.with_tool_name(name);
             }
             if let Some(id) = item.get("tool_call_id").and_then(|i| i.as_str()) {
+                let id = pending_tool_call_ids
+                    .get_mut(id)
+                    .and_then(VecDeque::pop_front)
+                    .unwrap_or_else(|| id.to_string());
                 msg = msg.with_tool_call_id(id);
             }
         }

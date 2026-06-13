@@ -189,6 +189,49 @@ baseline. Do not use the skipped `LS/N` behavior to explain an `LS/P` warning.
 Run live evals manually against real backends. CI should stay deterministic
 unless a job is explicitly marked as live-backend integration.
 
+## OpenRouter Upstream Eval
+
+Use OpenRouter when you want the same Forge proxy eval flow without starting a
+local model. The eval runner still sends all benchmark requests to the local
+Forge proxy first; the proxy then forwards guarded requests to the
+OpenAI-compatible OpenRouter endpoint.
+
+```bash
+OPENROUTER_API_KEY=... scripts/run_local_eval.sh \
+  --suite smoke \
+  --runs 1 \
+  --upstream-backend openrouter \
+  --model openrouter/free \
+  --output-dir target/local-eval/openrouter-smoke \
+  --skip-published-compare
+```
+
+Makefile targets pass the same options through:
+
+```bash
+OPENROUTER_API_KEY=... make eval-smoke \
+  UPSTREAM_BACKEND=openrouter \
+  MODEL=openrouter/free
+```
+
+Controls:
+
+- `--upstream-backend openrouter` selects the remote upstream. The default
+  remains `llamaserver`.
+- `--openrouter-base-url URL` overrides the default
+  `https://openrouter.ai/api/v1`.
+- `--model MODEL` is required in OpenRouter mode. The launcher intentionally
+  does not guess a paid route.
+- `OPENROUTER_API_KEY` or `OPENAI_API_KEY` must be set. The launcher aliases
+  `OPENROUTER_API_KEY` into `OPENAI_API_KEY` only for the proxy process,
+  matching the dataset capture workflow.
+
+Release OpenRouter runs skip published LS/N or LS/P comparison by default
+because those baselines are local-model leaderboard rows. Pass
+`--force-published-compare` only when you intentionally want that diagnostic.
+Treat OpenRouter output as live-backend evidence: model availability,
+structured tool-call support, rate limits, and routing behavior can change.
+
 ## Tool-Output Compression Eval
 
 Use `eval-release-compression` to compare disabled compression against one

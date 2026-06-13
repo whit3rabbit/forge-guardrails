@@ -27,7 +27,8 @@ DEFAULT_BACKEND_PORT="8080"
 DEFAULT_BUDGET_TOKENS="8192"
 DEFAULT_MODEL="Ministral-3-8B-Instruct-2512-Q8_0"
 DEFAULT_PROXY_BACKEND_MODE="native"
-DEFAULT_MANAGED_BACKEND="llamaserver"
+DEFAULT_UPSTREAM_BACKEND="llamaserver"
+DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
 
 SCRIPT_SOURCE="${RUN_LOCAL_EVAL_ORIGINAL:-${BASH_SOURCE[0]}}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd -P)"
@@ -38,12 +39,16 @@ SUITE="smoke"
 RUNS="1"
 GGUF="$DEFAULT_GGUF"
 MODEL="$DEFAULT_MODEL"
+MODEL_EXPLICIT=0
 PUBLISHED_MODEL=""
 PUBLISHED_BACKEND_MODE=""
 PUBLISHED_BACKEND_MODE_SET=0
 PROXY_BACKEND_MODE="$DEFAULT_PROXY_BACKEND_MODE"
+UPSTREAM_BACKEND="${FORGE_EVAL_UPSTREAM_BACKEND:-${UPSTREAM_BACKEND:-$DEFAULT_UPSTREAM_BACKEND}}"
+OPENROUTER_BASE_URL="${FORGE_EVAL_OPENROUTER_BASE_URL:-${OPENROUTER_BASE_URL:-$DEFAULT_OPENROUTER_BASE_URL}}"
 SKIP_PUBLISHED_COMPARE=0
 FORCE_PUBLISHED_COMPARE=0
+AUTO_SKIP_PUBLISHED_COMPARE=0
 INCLUDE_COMPACTION_CHAIN=0
 PROXY_PORT="${FORGE_PROXY_PORT:-${PROXY_PORT:-$DEFAULT_PROXY_PORT}}"
 BACKEND_PORT="${FORGE_BACKEND_PORT:-${BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
@@ -95,14 +100,17 @@ usage() {
   cat <<EOF
 Usage: $PROGRAM_NAME [options]
 
-Runs local Forge evals against the Rust proxy using managed llama-server.
+Runs Forge evals against the local Rust proxy with a managed or remote upstream.
 
 Options:
   --suite smoke|release     Eval suite to run (default: smoke)
   --runs N                  Runs per scenario (default: 1)
-  --gguf PATH               GGUF path (default: $DEFAULT_GGUF)
+  --gguf PATH               GGUF path for --upstream-backend llamaserver (default: $DEFAULT_GGUF)
   --output-dir DIR          Output directory (default: target/local-eval/<timestamp>)
   --model MODEL             Model name sent to the proxy (default: $DEFAULT_MODEL)
+  --upstream-backend llamaserver|openrouter
+                            Upstream used behind the local Forge proxy (default: $DEFAULT_UPSTREAM_BACKEND)
+  --openrouter-base-url URL OpenRouter-compatible upstream URL (default: $DEFAULT_OPENROUTER_BASE_URL)
   --published-model MODEL   Published baseline model (default: --model)
   --published-mode LS/N|LS/P Published baseline row (default: LS/N for native, LS/P for prompt)
   --proxy-backend-mode native|prompt
@@ -146,6 +154,7 @@ Examples:
   $PROGRAM_NAME --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
   $PROGRAM_NAME --suite release --runs 10 --download-classifier
   $PROGRAM_NAME --suite release --runs 10 --tool-output-compression standard
+  OPENROUTER_API_KEY=... $PROGRAM_NAME --suite smoke --runs 1 --upstream-backend openrouter --model openrouter/free
 EOF
 }
 
@@ -227,6 +236,16 @@ final_response_classifier_enabled() {
 
 classifier_feature_enabled() {
   classifier_enabled || final_response_classifier_enabled
+}
+
+openrouter_api_key_source() {
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    printf '%s\n' "OPENAI_API_KEY"
+  elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    printf '%s\n' "OPENROUTER_API_KEY"
+  else
+    printf '%s\n' "missing"
+  fi
 }
 
 next_arg() {
@@ -546,6 +565,7 @@ start_proxy() {
 
   phase "Start proxy: $label"
   log "Budget tokens: $budget"
+  log "Upstream backend: $UPSTREAM_BACKEND"
   log "Proxy backend mode: $PROXY_BACKEND_MODE"
   log "Proxy log: $CURRENT_PROXY_LOG"
   local env_args=(
@@ -591,8 +611,31 @@ start_proxy() {
   if classifier_feature_enabled; then
     log "Classifier JSONL: $classifier_log"
   fi
-  env "${env_args[@]}" "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" "${proxy_args[@]}" \
-    >"$CURRENT_PROXY_LOG" 2>&1 &
+  case "$UPSTREAM_BACKEND" in
+    llamaserver)
+      env "${env_args[@]}" "$SCRIPT_DIR/start_llamaserver_proxy.sh" "$GGUF" "${proxy_args[@]}" \
+        >"$CURRENT_PROXY_LOG" 2>&1 &
+      ;;
+    openrouter)
+      log "OpenRouter base URL: $OPENROUTER_BASE_URL"
+      log "OpenRouter API key source: $(openrouter_api_key_source)"
+      proxy_args+=(
+        --backend-url "$OPENROUTER_BASE_URL"
+        --model "$MODEL"
+        --port "$PROXY_PORT"
+      )
+      env_args+=("OPENAI_API_KEY=${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}")
+      if classifier_feature_enabled; then
+        env "${env_args[@]}" "$REPO_ROOT/target/debug/forge-guardrails-proxy" "${proxy_args[@]}" \
+          >"$CURRENT_PROXY_LOG" 2>&1 &
+      else
+        (
+          cd "$REPO_ROOT"
+          env "${env_args[@]}" cargo run --bin forge-guardrails-proxy -- "${proxy_args[@]}"
+        ) >"$CURRENT_PROXY_LOG" 2>&1 &
+      fi
+      ;;
+  esac
   PROXY_PID="$!"
   wait_for_health "$PROXY_PID"
   start_resource_sampler "$label"
@@ -710,7 +753,7 @@ run_python_oracle() {
     --runs "$RUNS"
     --scenario "${scenarios[@]}"
     --budget-tokens "$budget"
-    --backend-label "$DEFAULT_MANAGED_BACKEND"
+    --backend-label "$UPSTREAM_BACKEND"
     --mode-label "$PROXY_BACKEND_MODE"
     --proxy-backend-mode "$PROXY_BACKEND_MODE"
     --eval-target-backend openai-proxy
@@ -782,6 +825,7 @@ run_published_compare() {
 
 write_metadata() {
   local classifier_enabled_value final_response_classifier_enabled_value metadata
+  local api_key_source managed_backend_url openrouter_base_url_metadata upstream_backend_url
   metadata="$OUTPUT_DIR/local_eval_metadata.txt"
   if classifier_enabled; then
     classifier_enabled_value=1
@@ -793,22 +837,38 @@ write_metadata() {
   else
     final_response_classifier_enabled_value=0
   fi
+  if [[ "$UPSTREAM_BACKEND" == "openrouter" ]]; then
+    api_key_source="$(openrouter_api_key_source)"
+    managed_backend_url=""
+    openrouter_base_url_metadata="$OPENROUTER_BASE_URL"
+    upstream_backend_url="$OPENROUTER_BASE_URL"
+  else
+    api_key_source="not_used"
+    managed_backend_url="http://127.0.0.1:${BACKEND_PORT}/v1"
+    openrouter_base_url_metadata=""
+    upstream_backend_url="$managed_backend_url"
+  fi
   cat >"$metadata" <<EOF
 suite=$SUITE
 runs=$RUNS
 stream=$STREAM
 gguf=$GGUF
 model=$MODEL
+upstream_backend=$UPSTREAM_BACKEND
+upstream_backend_url=$upstream_backend_url
+openrouter_base_url=$openrouter_base_url_metadata
+openrouter_api_key_source=$api_key_source
 published_model=${PUBLISHED_MODEL:-$MODEL}
 published_backend_mode=$PUBLISHED_BACKEND_MODE
 proxy_backend_mode=$PROXY_BACKEND_MODE
 proxy_url=http://127.0.0.1:${PROXY_PORT}/v1
-managed_backend_url=http://127.0.0.1:${BACKEND_PORT}/v1
-managed_backend=$DEFAULT_MANAGED_BACKEND
+managed_backend_url=$managed_backend_url
+managed_backend=$UPSTREAM_BACKEND
 eval_target_backend=openai-proxy
 mode=proxy
 recommended_sampling=1
 force_published_compare=$FORCE_PUBLISHED_COMPARE
+auto_skip_published_compare=$AUTO_SKIP_PUBLISHED_COMPARE
 normal_budget_tokens=$DEFAULT_BUDGET_TOKENS
 compaction_chain_p1_budget_tokens=3600
 compaction_chain_p2_budget_tokens=2200
@@ -857,6 +917,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       MODEL="$(next_arg "$1" "${2:-}")"
+      MODEL_EXPLICIT=1
+      shift 2
+      ;;
+    --upstream-backend)
+      UPSTREAM_BACKEND="$(next_arg "$1" "${2:-}")"
+      shift 2
+      ;;
+    --openrouter-base-url)
+      OPENROUTER_BASE_URL="$(next_arg "$1" "${2:-}")"
       shift 2
       ;;
     --published-model)
@@ -985,6 +1054,13 @@ case "$PROXY_BACKEND_MODE" in
     die "--proxy-backend-mode must be native or prompt"
     ;;
 esac
+case "$UPSTREAM_BACKEND" in
+  llamaserver|openrouter)
+    ;;
+  *)
+    die "--upstream-backend must be llamaserver or openrouter"
+    ;;
+esac
 if [[ "$PUBLISHED_BACKEND_MODE_SET" != "1" ]]; then
   if [[ "$PROXY_BACKEND_MODE" == "native" ]]; then
     PUBLISHED_BACKEND_MODE="LS/N"
@@ -1050,6 +1126,14 @@ esac
 if [[ "$VERIFY_FINAL_RESPONSE" == "1" && "$FINAL_RESPONSE_CLASSIFIER_MODE" == "disabled" ]]; then
   die "--verify-final-response cannot be used with --final-response-classifier-mode disabled"
 fi
+if [[ "$UPSTREAM_BACKEND" == "openrouter" ]]; then
+  [[ "$MODEL_EXPLICIT" == "1" ]] || die "--upstream-backend openrouter requires explicit --model"
+  [[ -n "${OPENROUTER_API_KEY:-}" || -n "${OPENAI_API_KEY:-}" ]] || die "OPENROUTER_API_KEY or OPENAI_API_KEY is required for --upstream-backend openrouter"
+  if [[ "$SUITE" == "release" && "$FORCE_PUBLISHED_COMPARE" != "1" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
+    SKIP_PUBLISHED_COMPARE=1
+    AUTO_SKIP_PUBLISHED_COMPARE=1
+  fi
+fi
 valid_positive_int "$RUNS" || die "--runs must be a positive integer"
 valid_positive_int "$PROXY_PORT" || die "--proxy-port must be a positive integer"
 valid_positive_int "$BACKEND_PORT" || die "--backend-port must be a positive integer"
@@ -1082,7 +1166,11 @@ trap 'exit 129' HUP
 
 phase "Eval setup"
 log "Output directory: $OUTPUT_DIR"
-log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, proxy_backend_mode: $PROXY_BACKEND_MODE"
+log "Suite: $SUITE, runs: $RUNS, stream: $STREAM, upstream_backend: $UPSTREAM_BACKEND, proxy_backend_mode: $PROXY_BACKEND_MODE"
+if [[ "$UPSTREAM_BACKEND" == "openrouter" ]]; then
+  log "OpenRouter base URL: $OPENROUTER_BASE_URL"
+  log "OpenRouter API key source: $(openrouter_api_key_source)"
+fi
 log "Tool-output compression: mode=$TOOL_OUTPUT_COMPRESSION, method=$TOOL_OUTPUT_COMPRESSION_METHOD"
 if [[ "$RESOURCE_BASELINE" == "1" ]]; then
   log "Resource baseline: enabled, interval=${RESOURCE_INTERVAL}s"
@@ -1132,7 +1220,11 @@ run_python_report
 if [[ "$SUITE" == "release" && "$SKIP_PUBLISHED_COMPARE" != "1" ]]; then
   run_published_compare
 elif [[ "$SUITE" == "release" ]]; then
-  log "Skipping published compare because --skip-published-compare was set"
+  if [[ "$AUTO_SKIP_PUBLISHED_COMPARE" == "1" ]]; then
+    log "Skipping published compare because OpenRouter runs do not match local published baselines; pass --force-published-compare to override"
+  else
+    log "Skipping published compare because --skip-published-compare was set"
+  fi
 fi
 
 phase "Complete"
