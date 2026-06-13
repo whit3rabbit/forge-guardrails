@@ -231,6 +231,19 @@ because those baselines are local-model leaderboard rows. Pass
 `--force-published-compare` only when you intentionally want that diagnostic.
 Treat OpenRouter output as live-backend evidence: model availability,
 structured tool-call support, rate limits, and routing behavior can change.
+Some OpenRouter routes validate provider-generated tool calls before Forge can
+repair them. If a run fails with provider 400 errors such as duplicate tool-call
+IDs, rerun with serialized upstream tool calls:
+
+```bash
+OPENROUTER_API_KEY=... scripts/run_local_eval.sh \
+  --suite release \
+  --runs 10 \
+  --upstream-backend openrouter \
+  --model mistralai/mixtral-8x22b-instruct \
+  --disable-parallel-tool-calls \
+  --output-dir target/local-eval/openrouter-serialized-tools
+```
 
 ## Tool-Output Compression Eval
 

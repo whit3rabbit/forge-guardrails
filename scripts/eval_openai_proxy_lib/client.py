@@ -21,6 +21,7 @@ class OpenAIProxyClient:
         model: str,
         timeout: float = 300.0,
         recommended_sampling: bool = True,
+        parallel_tool_calls: bool | None = None,
     ) -> None:
         """Initialize the client with the proxy base URL and default model."""
         self.base_url = _chat_completions_url(base_url)
@@ -29,6 +30,7 @@ class OpenAIProxyClient:
         self.sampling_defaults = (
             get_sampling_defaults(model) if recommended_sampling else {}
         )
+        self.parallel_tool_calls = parallel_tool_calls
 
     async def chat(
         self,
@@ -83,6 +85,8 @@ class OpenAIProxyClient:
             body["stream_options"] = {"include_usage": True}
         if tools:
             body["tools"] = [format_tool(tool) for tool in tools]
+            if self.parallel_tool_calls is not None:
+                body["parallel_tool_calls"] = self.parallel_tool_calls
         if required_steps or debug:
             forge: dict[str, Any] = {}
             if required_steps:

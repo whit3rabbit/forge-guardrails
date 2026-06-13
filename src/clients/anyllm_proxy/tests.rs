@@ -1,9 +1,10 @@
 use super::call_info::estimate_cost_usd;
-use super::request::normalize_chat_completions_url;
+use super::request::{build_openai_request_body, normalize_chat_completions_url};
 use super::response::parse_args_string;
 use super::streaming::{
     checked_stream_tool_call_index, sse_data_value, take_sse_line, MAX_STREAM_TOOL_CALLS,
 };
+use crate::clients::base::LLMRequestOptions;
 use serde_json::json;
 
 #[test]
@@ -28,6 +29,77 @@ fn normalize_server_base() {
         normalize_chat_completions_url("http://localhost:3000"),
         "http://localhost:3000/v1/chat/completions"
     );
+}
+
+#[test]
+fn request_body_rewrites_duplicate_tool_call_ids_across_transcript() {
+    let body = build_openai_request_body(
+        "model",
+        vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "dup",
+                    "type": "function",
+                    "function": {"name": "first", "arguments": "{}"}
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "dup",
+                "name": "first",
+                "content": "first result"
+            }),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "dup",
+                    "type": "function",
+                    "function": {"name": "second", "arguments": "{}"}
+                }]
+            }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "dup",
+                "name": "second",
+                "content": "second result"
+            }),
+        ],
+        None,
+        LLMRequestOptions::default(),
+        true,
+    );
+    let messages = body["messages"].as_array().unwrap();
+    let first_id = messages[0]["tool_calls"][0]["id"].as_str().unwrap();
+    let second_id = messages[2]["tool_calls"][0]["id"].as_str().unwrap();
+
+    assert_eq!(first_id, "dup");
+    assert_ne!(second_id, "dup");
+    assert_eq!(messages[1]["tool_call_id"].as_str(), Some(first_id));
+    assert_eq!(messages[3]["tool_call_id"].as_str(), Some(second_id));
+}
+
+#[test]
+fn request_body_generates_missing_tool_call_ids() {
+    let body = build_openai_request_body(
+        "model",
+        vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "type": "function",
+                "function": {"name": "first", "arguments": "{}"}
+            }]
+        })],
+        None,
+        LLMRequestOptions::default(),
+        false,
+    );
+    let id = body["messages"][0]["tool_calls"][0]["id"].as_str().unwrap();
+
+    assert!(id.starts_with("call_forge_"));
 }
 
 #[test]

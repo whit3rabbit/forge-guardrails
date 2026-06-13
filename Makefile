@@ -26,6 +26,7 @@ PROXY_PORT ?=
 BACKEND_PORT ?=
 UPSTREAM_BACKEND ?=
 OPENROUTER_BASE_URL ?=
+DISABLE_PARALLEL_TOOL_CALLS ?=
 EVAL_ARGS ?=
 
 MODEL_ARGS := $(if $(strip $(MODEL)),--model "$(MODEL)",)
@@ -35,6 +36,7 @@ PROXY_PORT_ARGS := $(if $(strip $(PROXY_PORT)),--proxy-port "$(PROXY_PORT)",)
 BACKEND_PORT_ARGS := $(if $(strip $(BACKEND_PORT)),--backend-port "$(BACKEND_PORT)",)
 UPSTREAM_BACKEND_ARGS := $(if $(strip $(UPSTREAM_BACKEND)),--upstream-backend "$(UPSTREAM_BACKEND)",)
 OPENROUTER_BASE_URL_ARGS := $(if $(strip $(OPENROUTER_BASE_URL)),--openrouter-base-url "$(OPENROUTER_BASE_URL)",)
+DISABLE_PARALLEL_TOOL_CALLS_ARGS := $(if $(filter 1 true yes on,$(DISABLE_PARALLEL_TOOL_CALLS)),--disable-parallel-tool-calls,)
 FINAL_RESPONSE_SHADOW_OUTPUT := $(if $(strip $(OUTPUT_DIR)),$(OUTPUT_DIR),$(FINAL_RESPONSE_SHADOW_OUTPUT_DIR))
 
 EVAL_COMMON_BASE_ARGS := \
@@ -47,7 +49,8 @@ EVAL_COMMON_BASE_ARGS := \
 	$(PROXY_PORT_ARGS) \
 	$(BACKEND_PORT_ARGS) \
 	$(UPSTREAM_BACKEND_ARGS) \
-	$(OPENROUTER_BASE_URL_ARGS)
+	$(OPENROUTER_BASE_URL_ARGS) \
+	$(DISABLE_PARALLEL_TOOL_CALLS_ARGS)
 
 EVAL_COMMON_ARGS := \
 	$(EVAL_COMMON_BASE_ARGS) \
@@ -82,6 +85,7 @@ help:
 	@printf '%s\n' '                  CLASSIFIER_MODE=shadow FINAL_RESPONSE_CLASSIFIER_MODE=shadow RESOURCE_INTERVAL=1.0'
 	@printf '%s\n' '                  TOOL_OUTPUT_COMPRESSION=standard TOOL_OUTPUT_COMPRESSION_METHOD=lzw'
 	@printf '%s\n' '                  UPSTREAM_BACKEND=openrouter MODEL=openrouter/free OPENROUTER_BASE_URL=https://openrouter.ai/api/v1'
+	@printf '%s\n' '                  DISABLE_PARALLEL_TOOL_CALLS=1'
 	@printf '%s\n' '                  COMPRESSION_MIN_INPUT_TOKEN_SAVINGS=1 EVAL_ARGS="..."'
 
 build:

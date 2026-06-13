@@ -43,6 +43,7 @@ def _print_early_help() -> None:
     parser.add_argument("--proxy-backend-mode", choices=["native", "prompt"])
     parser.add_argument("--eval-target-backend", default="openai-proxy")
     parser.add_argument("--no-recommended-sampling", action="store_true")
+    parser.add_argument("--disable-parallel-tool-calls", action="store_true")
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)
@@ -76,6 +77,7 @@ async def main_async(args: argparse.Namespace) -> None:
         args.model,
         timeout=args.timeout,
         recommended_sampling=not args.no_recommended_sampling,
+        parallel_tool_calls=False if args.disable_parallel_tool_calls else None,
     )
 
     output = Path(args.output) if args.output else None
@@ -163,6 +165,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--proxy-backend-mode", choices=["native", "prompt"])
     parser.add_argument("--eval-target-backend", default="openai-proxy")
     parser.add_argument("--no-recommended-sampling", action="store_true")
+    parser.add_argument("--disable-parallel-tool-calls", action="store_true")
     parser.add_argument("--no-history", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--timeout", type=float, default=300.0)

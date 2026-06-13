@@ -84,6 +84,7 @@ fi
 RESOURCE_INTERVAL="${FORGE_RESOURCE_INTERVAL:-1.0}"
 TOOL_OUTPUT_COMPRESSION="${FORGE_TOOL_OUTPUT_COMPRESSION:-disabled}"
 TOOL_OUTPUT_COMPRESSION_METHOD="${FORGE_TOOL_OUTPUT_COMPRESSION_METHOD:-lzw}"
+DISABLE_PARALLEL_TOOL_CALLS="${FORGE_EVAL_DISABLE_PARALLEL_TOOL_CALLS:-${DISABLE_PARALLEL_TOOL_CALLS:-0}}"
 if [[ -n "${PYTHON:-}" ]]; then
   PYTHON_BIN="$PYTHON"
 elif command -v python >/dev/null 2>&1; then
@@ -143,6 +144,8 @@ Options:
                             Enable proxy tool-output compression (default: $TOOL_OUTPUT_COMPRESSION)
   --tool-output-compression-method lzw|repair|auto
                             Aggressive compression method (default: $TOOL_OUTPUT_COMPRESSION_METHOD)
+  --disable-parallel-tool-calls
+                            Send parallel_tool_calls=false from the Python oracle client
   -h, --help                Show this help
 
 Examples:
@@ -154,6 +157,7 @@ Examples:
   $PROGRAM_NAME --suite release --runs 10 --classifier-dir target/classifier-artifacts/onnx
   $PROGRAM_NAME --suite release --runs 10 --download-classifier
   $PROGRAM_NAME --suite release --runs 10 --tool-output-compression standard
+  $PROGRAM_NAME --suite release --runs 10 --disable-parallel-tool-calls
   OPENROUTER_API_KEY=... $PROGRAM_NAME --suite smoke --runs 1 --upstream-backend openrouter --model openrouter/free
 EOF
 }
@@ -762,6 +766,9 @@ run_python_oracle() {
   if [[ "$STREAM" == "1" ]]; then
     cmd+=(--stream)
   fi
+  if [[ "$DISABLE_PARALLEL_TOOL_CALLS" == "1" ]]; then
+    cmd+=(--disable-parallel-tool-calls)
+  fi
   run_python_script "${cmd[@]}"
 }
 
@@ -893,6 +900,7 @@ resource_report=$OUTPUT_DIR/resource_baseline_report.txt
 tool_output_compression=$TOOL_OUTPUT_COMPRESSION
 tool_output_compression_method=$TOOL_OUTPUT_COMPRESSION_METHOD
 tool_output_compression_jsonl_pattern=$OUTPUT_DIR/proxy_tool_output_compression_*.jsonl
+disable_parallel_tool_calls=$DISABLE_PARALLEL_TOOL_CALLS
 EOF
   log "Metadata: $metadata"
 }
@@ -1030,6 +1038,10 @@ while [[ $# -gt 0 ]]; do
       TOOL_OUTPUT_COMPRESSION_METHOD="$(next_arg "$1" "${2:-}")"
       shift 2
       ;;
+    --disable-parallel-tool-calls)
+      DISABLE_PARALLEL_TOOL_CALLS=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -1123,6 +1135,19 @@ case "$TOOL_OUTPUT_COMPRESSION_METHOD" in
     die "--tool-output-compression-method must be lzw, repair, or auto"
     ;;
 esac
+case "$DISABLE_PARALLEL_TOOL_CALLS" in
+  0|1)
+    ;;
+  true|yes|on)
+    DISABLE_PARALLEL_TOOL_CALLS=1
+    ;;
+  false|no|off)
+    DISABLE_PARALLEL_TOOL_CALLS=0
+    ;;
+  *)
+    die "DISABLE_PARALLEL_TOOL_CALLS must be 0 or 1"
+    ;;
+esac
 if [[ "$VERIFY_FINAL_RESPONSE" == "1" && "$FINAL_RESPONSE_CLASSIFIER_MODE" == "disabled" ]]; then
   die "--verify-final-response cannot be used with --final-response-classifier-mode disabled"
 fi
@@ -1172,6 +1197,11 @@ if [[ "$UPSTREAM_BACKEND" == "openrouter" ]]; then
   log "OpenRouter API key source: $(openrouter_api_key_source)"
 fi
 log "Tool-output compression: mode=$TOOL_OUTPUT_COMPRESSION, method=$TOOL_OUTPUT_COMPRESSION_METHOD"
+if [[ "$DISABLE_PARALLEL_TOOL_CALLS" == "1" ]]; then
+  log "Python oracle parallel tool calls: disabled"
+else
+  log "Python oracle parallel tool calls: default"
+fi
 if [[ "$RESOURCE_BASELINE" == "1" ]]; then
   log "Resource baseline: enabled, interval=${RESOURCE_INTERVAL}s"
 else
