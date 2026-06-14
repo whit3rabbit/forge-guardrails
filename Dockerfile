@@ -2,7 +2,7 @@
 
 FROM rust:bookworm AS builder
 
-ARG ANYLLM_PROXY_VERSION=0.9.8
+ARG ANYLLM_PROXY_VERSION=0.9.9
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
