@@ -15,8 +15,10 @@ use crate::clients::base::{
     ApiFormat, ChunkStream, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse,
     LLMResponseEnvelope, LLMUsageDetails, SamplingParams, TokenUsage,
 };
+use crate::clients::retry;
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
+use anyllm_client::retry::RetryPolicy;
 
 /// LLM client that forwards guarded OpenAI-format calls to anyllm_proxy.
 pub struct AnyLlmProxyClient {
@@ -26,6 +28,10 @@ pub struct AnyLlmProxyClient {
     http_client: reqwest::Client,
     timeout_secs: f64,
     context_length: Option<i64>,
+    /// Retry policy for transient upstream failures (429/5xx plus connect-only
+    /// transport errors). Resolved once at construction from
+    /// `FORGE_UPSTREAM_MAX_RETRIES`; `with_max_retries` overrides the count.
+    retry_policy: RetryPolicy,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
     last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
     last_call_info: Arc<Mutex<Option<LLMCallInfo>>>,
@@ -41,6 +47,7 @@ impl AnyLlmProxyClient {
             http_client: reqwest::Client::new(),
             timeout_secs: 300.0,
             context_length: None,
+            retry_policy: retry::upstream_retry_policy(),
             last_usage: Arc::new(Mutex::new(None)),
             last_usage_details: Arc::new(Mutex::new(None)),
             last_call_info: Arc::new(Mutex::new(None)),
@@ -77,6 +84,16 @@ impl AnyLlmProxyClient {
         self
     }
 
+    /// Overrides the retry count for transient upstream failures.
+    ///
+    /// `retries` is the number of attempts beyond the first, so total attempts
+    /// are `retries + 1`. When unset, `FORGE_UPSTREAM_MAX_RETRIES` or the
+    /// conservative default applies.
+    pub fn with_max_retries(mut self, retries: usize) -> Self {
+        self.retry_policy.max_retries = retries as u32;
+        self
+    }
+
     fn build_request_body(
         &self,
         messages: Vec<Value>,
@@ -87,28 +104,30 @@ impl AnyLlmProxyClient {
         build_openai_request_body(&self.model, messages, tools, options, stream)
     }
 
-    async fn send_request(&self, body: Value) -> Result<reqwest::Response, BackendError> {
-        let mut req = self
-            .http_client
-            .post(&self.chat_completions_url)
-            .header("content-type", "application/json")
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .json(&body);
-
-        if let Some(ref key) = self.api_key {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| BackendError::new(0, e.to_string()))?;
-        let status = resp.status().as_u16() as i64;
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(BackendError::new(status, body_text));
-        }
-        Ok(resp)
+    /// Sends the request body, retrying transient upstream failures (429/5xx
+    /// plus connect-only transport errors) via the shared [`retry`] policy,
+    /// which honors `Retry-After` and applies jittered exponential backoff. The
+    /// body is serialized once and the bytes are reused across attempts.
+    async fn send_request(&self, body: &Value) -> Result<reqwest::Response, BackendError> {
+        let body_bytes =
+            serde_json::to_vec(body).map_err(|e| BackendError::new(0, e.to_string()))?;
+        retry::send_post_with_retry(
+            || {
+                let mut req = self
+                    .http_client
+                    .post(&self.chat_completions_url)
+                    .header("content-type", "application/json")
+                    .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
+                    .body(body_bytes.clone());
+                if let Some(ref key) = self.api_key {
+                    req = req.bearer_auth(key);
+                }
+                req
+            },
+            &self.retry_policy,
+            "anyllm-proxy",
+        )
+        .await
     }
 
     fn record_usage(&self, usage: Option<&anyllm_translate::openai::ChatUsage>) {
@@ -180,7 +199,7 @@ impl LLMClient for AnyLlmProxyClient {
         options: LLMRequestOptions,
     ) -> Result<LLMResponseEnvelope, BackendError> {
         let body = self.build_request_body(messages, tools, options, false);
-        let resp = self.send_request(body).await?;
+        let resp = self.send_request(&body).await?;
         let status = resp.status().as_u16() as i64;
         let headers = resp.headers().clone();
         let response_value = resp
@@ -228,7 +247,7 @@ impl LLMClient for AnyLlmProxyClient {
     ) -> Result<ChunkStream, StreamError> {
         let body = self.build_request_body(messages, tools, options, true);
         let resp = self
-            .send_request(body)
+            .send_request(&body)
             .await
             .map_err(|e| StreamError::new(e.to_string()))?;
         let call_info = sidecar_call_info(&self.model, resp.headers(), None, None);

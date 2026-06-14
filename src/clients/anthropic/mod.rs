@@ -16,6 +16,7 @@ mod tests;
 use std::sync::{Arc, Mutex};
 
 use crate::clients::base::{LLMUsageDetails, TokenUsage};
+use anyllm_client::retry::RetryPolicy;
 
 /// Client for Anthropic Messages API (Claude models).
 pub struct AnthropicClient {
@@ -25,7 +26,9 @@ pub struct AnthropicClient {
     http_client: reqwest::Client,
     max_tokens: i64,
     timeout_secs: f64,
-    max_retries: i64,
+    /// Retry policy for transient upstream failures (429/5xx plus connect-only
+    /// transport errors), shared with the other reqwest-based backend clients.
+    retry_policy: RetryPolicy,
     tool_choice: Option<String>,
     last_usage: Arc<Mutex<Option<TokenUsage>>>,
     last_usage_details: Arc<Mutex<Option<LLMUsageDetails>>>,
@@ -41,7 +44,7 @@ impl AnthropicClient {
             http_client: reqwest::Client::new(),
             max_tokens: 4096,
             timeout_secs: 300.0,
-            max_retries: 3,
+            retry_policy: crate::clients::retry::upstream_retry_policy(),
             tool_choice: None,
             last_usage: Arc::new(Mutex::new(None)),
             last_usage_details: Arc::new(Mutex::new(None)),
@@ -72,9 +75,11 @@ impl AnthropicClient {
         self
     }
 
-    /// Sets the maximum number of retries.
+    /// Sets the maximum number of retries beyond the first attempt for
+    /// transient upstream failures (429/5xx and connect-only transport errors).
+    /// Negative values are clamped to zero (no retries).
     pub fn with_max_retries(mut self, max_retries: i64) -> Self {
-        self.max_retries = max_retries;
+        self.retry_policy.max_retries = max_retries.max(0) as u32;
         self
     }
 

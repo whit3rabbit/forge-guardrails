@@ -120,7 +120,11 @@ impl HTTPServer {
             request_http::AnthropicHttpResult::Stream(events) => {
                 match response::collect_anthropic_sse_body(events).await {
                     Ok(body) => (200, "text/event-stream", body),
-                    Err(e) => request_http::upstream_error_response(e.to_string()).into_parts(),
+                    Err(e) => {
+                        let message = e.to_string();
+                        let status = crate::error::BackendError::status_from_display(&message);
+                        request_http::upstream_error_response(message, status).into_parts()
+                    }
                 }
             }
         }
@@ -194,7 +198,11 @@ impl HTTPServer {
             request_http::OpenAiHttpResult::Stream(events) => {
                 match response::collect_openai_sse_body(events).await {
                     Ok(body) => (200, "text/event-stream", body),
-                    Err(e) => request_http::upstream_error_response(e.to_string()).into_parts(),
+                    Err(e) => {
+                        let message = e.to_string();
+                        let status = crate::error::BackendError::status_from_display(&message);
+                        request_http::upstream_error_response(message, status).into_parts()
+                    }
                 }
             }
         }

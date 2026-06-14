@@ -107,9 +107,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "anyllm_batch_engine"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a33c743d3e66b8d705393bb06068cdec8d3400644fe566db99cb23c1f8a154e9"
+checksum = "34dff36842495908243ed0d6cfd5320955103d68abdf45c47aca70d9ff357b1a"
 dependencies = [
  "anyllm_translate",
  "async-trait",
@@ -130,9 +130,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_client"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a84032e9ec1d5b29cd26626d13794502e166cdc9128a38161f42672aec7b298b"
+checksum = "7fe55acf7d948b82ed22a047fb540cf1ac493578b6ce3f775d5fa668a2ad5982"
 dependencies = [
  "anyllm_translate",
  "bytes",
@@ -150,9 +150,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_providers"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edeb1d1604bcbbb23696742a6c3edb5a6d1cb2fc7e3b2746a7d0e3dfbfc8ac35"
+checksum = "323ca5e4772934c508c5241515d1d07789e9e5f4f810bdd93540f7122cee36c9"
 dependencies = [
  "serde",
  "serde_json",
@@ -160,9 +160,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_proxy"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "904845169d0bb9ba01f1ed7dce8c27dbf3d3c39dab4131cffb8fb4c561259195"
+checksum = "7400045e1a1a567b42dba03f8a4ce76ee6680466e71563856a4a6ebe1ab5944a"
 dependencies = [
  "anyllm_batch_engine",
  "anyllm_client",
@@ -207,9 +207,9 @@ dependencies = [
 
 [[package]]
 name = "anyllm_translate"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cdbc0aa59e6baab017486a461598b851b523a47ca516107be34bcba7884f3a9"
+checksum = "1178d3959104a02b0ec445dfc102e6c15698f7cada276c1d8c98f0af0fc71316"
 dependencies = [
  "serde",
  "serde_json",
@@ -1460,6 +1460,7 @@ name = "forge-guardrails"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "anyllm_client",
  "anyllm_providers",
  "anyllm_proxy",
  "anyllm_translate",

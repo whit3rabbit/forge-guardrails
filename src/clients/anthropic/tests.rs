@@ -883,3 +883,174 @@ async fn raw_anthropic_body_rebuilds_after_retry_without_cache_control() {
             > raw["messages"].as_array().expect("raw messages").len()
     );
 }
+
+#[tokio::test]
+async fn send_retries_transient_429_then_succeeds() {
+    let mut server = mockito::Server::new_async().await;
+    // First call is rate-limited; the retry succeeds. Mockito serves the 429
+    // mock once (exact expectation), then the 200 handles the retry.
+    let rate_limited = server
+        .mock("POST", "/messages")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body("rate limited")
+        .expect(1)
+        .create_async()
+        .await;
+    let ok = server
+        .mock("POST", "/messages")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "msg_retry",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-3",
+                "content": [{"type": "text", "text": "recovered"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+        .with_base_url(server.url())
+        .with_max_retries(1)
+        .with_timeout(5.0);
+    let response = client
+        .send_with_options(
+            vec![json!({"role": "user", "content": "hi"})],
+            None,
+            LLMRequestOptions::default(),
+        )
+        .await
+        .expect("retry recovers from transient 429");
+    match response {
+        LLMResponse::Text(text) => assert_eq!(text.content, "recovered"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    rate_limited.assert_async().await;
+    ok.assert_async().await;
+}
+
+#[tokio::test]
+async fn send_does_not_retry_quota_exhausted_429() {
+    let mut server = mockito::Server::new_async().await;
+    // A 429 carrying OpenAI's `insufficient_quota` code is a hard quota/credit
+    // exhaustion that will not clear by waiting. The shared retry loop must
+    // fast-fail it after exactly one attempt even with retries configured;
+    // `expect(1)` proves no retry was issued.
+    let mock = server
+        .mock("POST", "/messages")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body(
+            json!({
+                "error": {
+                    "message": "You exceeded your current quota",
+                    "type": "insufficient_quota",
+                    "code": "insufficient_quota"
+                }
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+        .with_base_url(server.url())
+        .with_max_retries(3)
+        .with_timeout(5.0);
+    let err = client
+        .send_with_options(
+            vec![json!({"role": "user", "content": "hi"})],
+            None,
+            LLMRequestOptions::default(),
+        )
+        .await
+        .expect_err("quota exhaustion 429 should fail immediately");
+    assert!(err.to_string().contains("status 429"));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn send_does_not_retry_non_retryable_status() {
+    let mut server = mockito::Server::new_async().await;
+    // A 400 is a client error and must be surfaced after exactly one attempt,
+    // even with retries configured.
+    let mock = server
+        .mock("POST", "/messages")
+        .with_status(400)
+        .with_body("bad request")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+        .with_base_url(server.url())
+        .with_max_retries(3)
+        .with_timeout(5.0);
+    let err = client
+        .send_with_options(
+            vec![json!({"role": "user", "content": "hi"})],
+            None,
+            LLMRequestOptions::default(),
+        )
+        .await
+        .expect_err("non-retryable status should fail immediately");
+    assert!(err.to_string().contains("status 400"));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn send_stream_retries_transient_429_before_stream() {
+    let mut server = mockito::Server::new_async().await;
+    let sse = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_s\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":1}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let rate_limited = server
+        .mock("POST", "/messages")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body("rate limited")
+        .expect(1)
+        .create_async()
+        .await;
+    let ok = server
+        .mock("POST", "/messages")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnthropicClient::new("claude-3", Some("test-key".to_string()))
+        .with_base_url(server.url())
+        .with_max_retries(1)
+        .with_timeout(5.0);
+    let stream = client
+        .send_stream_with_options(
+            vec![json!({"role": "user", "content": "hi"})],
+            None,
+            LLMRequestOptions::default(),
+        )
+        .await
+        .expect("stream starts after retry");
+    let chunks = collect_chunks(stream).await.expect("chunks");
+    assert!(chunks
+        .iter()
+        .any(|c| c.chunk_type == ChunkType::TextDelta && c.content == "hi"));
+    rate_limited.assert_async().await;
+    ok.assert_async().await;
+}

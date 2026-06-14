@@ -149,15 +149,26 @@ impl fmt::Debug for HandlerResult {
 pub enum HandlerError {
     /// The request is invalid or malformed.
     BadRequest(String),
-    /// Backend or guarded inference failed after the request was accepted.
+    /// Backend or guarded inference failed after the request was accepted, with
+    /// no typed upstream HTTP status (collapses to a generic 502).
     Upstream(String),
+    /// A backend request failed with a known upstream HTTP status, threaded as a
+    /// typed value so the proxy never re-parses it from the message text.
+    UpstreamStatus {
+        /// Human-readable error message.
+        message: String,
+        /// The upstream HTTP/API status code (`0` for a transport failure).
+        status: i64,
+    },
 }
 
 impl HandlerError {
     /// Returns the underlying error message.
     pub fn message(&self) -> &str {
         match self {
-            Self::BadRequest(message) | Self::Upstream(message) => message,
+            Self::BadRequest(message)
+            | Self::Upstream(message)
+            | Self::UpstreamStatus { message, .. } => message,
         }
     }
 }
@@ -173,6 +184,46 @@ impl std::error::Error for HandlerError {}
 impl From<OpenAiMessageError> for HandlerError {
     fn from(error: OpenAiMessageError) -> Self {
         Self::BadRequest(error.to_string())
+    }
+}
+
+/// Converts a terminal inference error into a [`HandlerError`], preserving the
+/// typed upstream status when it is available so the proxy never re-parses it
+/// from the message text.
+fn upstream_handler_error(err: crate::error::ForgeError) -> HandlerError {
+    use crate::error::ForgeError;
+    match &err {
+        // Non-streaming backend failures carry the status as a typed value.
+        ForgeError::Backend(backend) => HandlerError::UpstreamStatus {
+            message: backend.to_string(),
+            status: backend.status_code(),
+        },
+        // A stream-start failure arrives as a `StreamError` whose message is, by
+        // construction, "Backend error (status N): body". Recover the status
+        // here at the known upstream boundary rather than parsing arbitrary
+        // handler messages (which could embed the marker for unrelated reasons).
+        ForgeError::Stream(stream) => {
+            match crate::error::BackendError::status_from_display(&stream.message) {
+                Some(status) => HandlerError::UpstreamStatus {
+                    message: stream.to_string(),
+                    status,
+                },
+                None => HandlerError::Upstream(stream.to_string()),
+            }
+        }
+        _ => HandlerError::Upstream(err.to_string()),
+    }
+}
+
+/// Converts an upstream-boundary String error (from the no-tools passthrough,
+/// whose message is a `BackendError`/`StreamError` Display) into a
+/// [`HandlerError`], recovering the typed status from the marker when present.
+/// Passthrough messages are always genuine backend/stream errors, so this never
+/// sees a guardrail-wrapped message that could embed the marker spuriously.
+fn upstream_handler_error_from_message(message: String) -> HandlerError {
+    match crate::error::BackendError::status_from_display(&message) {
+        Some(status) => HandlerError::UpstreamStatus { message, status },
+        None => HandlerError::Upstream(message),
     }
 }
 
@@ -198,8 +249,17 @@ impl fmt::Debug for AnthropicHandlerResult {
 pub enum AnthropicHandlerError {
     /// The request is invalid or malformed.
     BadRequest(String),
-    /// An error occurred in the upstream OpenAI/inference handler.
+    /// An error occurred in the upstream OpenAI/inference handler, with no typed
+    /// upstream HTTP status (collapses to a generic 502).
     Upstream(String),
+    /// A backend request failed with a known upstream HTTP status, threaded as a
+    /// typed value so the proxy never re-parses it from the message text.
+    UpstreamStatus {
+        /// Human-readable error message.
+        message: String,
+        /// The upstream HTTP/API status code (`0` for a transport failure).
+        status: i64,
+    },
     /// An internal server or serialization error occurred.
     Internal(String),
 }
@@ -208,9 +268,10 @@ impl AnthropicHandlerError {
     /// Returns the underlying error message.
     pub fn message(&self) -> &str {
         match self {
-            Self::BadRequest(message) | Self::Upstream(message) | Self::Internal(message) => {
-                message
-            }
+            Self::BadRequest(message)
+            | Self::Upstream(message)
+            | Self::UpstreamStatus { message, .. }
+            | Self::Internal(message) => message,
         }
     }
 }
@@ -482,7 +543,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
             stream_include_usage,
         )
         .await
-        .map_err(HandlerError::Upstream);
+        .map_err(upstream_handler_error_from_message);
     }
 
     // Parse client tools strictly, then add Forge's reserved terminal tool only
@@ -572,7 +633,7 @@ pub(super) async fn handle_chat_completions_impl<C: LLMClient + 'static>(
                     usage_details.as_ref(),
                 ));
             }
-            Err(err) => return Err(HandlerError::Upstream(err.to_string())),
+            Err(err) => return Err(upstream_handler_error(err)),
         };
 
         tool_call_counter = result.tool_call_counter;

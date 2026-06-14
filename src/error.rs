@@ -478,6 +478,31 @@ impl BackendError {
         }
     }
 
+    /// Returns the HTTP/API status code carried by this error (`0` for a
+    /// transport-level failure where no HTTP response was received).
+    pub fn status_code(&self) -> i64 {
+        match self {
+            Self::Generic { status_code, .. } | Self::ThinkingNotSupported { status_code, .. } => {
+                *status_code
+            }
+        }
+    }
+
+    /// Recovers the status code from a `BackendError::Generic` Display string
+    /// (`Backend error (status N): ...`).
+    ///
+    /// This is for boundaries where an upstream error has already been flattened
+    /// to text (for example a stream-start failure surfaced as a `StreamError`).
+    /// Typed call sites use [`BackendError::status_code`] instead, so this parser
+    /// is never applied to arbitrary wrapped messages.
+    pub fn status_from_display(message: &str) -> Option<i64> {
+        let marker = "Backend error (status ";
+        let start = message.find(marker)? + marker.len();
+        let rest = &message[start..];
+        let end = rest.find(')')?;
+        rest[..end].trim().parse::<i64>().ok()
+    }
+
     /// Creates a `ThinkingNotSupported` backend error.
     pub fn thinking_not_supported(model: impl Into<String>) -> Self {
         Self::ThinkingNotSupported {
@@ -517,5 +542,46 @@ impl Default for StreamError {
 impl fmt::Display for StreamError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_code_reads_both_variants() {
+        assert_eq!(BackendError::new(429, "x").status_code(), 429);
+        assert_eq!(BackendError::new(0, "x").status_code(), 0);
+        assert_eq!(BackendError::thinking_not_supported("m").status_code(), 400);
+    }
+
+    #[test]
+    fn status_from_display_recovers_marker() {
+        assert_eq!(
+            BackendError::status_from_display(
+                "Backend error (status 429): {\"error\":\"rate limited\"}"
+            ),
+            Some(429)
+        );
+        assert_eq!(
+            BackendError::status_from_display("Backend error (status 503): boom"),
+            Some(503)
+        );
+        // The round-trip is exact: building the Display and parsing it back.
+        let display = BackendError::new(504, "gateway timeout").to_string();
+        assert_eq!(BackendError::status_from_display(&display), Some(504));
+    }
+
+    #[test]
+    fn status_from_display_ignores_unmarked_messages() {
+        assert_eq!(
+            BackendError::status_from_display("model failed guarded tool-call validation"),
+            None
+        );
+        assert_eq!(
+            BackendError::status_from_display("some other failure"),
+            None
+        );
     }
 }

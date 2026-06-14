@@ -1189,6 +1189,59 @@ async fn handle_no_tools_passthrough() {
     }
 }
 
+struct MockUpstreamErrorClient {
+    status: i64,
+}
+
+impl LLMClient for MockUpstreamErrorClient {
+    fn api_format(&self) -> ApiFormat {
+        ApiFormat::OpenAI
+    }
+    async fn send(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<LLMResponse, crate::error::BackendError> {
+        Err(crate::error::BackendError::new(self.status, "rate limited"))
+    }
+    async fn send_stream(
+        &self,
+        _messages: Vec<Value>,
+        _tools: Option<Vec<ToolSpec>>,
+        _sampling: Option<SamplingParams>,
+    ) -> Result<ChunkStream, crate::error::StreamError> {
+        Err(crate::error::StreamError::new(format!(
+            "Backend error (status {}): rate limited",
+            self.status
+        )))
+    }
+    async fn get_context_length(&self) -> Result<Option<i64>, crate::error::ContextDiscoveryError> {
+        Ok(Some(4096))
+    }
+}
+
+#[tokio::test]
+async fn no_tools_passthrough_preserves_upstream_status() {
+    // A no-tools passthrough that fails upstream must surface the typed status
+    // (so the proxy returns 429, not a generic 502), without re-parsing the
+    // status from prose in the response layer.
+    let body = json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "test-model",
+        "stream": false
+    });
+    let client = Arc::new(MockUpstreamErrorClient { status: 429 });
+    let ctx = Arc::new(Mutex::new(dummy_ctx()));
+    let err = handle_chat_completions(&body, &client, &ctx, 3, true)
+        .await
+        .expect_err("upstream 429 should surface");
+    match err {
+        HandlerError::UpstreamStatus { status, .. } => assert_eq!(status, 429),
+        other => panic!("expected UpstreamStatus, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn handle_no_tools_forwards_passthrough_options_and_usage() {
     let body = json!({

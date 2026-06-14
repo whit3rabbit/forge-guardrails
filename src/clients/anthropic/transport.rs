@@ -75,30 +75,29 @@ impl LLMClient for AnthropicClient {
 
         let extra_headers = options.anthropic_headers.clone();
         let body = self.build_body_with_options(messages, tools, options, false);
+        let body_bytes =
+            serde_json::to_vec(&body).map_err(|e| BackendError::new(0, e.to_string()))?;
+        let url = format!("{}/messages", self.base_url);
 
-        let mut req = self
-            .http_client
-            .post(format!("{}/messages", self.base_url))
-            .header("content-type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .json(&body);
-
-        if let Some(ref key) = self.api_key {
-            req = req.header("x-api-key", key.as_str());
-        }
-        req = apply_anthropic_extra_headers(req, extra_headers.as_deref());
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| BackendError::new(0, e.to_string()))?;
+        let resp = crate::clients::retry::send_post_with_retry(
+            || {
+                let mut req = self
+                    .http_client
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .header("anthropic-version", "2023-06-01")
+                    .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
+                    .body(body_bytes.clone());
+                if let Some(ref key) = self.api_key {
+                    req = req.header("x-api-key", key.as_str());
+                }
+                apply_anthropic_extra_headers(req, extra_headers.as_deref())
+            },
+            &self.retry_policy,
+            "anthropic",
+        )
+        .await?;
         let status = resp.status().as_u16() as i64;
-
-        if !resp.status().is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(BackendError::new(status, body_text));
-        }
 
         let response_json: Value = resp
             .json()
@@ -147,33 +146,31 @@ impl LLMClient for AnthropicClient {
 
         let extra_headers = options.anthropic_headers.clone();
         let body = self.build_body_with_options(messages, tools, options, true);
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| StreamError::new(e.to_string()))?;
+        let url = format!("{}/messages", self.base_url);
 
-        let mut req = self
-            .http_client
-            .post(format!("{}/messages", self.base_url))
-            .header("content-type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
-            .json(&body);
-
-        if let Some(ref key) = self.api_key {
-            req = req.header("x-api-key", key.as_str());
-        }
-        req = apply_anthropic_extra_headers(req, extra_headers.as_deref());
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| StreamError::new(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16() as i64;
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(StreamError::new(format!(
-                "Backend error (status {}): {}",
-                status, body_text
-            )));
-        }
+        // The shared retry helper returns a `BackendError` whose Display is
+        // "Backend error (status N): body"; routing it through `StreamError`
+        // preserves the marker the proxy uses to recover the upstream status.
+        let resp = crate::clients::retry::send_post_with_retry(
+            || {
+                let mut req = self
+                    .http_client
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .header("anthropic-version", "2023-06-01")
+                    .timeout(std::time::Duration::from_secs_f64(self.timeout_secs))
+                    .body(body_bytes.clone());
+                if let Some(ref key) = self.api_key {
+                    req = req.header("x-api-key", key.as_str());
+                }
+                apply_anthropic_extra_headers(req, extra_headers.as_deref())
+            },
+            &self.retry_policy,
+            "anthropic",
+        )
+        .await
+        .map_err(|e| StreamError::new(e.to_string()))?;
 
         // Incremental SSE streaming aligned with Python AnthropicClient.send_stream().
         // Tracks:

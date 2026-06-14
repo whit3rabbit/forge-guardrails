@@ -619,6 +619,9 @@ Preserve these invariants:
 - Keep `TokenUsage` token-only. Surface anyllm provider metadata, rate limits, warnings, cache state, and estimated cost through `LLMResponseEnvelope::call_info`, `StreamChunk::call_info`, and compatibility `LLMClient::last_call_info()`.
 - Async proxy and runner classifier paths must use `ScoringPipeline` / `ScoringExecutor`; do not call blocking scorer traits directly on Tokio worker threads.
 - Treat anyllm pricing-derived cost as observability, not billing authority.
+- `src/proxy/request_http.rs` is `include!`d into BOTH the lib (`server/request_handlers.rs`) and the bin (`bin/forge-guardrails-proxy/routes/handlers.rs`). Inside it, `crate::`-absolute paths resolve per-crate and break the bin build (e.g. `crate::error` becomes unresolved). Put shared helpers it needs on a type (e.g. on `BackendError`) or rely on the `mod request_http { use ...; include!(...) }` wrapper's injected `use`, not new `crate::` paths.
+- Upstream HTTP retry for reqwest-based backend clients (anyllm sidecar, Anthropic) goes through `crate::clients::retry::send_post_with_retry`, which reuses `anyllm_client::retry` (retries 408/429/5xx plus connect-only transport errors, never timeouts). Count is `FORGE_UPSTREAM_MAX_RETRIES`. Do not hand-roll backoff/jitter/`Retry-After` parsing.
+- The proxy threads the real upstream status as a typed value via `HandlerError::UpstreamStatus`; `client_status_for_upstream` passes 429/503/504 through to clients, else 502. Recover a status from the `BackendError` Display marker (`Backend error (status N): body`) only at upstream boundaries via `BackendError::status_from_display` (also mirrored by the `scripts/summarize_proxy_eval.py` regex), never by scanning arbitrary handler messages.
 
 When changing workflow execution:
 1. Add or update tests first.

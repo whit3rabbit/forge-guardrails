@@ -10,6 +10,8 @@ pub mod base;
 pub mod llamafile;
 /// Ollama client implementation.
 pub mod ollama;
+/// Shared retry policy for transient upstream HTTP failures.
+pub mod retry;
 /// Model sampling defaults management.
 pub mod sampling;
 

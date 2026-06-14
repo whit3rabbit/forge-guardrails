@@ -453,7 +453,10 @@ async fn anyllm_proxy_client_reports_upstream_error() {
         .create_async()
         .await;
 
-    let client = AnyLlmProxyClient::new("gpt-4o-mini").with_base_url(server.url());
+    // Pin a single attempt so this asserts error surfacing, not retry behavior.
+    let client = AnyLlmProxyClient::new("gpt-4o-mini")
+        .with_base_url(server.url())
+        .with_max_retries(0);
     let err = client
         .send(
             vec![json!({"role": "user", "content": "hello"})],
@@ -465,6 +468,165 @@ async fn anyllm_proxy_client_reports_upstream_error() {
 
     assert!(err.to_string().contains("status 429"));
     assert!(err.to_string().contains("rate limited"));
+}
+
+#[tokio::test]
+async fn anyllm_proxy_client_retries_transient_429_then_succeeds() {
+    let mut server = mockito::Server::new_async().await;
+    // First call is rate-limited, the retry succeeds. Mocks with an exact
+    // expectation are skipped once exhausted, so the 200 handles the retry.
+    let rate_limited = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body("rate limited")
+        .expect(1)
+        .create_async()
+        .await;
+    let ok = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-retry",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o-mini",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "recovered"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string(),
+        )
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini")
+        .with_base_url(server.url())
+        .with_max_retries(1);
+    let response = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("retry recovers from transient 429");
+
+    match response {
+        LLMResponse::Text(text) => assert_eq!(text.content, "recovered"),
+        other => panic!("expected text response, got {other:?}"),
+    }
+    rate_limited.assert_async().await;
+    ok.assert_async().await;
+}
+
+#[tokio::test]
+async fn anyllm_proxy_client_retries_transient_429_before_stream() {
+    let mut server = mockito::Server::new_async().await;
+    let sse = concat!(
+        "data:{\"id\":\"chatcmpl-retry-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+        "data:[DONE]\n\n"
+    );
+    let rate_limited = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body("rate limited")
+        .expect(1)
+        .create_async()
+        .await;
+    let ok = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini")
+        .with_base_url(server.url())
+        .with_max_retries(1);
+    let mut stream = client
+        .send_stream(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("stream starts after retry");
+
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        chunks.push(chunk.expect("stream chunk"));
+    }
+    assert_eq!(chunks[0].chunk_type, ChunkType::TextDelta);
+    assert_eq!(chunks[0].content, "hi");
+    rate_limited.assert_async().await;
+    ok.assert_async().await;
+}
+
+#[tokio::test]
+async fn anyllm_proxy_client_does_not_retry_non_retryable_status() {
+    let mut server = mockito::Server::new_async().await;
+    // A 400 is a client error; it must be surfaced after exactly one attempt.
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(400)
+        .with_body("bad request")
+        .expect(1)
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini")
+        .with_base_url(server.url())
+        .with_max_retries(3);
+    let err = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect_err("non-retryable status should fail immediately");
+
+    assert!(err.to_string().contains("status 400"));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn anyllm_proxy_client_exhausts_retries_then_surfaces_error() {
+    let mut server = mockito::Server::new_async().await;
+    // Always rate-limited: every attempt hits this mock.
+    let mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(429)
+        .with_header("retry-after", "0")
+        .with_body("rate limited")
+        .expect(3)
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("gpt-4o-mini")
+        .with_base_url(server.url())
+        .with_max_retries(2);
+    let err = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect_err("persistent 429 should fail after retries");
+
+    assert!(err.to_string().contains("status 429"));
+    mock.assert_async().await;
 }
 
 #[tokio::test]

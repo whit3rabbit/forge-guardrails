@@ -20,6 +20,9 @@ fn chat_error_to_anthropic(error: HandlerError) -> AnthropicHandlerError {
     match error {
         HandlerError::BadRequest(message) => AnthropicHandlerError::BadRequest(message),
         HandlerError::Upstream(message) => AnthropicHandlerError::Upstream(message),
+        HandlerError::UpstreamStatus { message, status } => {
+            AnthropicHandlerError::UpstreamStatus { message, status }
+        }
     }
 }
 

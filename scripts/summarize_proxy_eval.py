@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -42,12 +43,45 @@ def _rate(count: int, total: int) -> str:
     return f"{(count / total) * 100:.1f}%"
 
 
+def _upstream_status_from_message(message: Any) -> str | None:
+    """Extract the upstream status from a wrapped proxy/backend error message.
+
+    Backend adapters format failures as ``Backend error (status N)``; the proxy
+    wraps that for the client. Surfacing N (e.g. 429 rate-limit) lets the summary
+    distinguish API rate-limits from real gateway/server failures.
+    """
+    if not isinstance(message, str):
+        return None
+    # `\d+` (not `\d{3}`) matches the Rust-side parser, which accepts any-length
+    # status (including the synthetic `0` used for transport failures).
+    match = re.search(r"Backend error \(status (\d+)\)", message)
+    return match.group(1) if match else None
+
+
+def _enrich_with_upstream_status(name: str, row: dict[str, Any]) -> str:
+    """Append the upstream status to an HTTP-exception failure name.
+
+    Turns a bare ``HTTPStatusError`` into ``HTTPStatusError(429)`` so the summary
+    separates upstream rate-limits from real gateway/server failures. Only the
+    ``error_type`` branch uses this: proxy classifications (``tool_loop`` etc.)
+    are never HTTP statuses, so enriching them would mislabel them. No-op when
+    the name is already qualified or no status is present.
+    """
+    if "(" in name:
+        return name
+    upstream_status = _upstream_status_from_message(row.get("error_message"))
+    return f"{name}({upstream_status})" if upstream_status else name
+
+
 def _classification(row: dict[str, Any]) -> str | None:
     existing = row.get("proxy_failure_classification")
     if existing and str(existing) != "accuracy_false":
         return str(existing)
     if not row.get("completeness"):
-        return str(row.get("error_type") or "incomplete")
+        error_type = row.get("error_type")
+        if not error_type:
+            return "incomplete"
+        return _enrich_with_upstream_status(str(error_type), row)
     if _required_step_mismatch(row):
         return "proxy_contract_mismatch"
     if row.get("accuracy") is not False:

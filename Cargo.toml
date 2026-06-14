@@ -34,9 +34,10 @@ regex-lite = "0.1"
 async-stream = "0.3"
 axum = { version = "0.7", features = ["macros"] }
 anyhow = "1"
-anyllm_translate = "0.9.8"
-anyllm_proxy = "0.9.8"
-anyllm_providers = "0.9.8"
+anyllm_translate = "0.9.9"
+anyllm_proxy = "0.9.9"
+anyllm_providers = "0.9.9"
+anyllm_client = "0.9.9"
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.29", features = ["signal", "process"] }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "api-24", "tls-rustls"], optional = true }
