@@ -141,13 +141,45 @@ See [Backend Setup](docs/BACKEND_SETUP.md) for full instructions.
 
 ## Quick Start
 
-Start llama-server in a separate shell. Download the recommended model from [HuggingFace](https://huggingface.co/bartowski/mistralai_Ministral-3-8B-Instruct-2512-GGUF/blob/main/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf) first:
+Run the proxy server as a reliability layer between your client agent and the LLM backend.
 
+- **Run the proxy** on default port `8081` pointing to your local LLM backend:
+  ```bash
+  forge-guardrails-proxy --backend-url http://localhost:8080
+  ```
+- **Run on a different port** by specifying the `--port` flag:
+  ```bash
+  forge-guardrails-proxy --backend-url http://localhost:8080 --port 9090
+  ```
+- **Run with tool-output compression** using the `--tool-output-compression` flag to automatically compress prior tool results:
+  ```bash
+  forge-guardrails-proxy --backend-url http://localhost:8080 --tool-output-compression standard
+  ```
+- **Run with classifier/validator** using the `--classify` flag to score model tool calls against the verifier ONNX model:
+  ```bash
+  forge-guardrails-proxy --backend-url http://localhost:8080 --classify
+  ```
+
+### Client & Backend Integration
+
+Configure your agent clients or model backends to route through the proxy.
+
+#### Claude Code Env Variables
+Set the Anthropic base URL environment variable to point to the proxy:
 ```bash
-llama-server -m path/to/mistralai_Ministral-3-8B-Instruct-2512-Q8_0.gguf --jinja -ngl 999 --port 8080
+export ANTHROPIC_BASE_URL="http://localhost:8081"
+export ANTHROPIC_API_KEY="dummy"  # Or your actual key if proxying to Anthropic
 ```
 
-Then use the `WorkflowRunner` in your Rust code:
+#### Backends (llama-server / LM Studio / Ollama)
+Point the proxy's `--backend-url` to your running model server:
+- **llama-server** (default port 8080): `--backend-url http://localhost:8080`
+- **LM Studio** (default port 1234): `--backend-url http://localhost:1234`
+- **Ollama** (default port 11434): `--backend-url http://localhost:11434`
+
+### Library Usage (Rust)
+
+For direct library integration, use the `WorkflowRunner` in your Rust code:
 
 ```rust
 use forge_guardrails::{
