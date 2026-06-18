@@ -11,8 +11,9 @@ use tokio::sync::Mutex as TokioMutex;
 
 use forge_guardrails::{
     handle_anthropic_messages_with_scorers_tool_controls_and_headers,
-    handle_chat_completions_with_scorers_and_tool_controls, ContextManager, FinalResponseScorer,
-    LLMClient, NoCompact, ToolCallScorer, ToolOutputCompressionState,
+    handle_chat_completions_with_scorers_and_tool_controls, redact_proxy_request_inputs,
+    ContextManager, FinalResponseScorer, LLMClient, NoCompact, SecretRedactionError,
+    ToolCallScorer, ToolOutputCompressionState,
 };
 
 use super::AppState;
@@ -63,10 +64,15 @@ pub async fn models(State(state): State<AppState>) -> Response {
 
 /// Handler for the `/v1/chat/completions` endpoint.
 pub async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
-    let parsed = match request_http::parse_openai_body(body.as_ref()) {
+    let mut parsed = match request_http::parse_openai_body(body.as_ref()) {
         Ok(value) => value,
         Err(response) => return build_http_response(response),
     };
+    if state.config.redact_secrets {
+        if let Err(err) = redact_proxy_request_inputs(&mut parsed) {
+            return redaction_error_response(err);
+        }
+    }
     let model = match select_request_model(&parsed, &state.config) {
         Ok(model) => model,
         Err(err) => return missing_model_response(err),
@@ -113,10 +119,19 @@ pub async fn anthropic_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let request = match request_http::parse_anthropic_body(body.as_ref()) {
+    let mut request = match request_http::parse_anthropic_body(body.as_ref()) {
         Ok(request) => request,
         Err(response) => return build_http_response(response),
     };
+    if state.config.redact_secrets {
+        if let Err(err) = redact_proxy_request_inputs(&mut request.raw) {
+            return redaction_error_response(err);
+        }
+        request.parsed = match request_http::parse_anthropic_request_value(&request.raw) {
+            Ok(parsed) => parsed,
+            Err(response) => return build_http_response(response),
+        };
+    }
     let model = match select_request_model(&request.raw, &state.config) {
         Ok(model) => model,
         Err(err) => return missing_model_response(err),
@@ -142,10 +157,19 @@ pub(crate) async fn anthropic_messages_with_client<C: LLMClient + 'static>(
     client: Arc<C>,
     body: Bytes,
 ) -> Response {
-    let request = match request_http::parse_anthropic_body(body.as_ref()) {
+    let mut request = match request_http::parse_anthropic_body(body.as_ref()) {
         Ok(request) => request,
         Err(response) => return build_http_response(response),
     };
+    if config.redact_secrets {
+        if let Err(err) = redact_proxy_request_inputs(&mut request.raw) {
+            return redaction_error_response(err);
+        }
+        request.parsed = match request_http::parse_anthropic_request_value(&request.raw) {
+            Ok(parsed) => parsed,
+            Err(response) => return build_http_response(response),
+        };
+    }
     anthropic_messages_with_request_client(
         config,
         request_mutex,
@@ -273,6 +297,14 @@ fn select_request_model(value: &Value, config: &ProxyConfig) -> Result<String, &
 
 fn missing_model_response(err: &str) -> Response {
     build_response(400, "application/json", json!({"error": err}).to_string())
+}
+
+fn redaction_error_response(err: SecretRedactionError) -> Response {
+    build_response(
+        err.http_status(),
+        "application/json",
+        json!({"error": err.to_string()}).to_string(),
+    )
 }
 
 fn request_model_from_value(value: &Value) -> Option<String> {

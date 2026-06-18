@@ -23,6 +23,9 @@ use super::AppState;
 use crate::client::ClientFactory;
 use crate::config::ProxyConfig;
 
+#[cfg(feature = "secrets-scanner")]
+const SECRET: &str = "ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde";
+
 fn test_config() -> Arc<ProxyConfig> {
     Arc::new(ProxyConfig {
         host: "127.0.0.1".to_string(),
@@ -46,6 +49,7 @@ fn test_config() -> Arc<ProxyConfig> {
         tool_output_compression: ToolOutputCompressionConfig::disabled(),
         tool_call_policy: ToolCallPolicyConfig::disabled(),
         schema_compression: SchemaCompressionMode::Disabled,
+        redact_secrets: false,
     })
 }
 
@@ -56,11 +60,35 @@ fn test_config_without_default_model() -> Arc<ProxyConfig> {
     Arc::new(config)
 }
 
+#[cfg(feature = "secrets-scanner")]
+fn test_config_with_secret_redaction() -> Arc<ProxyConfig> {
+    let mut config = (*test_config()).clone();
+    config.redact_secrets = true;
+    Arc::new(config)
+}
+
 fn test_state() -> AppState {
     AppState {
         config: test_config(),
         client_factory: Arc::new(ClientFactory::DirectOpenAi {
             base_url: "http://127.0.0.1:9".to_string(),
+            api_key: None,
+            http_client: reqwest::Client::new(),
+            context_tokens: 8192,
+        }),
+        request_mutex: Arc::new(TokioMutex::new(())),
+        scorer: None,
+        final_response_scorer: None,
+        tool_output_state: Arc::new(forge_guardrails::ToolOutputCompressionState::new()),
+    }
+}
+
+#[cfg(feature = "secrets-scanner")]
+fn test_state_with_secret_redaction(base_url: String) -> AppState {
+    AppState {
+        config: test_config_with_secret_redaction(),
+        client_factory: Arc::new(ClientFactory::DirectOpenAi {
+            base_url,
             api_key: None,
             http_client: reqwest::Client::new(),
             context_tokens: 8192,
@@ -368,6 +396,100 @@ async fn external_backend_uses_request_model() {
     );
 
     let response = chat_completions(State(state), body).await;
+
+    assert_eq!(response.status().as_u16(), 200);
+}
+
+#[cfg(feature = "secrets-scanner")]
+#[tokio::test]
+async fn openai_route_redacts_messages_before_upstream_when_enabled() {
+    let mut upstream = mockito::Server::new_async().await;
+    let _mock = upstream
+        .mock("POST", "/v1/chat/completions")
+        .match_body(mockito::Matcher::Json(json!({
+            "model": "request-model",
+            "messages": [{"role": "user", "content": "leaked [REDACTED_SECRET]"}],
+            "stream": false
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-redacted",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "request-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }]
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let body = Bytes::from(
+        json!({
+            "model": "request-model",
+            "messages": [{"role": "user", "content": format!("leaked {SECRET}")}],
+            "stream": false
+        })
+        .to_string(),
+    );
+
+    let response = chat_completions(
+        State(test_state_with_secret_redaction(upstream.url())),
+        body,
+    )
+    .await;
+
+    assert_eq!(response.status().as_u16(), 200);
+}
+
+#[cfg(feature = "secrets-scanner")]
+#[tokio::test]
+async fn anthropic_route_redacts_raw_body_before_provider_preserving_upstream() {
+    let mut upstream = mockito::Server::new_async().await;
+    let _mock = upstream
+        .mock("POST", "/v1/chat/completions")
+        .match_body(mockito::Matcher::Regex(
+            r#""content"\s*:\s*"leaked \[REDACTED_SECRET\]""#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-redacted-anthropic",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "claude-test",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+    let body = Bytes::from(
+        json!({
+            "model": "claude-test",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": format!("leaked {SECRET}")}]}]
+        })
+        .to_string(),
+    );
+
+    let response = anthropic_messages(
+        State(test_state_with_secret_redaction(upstream.url())),
+        HeaderMap::new(),
+        body,
+    )
+    .await;
 
     assert_eq!(response.status().as_u16(), 200);
 }

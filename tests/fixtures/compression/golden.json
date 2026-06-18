@@ -4,8 +4,9 @@
       "name": "safe_redacts_secret",
       "mode": "safe",
       "tool": "bash",
-      "input": "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\n",
-      "expected_output": "OPENAI_[REDACTED_SECRET]\n",
+      "input": "OPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde\n",
+      "expected_output": "OPENAI_API_KEY=[REDACTED_SECRET]\n",
+      "expected_output_no_secrets_scanner": "OPENAI_[REDACTED_SECRET]\n",
       "expected_strategies": ["redact_secrets"]
     },
     {

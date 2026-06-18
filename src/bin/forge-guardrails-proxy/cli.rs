@@ -158,6 +158,10 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "disabled|minify")]
     pub(crate) schema_compression: Option<String>,
 
+    /// Redact secrets from proxy-bound input before sending upstream.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub(crate) redact_secrets: bool,
+
     /// Disable rescue parsing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_rescue: bool,
@@ -258,6 +262,7 @@ mod tests {
         assert_eq!(cli.reasoning_format, None);
         assert_eq!(cli.mode, CliMode::Native);
         assert_eq!(cli.backend_protocol, CliBackendProtocol::Openai);
+        assert!(!cli.redact_secrets);
         assert!(!cli.serialize);
         assert!(!cli.no_serialize);
         assert!(!cli.no_rescue);

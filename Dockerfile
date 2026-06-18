@@ -38,6 +38,7 @@ COPY docker/entrypoint.sh /usr/local/bin/forge-docker-entrypoint
 ENV FORGE_HOST=0.0.0.0
 ENV FORGE_PORT=8081
 ENV ANYLLM_HOME=/var/lib/forge/anyllm
+ENV FORGE_TOOL_OUTPUT_COMPRESSION=standard
 
 USER forge
 EXPOSE 8081

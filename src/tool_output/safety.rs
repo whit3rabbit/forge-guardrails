@@ -1,4 +1,4 @@
-use super::{preserve_trailing_newline, ToolOutputCompressionConfig};
+use super::ToolOutputCompressionConfig;
 use regex_lite::Regex;
 use std::sync::LazyLock;
 
@@ -70,57 +70,11 @@ pub(super) fn apply_safe_filters(
     }
 }
 
-static SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        // Also covers sk-ant- prefixed keys.
-        r#"sk-[A-Za-z0-9_-]{20,}"#,
-        r#"gh[pousr]_[A-Za-z0-9_]{20,}"#,
-        r#"github_pat_[A-Za-z0-9_]{20,}"#,
-        r#"xox[abprs]-[A-Za-z0-9-]{10,}"#,
-        r#"AKIA[0-9A-Z]{16}"#,
-        r#"(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\s*[:=]\s*["']?[^"'\s]{8,}"#,
-        r#"(?i)(postgres|mysql|mongodb|redis)://[^ \n\r\t]+"#,
-    ]
-    .iter()
-    .map(|pattern| Regex::new(pattern).expect("valid secret regex"))
-    .collect()
-});
-
 static ANSI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"\x1b\[[0-9;?]*[ -/]*[@-~]"#).expect("valid ansi regex"));
 
 pub(crate) fn redact_secrets(output: &str) -> String {
-    let mut redacted = output.to_string();
-    for pattern in SECRET_PATTERNS.iter() {
-        redacted = pattern
-            .replace_all(&redacted, "[REDACTED_SECRET]")
-            .to_string();
-    }
-    redact_private_key_blocks(&redacted)
-}
-
-fn redact_private_key_blocks(output: &str) -> String {
-    let mut result = Vec::new();
-    let mut in_private_key = false;
-    for line in output.lines() {
-        if line.contains("-----BEGIN") && line.contains("PRIVATE KEY-----") {
-            if !in_private_key {
-                result.push("[REDACTED_PRIVATE_KEY]".to_string());
-            }
-            // A single-line BEGIN...END key must not open a block that
-            // swallows the rest of the output.
-            in_private_key = !line.contains("-----END");
-            continue;
-        }
-        if in_private_key {
-            if line.contains("-----END") && line.contains("PRIVATE KEY-----") {
-                in_private_key = false;
-            }
-            continue;
-        }
-        result.push(line.to_string());
-    }
-    preserve_trailing_newline(output, result.join("\n"))
+    crate::secret_redaction::redact_text_best_effort(output)
 }
 
 fn looks_binary(output: &str) -> bool {

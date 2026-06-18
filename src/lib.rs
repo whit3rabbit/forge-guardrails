@@ -21,6 +21,8 @@ pub mod prompts;
 pub mod proxy;
 /// Opt-in tool schema description compression for proxy-intercepted requests.
 pub mod schema_compression;
+/// Default-on secret redaction for proxy-bound request inputs.
+pub mod secret_redaction;
 /// In-process server backend manager.
 pub mod server;
 /// Tool-output compression for proxy-forwarded tool result messages.
@@ -120,6 +122,10 @@ pub use proxy::{
 pub use schema_compression::{
     compress_tool_schemas, patch_anthropic_tool_schemas, SchemaCompressionMode,
     SchemaCompressionStats,
+};
+pub use secret_redaction::{
+    redact_proxy_request_inputs, SecretRedactionError, SecretRedactionSummary,
+    SECRET_REDACTION_MARKER,
 };
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tool_output::{

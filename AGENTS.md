@@ -276,7 +276,7 @@ forge-guardrails-proxy \
 ```
 
 - `--tool-output-compression` accepts `disabled`, `safe`, `standard`, or
-  `aggressive`. Default is `disabled`.
+  `aggressive`. Default is `standard`.
 - `--tool-output-compression-method` accepts `lzw`, `repair`, or `auto`.
   Default is `lzw` and the method is used only by `aggressive`.
 - Environment equivalents are `FORGE_TOOL_OUTPUT_COMPRESSION` and
@@ -284,7 +284,7 @@ forge-guardrails-proxy \
 - Request override lives under `_forge.tool_output_compression`; object form
   supports `mode`, `method`, `session_id`, `dedup`, `redact_secrets`, and
   `max_output_bytes`.
-- Compression must remain opt-in and must mutate only prior tool-result
+- Compression is enabled by default (standard mode) and must mutate only prior tool-result
   content. Do not compress tool calls, tool IDs, tool names, tool arguments, or
   final responses. Preserve tool-call/tool-result pairing.
 - Do not add runtime dependencies for compression without an explicit need.

@@ -48,10 +48,15 @@ pub(super) fn parse_anthropic_body(
     ensure_body_size(body)?;
     let raw: Value =
         serde_json::from_slice(body).map_err(|err| bad_request_response(err.to_string()))?;
-    let parsed_value = anthropic_parse_compat_body(&raw);
-    let parsed =
-        serde_json::from_value(parsed_value).map_err(|err| bad_request_response(err.to_string()))?;
+    let parsed = parse_anthropic_request_value(&raw)?;
     Ok(ParsedAnthropicRequest { raw, parsed })
+}
+
+pub(super) fn parse_anthropic_request_value(
+    raw: &Value,
+) -> Result<MessageCreateRequest, JsonHttpResponse> {
+    let parsed_value = anthropic_parse_compat_body(raw);
+    serde_json::from_value(parsed_value).map_err(|err| bad_request_response(err.to_string()))
 }
 
 fn anthropic_parse_compat_body(raw: &Value) -> Value {

@@ -68,3 +68,6 @@ notebook/jsonl/proxy_*.jsonl
 notebook/jsonl/rust_smoke.jsonl
 notebook/jsonl/*_report.txt
 notebook/jsonl/*_summary.txt
+
+.mcp.json
+.agent-config-mcp.json

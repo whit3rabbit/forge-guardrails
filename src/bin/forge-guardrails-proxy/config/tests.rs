@@ -30,6 +30,7 @@ fn sample_config() -> ProxyConfig {
         tool_output_compression: ToolOutputCompressionConfig::disabled(),
         tool_call_policy: ToolCallPolicyConfig::disabled(),
         schema_compression: SchemaCompressionMode::Disabled,
+        redact_secrets: false,
     }
 }
 
@@ -75,9 +76,10 @@ fn env_fallback_accepts_safe_cli_overrides() {
     assert_eq!(config.final_response_classifier_max_latency_ms, None);
     assert_eq!(
         config.tool_output_compression.mode,
-        ToolOutputCompressionMode::Disabled
+        ToolOutputCompressionMode::Standard
     );
     assert_eq!(config.tool_call_policy.mode, ToolCallPolicyMode::Disabled);
+    assert!(!config.redact_secrets);
 }
 
 #[test]
@@ -167,6 +169,43 @@ fn tool_output_compression_cli_rejects_invalid_method() {
     let err = apply_env_cli_overrides(&mut config, &cli).expect_err("invalid method");
 
     assert!(err.contains("method must be lzw, repair, or auto"));
+}
+
+#[cfg(feature = "secrets-scanner")]
+#[test]
+fn redact_secrets_cli_override_sets_process_default() {
+    let cli = parse(&["--redact-secrets"]);
+    let mut config = sample_config();
+
+    apply_env_cli_overrides(&mut config, &cli).expect("overrides");
+
+    assert!(config.redact_secrets);
+}
+
+#[cfg(not(feature = "secrets-scanner"))]
+#[test]
+fn redact_secrets_cli_override_rejects_without_feature() {
+    let cli = parse(&["--redact-secrets"]);
+    let mut config = sample_config();
+
+    let err = apply_env_cli_overrides(&mut config, &cli).expect_err("missing feature");
+
+    assert!(err.contains("requires building with the `secrets-scanner` feature"));
+}
+
+#[test]
+fn redact_secrets_env_value_parses_bool() {
+    assert!(redact_secrets_from_env_value(Some("true".to_string())).expect("true"));
+    assert!(redact_secrets_from_env_value(Some("1".to_string())).expect("1"));
+    assert!(!redact_secrets_from_env_value(Some("false".to_string())).expect("false"));
+    assert!(!redact_secrets_from_env_value(None).expect("missing"));
+}
+
+#[test]
+fn redact_secrets_env_value_rejects_invalid_bool() {
+    let err = redact_secrets_from_env_value(Some("maybe".to_string())).expect_err("invalid");
+
+    assert!(err.contains("FORGE_REDACT_SECRETS must be true or false"));
 }
 
 #[test]

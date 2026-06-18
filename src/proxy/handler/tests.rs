@@ -180,7 +180,7 @@ async fn tool_output_compression_log_sink_writes_strategy_events() {
 
 #[test]
 fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
-    let raw_output = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz";
+    let raw_output = "OPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde";
     let mut args = IndexMap::new();
     args.insert("command".to_string(), json!("cargo test"));
     let request_debug = json!({
@@ -239,7 +239,7 @@ fn tool_output_compression_event_excludes_raw_output_and_includes_strategies() {
     assert_eq!(event["request"], request_debug);
     assert!(event.get("dictionary_method").is_none());
     let wire = serde_json::to_string(&event).expect("event json");
-    assert!(!wire.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    assert!(!wire.contains("ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde"));
     assert!(!wire.contains("[REDACTED_SECRET]"));
 }
 
@@ -277,7 +277,10 @@ fn tool_output_compression_event_fingerprints_args_after_redaction() {
     };
 
     let mut secret_args = IndexMap::new();
-    secret_args.insert("token".to_string(), json!("sk-abcdefghijklmnopqrstuvwxyz"));
+    secret_args.insert(
+        "token".to_string(),
+        json!("ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde"),
+    );
     let mut redacted_args = IndexMap::new();
     redacted_args.insert("token".to_string(), json!("[REDACTED_SECRET]"));
 
@@ -2285,7 +2288,7 @@ async fn tool_output_compression_default_disabled_leaves_prior_tool_result_uncha
     let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
         TextResponse::new("ok"),
     )]));
-    let raw_tool_output = "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz";
+    let raw_tool_output = "OPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde";
     let body = json!({
         "messages": [
             {"role": "user", "content": "summarize previous search"},
@@ -2322,7 +2325,8 @@ async fn tool_output_compression_request_disabled_overrides_process_default() {
     let client = Arc::new(MockWorkflowContractClient::new(vec![LLMResponse::Text(
         TextResponse::new("ok"),
     )]));
-    let raw_tool_output = "\u{1b}[31mOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\u{1b}[0m";
+    let raw_tool_output =
+        "\u{1b}[31mOPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde\u{1b}[0m";
     let body = json!({
         "messages": [
             {"role": "user", "content": "summarize previous search"},
@@ -2388,7 +2392,7 @@ async fn tool_output_compression_request_can_disable_secret_redaction_only() {
                 "role": "tool",
                 "tool_call_id": "call_search",
                 "name": "search",
-                "content": "\u{1b}[31mOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\u{1b}[0m"
+                "content": "\u{1b}[31mOPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde\u{1b}[0m"
             }
         ],
         "model": "test-model",
@@ -2417,7 +2421,7 @@ async fn tool_output_compression_request_can_disable_secret_redaction_only() {
 
     let sent = client.sent_messages();
     let content = sent[0][2]["content"].as_str().expect("tool content");
-    assert!(content.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    assert!(content.contains("ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde"));
     assert!(!content.contains("[REDACTED_SECRET]"));
     assert!(!content.contains("\u{1b}[31m"));
 }
@@ -2445,7 +2449,7 @@ async fn tool_output_compression_opt_in_compresses_prior_tool_result_and_preserv
                 "role": "tool",
                 "tool_call_id": "call_search",
                 "name": "search",
-                "content": "\u{1b}[31mOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz\u{1b}[0m"
+                "content": "\u{1b}[31mOPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde\u{1b}[0m"
             }
         ],
         "model": "test-model",
@@ -2932,7 +2936,7 @@ async fn anthropic_tool_output_compression_rebuilds_messages_when_content_change
                 "content": [{
                     "type": "tool_result",
                     "tool_use_id": "toolu_search",
-                    "content": "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz"
+                    "content": "OPENAI_API_KEY=ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde"
                 }]
             }
         ]
@@ -2962,7 +2966,7 @@ async fn anthropic_tool_output_compression_rebuilds_messages_when_content_change
     let sent = client.sent_messages();
     let wire = serde_json::to_string(&sent[0]).expect("wire json");
     assert!(wire.contains("[REDACTED_SECRET]"));
-    assert!(!wire.contains("sk-abcdefghijklmnopqrstuvwxyz"));
+    assert!(!wire.contains("ghp_n0tArEaLsEcReTgHuBpAt1234567890AbCde"));
 }
 
 #[tokio::test]
@@ -2994,7 +2998,7 @@ async fn anthropic_tool_output_compression_patches_raw_body_and_preserves_cache_
                 "content": [{
                     "type": "tool_result",
                     "tool_use_id": "toolu_search",
-                    "content": "sk-\u{1b}[31mabcdefghijklmnopqrstuvwxyz\u{1b}[0m",
+                    "content": "ghp_n0tArEaLsEcReT\u{1b}[31mgHuBpAt1234567890AbCde\u{1b}[0m",
                     "is_error": true
                 }]
             }

@@ -102,6 +102,14 @@ Advanced flags still work: `--classifier-dir` sets the artifact directory,
 `--classifier-mode` overrides advisory mode, and `--classifier-model full`
 selects the FP32 ONNX file.
 
+**Optional input redaction:** The `secrets-scanner` Cargo feature is enabled by
+default, but runtime redaction is off until you pass `--redact-secrets` or set
+`FORGE_REDACT_SECRETS=true`. It redacts selected proxy-bound input before the
+upstream model sees it: OpenAI and Anthropic message text, tool-result text, and
+prior assistant tool-call argument payloads. It does not mutate LLM responses,
+tool names, tool IDs, roles, model names, or tool schemas. A binary built with
+`--no-default-features` rejects redaction opt-in at startup.
+
 **Reliability note:** The proxy automatically injects a synthetic `respond` tool when tools are present in the request. The model calls `respond(message="...")` instead of producing bare text, keeping it in tool-calling mode where forge's full guardrail stack applies. The `respond` call is stripped from the outbound response — the client sees a normal text response and never knows the tool exists. Client tools named `respond` are rejected because the name is reserved by forge. Guiding the model to a tool is a must. See [ADR-013](decisions/013-text-response-intent.md) for the full analysis.
 
 Guarded tool-call validation failures return an upstream error by default after retries are exhausted. For debug compatibility, a request can set `_forge.return_raw_on_guardrail_failure: true` to return the rejected raw model text as a normal assistant message.

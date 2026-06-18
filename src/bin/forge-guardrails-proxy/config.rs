@@ -26,12 +26,14 @@ mod tests;
 
 use env_helpers::{
     env_bool, env_classifier_model, env_final_response_classifier_model, env_first_string, env_i32,
-    env_i64, env_optional_string, env_optional_u64, env_schema_compression, env_scoring_mode,
-    env_string, env_tool_call_policy, env_tool_output_compression,
+    env_i64, env_optional_string, env_optional_u64, env_redact_secrets, env_schema_compression,
+    env_scoring_mode, env_string, env_tool_call_policy, env_tool_output_compression,
 };
 
 #[cfg(test)]
-pub(super) use env_helpers::tool_output_compression_from_env_values;
+pub(super) use env_helpers::{
+    redact_secrets_from_env_value, tool_output_compression_from_env_values,
+};
 
 pub(crate) use validation::{
     cli_host, cli_max_retries, cli_model, cli_port, normalized_extra_flags, require_cli_gguf,
@@ -63,6 +65,7 @@ pub(crate) struct ProxyConfig {
     pub(crate) tool_output_compression: ToolOutputCompressionConfig,
     pub(crate) tool_call_policy: ToolCallPolicyConfig,
     pub(crate) schema_compression: SchemaCompressionMode,
+    pub(crate) redact_secrets: bool,
 }
 
 impl ProxyConfig {
@@ -111,6 +114,7 @@ impl ProxyConfig {
             tool_output_compression: env_tool_output_compression()?,
             tool_call_policy: env_tool_call_policy()?,
             schema_compression: env_schema_compression()?,
+            redact_secrets: env_redact_secrets()?,
         })
     }
 }
@@ -168,6 +172,7 @@ pub(crate) fn apply_env_cli_overrides(config: &mut ProxyConfig, cli: &Cli) -> Re
     config.tool_output_compression = tool_output_compression_from_env_cli(cli)?;
     config.tool_call_policy = tool_call_policy_from_env_cli(cli)?;
     config.schema_compression = schema_compression_from_env_cli(cli)?;
+    config.redact_secrets = redact_secrets_from_env_cli(cli)?;
     Ok(())
 }
 
@@ -206,6 +211,17 @@ pub(crate) fn schema_compression_from_env_cli(cli: &Cli) -> Result<SchemaCompres
         mode = SchemaCompressionMode::from_str(s)?;
     }
     Ok(mode)
+}
+
+pub(crate) fn redact_secrets_from_env_cli(cli: &Cli) -> Result<bool, String> {
+    let enabled = env_redact_secrets()? || cli.redact_secrets;
+    if enabled && !cfg!(feature = "secrets-scanner") {
+        return Err(
+            "--redact-secrets/FORGE_REDACT_SECRETS requires building with the `secrets-scanner` feature"
+                .to_string(),
+        );
+    }
+    Ok(enabled)
 }
 
 pub(crate) fn classifier_settings_from_env_cli(

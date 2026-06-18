@@ -33,7 +33,7 @@ pub(crate) fn tool_output_compression_from_env_values(
         Some(mode) => {
             ToolOutputCompressionConfig::from_mode(ToolOutputCompressionMode::from_str(&mode)?)
         }
-        None => ToolOutputCompressionConfig::disabled(),
+        None => ToolOutputCompressionConfig::default(),
     };
     if let Some(method) = method {
         config.method = ToolOutputCompressionMethod::from_str(&method)?;
@@ -55,6 +55,14 @@ pub(crate) fn env_schema_compression() -> Result<SchemaCompressionMode, String> 
         Some(mode) => SchemaCompressionMode::from_str(&mode),
         None => Ok(SchemaCompressionMode::Disabled),
     }
+}
+
+pub(crate) fn env_redact_secrets() -> Result<bool, String> {
+    redact_secrets_from_env_value(env_optional_string("FORGE_REDACT_SECRETS"))
+}
+
+pub(crate) fn redact_secrets_from_env_value(value: Option<String>) -> Result<bool, String> {
+    parse_optional_bool("FORGE_REDACT_SECRETS", value, false)
 }
 
 pub(crate) fn env_optional_string(key: &str) -> Option<String> {
@@ -149,12 +157,16 @@ pub(crate) fn env_i32(keys: &[&str], default: i32, label: &str) -> Result<i32, S
 }
 
 pub(crate) fn env_bool(key: &str, default: bool) -> Result<bool, String> {
-    match env::var(key) {
-        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+    parse_optional_bool(key, env::var(key).ok(), default)
+}
+
+fn parse_optional_bool(key: &str, raw: Option<String>, default: bool) -> Result<bool, String> {
+    match raw {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => Ok(true),
             "0" | "false" | "no" | "off" => Ok(false),
             _ => Err(format!("{key} must be true or false, got '{raw}'")),
         },
-        Err(_) => Ok(default),
+        None => Ok(default),
     }
 }

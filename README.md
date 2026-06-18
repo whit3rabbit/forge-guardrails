@@ -155,6 +155,10 @@ Run the proxy server as a reliability layer between your client agent and the LL
   ```bash
   forge-guardrails-proxy --backend-url http://localhost:8080 --tool-output-compression standard
   ```
+- **Run with proxy input redaction** using the `--redact-secrets` flag to redact selected request text before it reaches the upstream model:
+  ```bash
+  forge-guardrails-proxy --backend-url http://localhost:8080 --redact-secrets
+  ```
 - **Run with classifier/validator** using the `--classify` flag to score model tool calls against the verifier ONNX model:
   ```bash
   forge-guardrails-proxy --backend-url http://localhost:8080 --classify
@@ -268,10 +272,19 @@ prints the artifact directory during startup. By default it uses
 `$HOME/.cache/forge-guardrails/classifiers`. Use `--classifier-dir` to provide
 an explicit artifact directory.
 
-Tool-output compression is also opt-in. It mutates only prior tool-result
+Secret input redaction is compiled in by default through the `secrets-scanner`
+Cargo feature, but runtime redaction is off unless you pass
+`--redact-secrets` or set `FORGE_REDACT_SECRETS=true`. When enabled, Forge
+redacts proxy-bound input before upstream forwarding: OpenAI and Anthropic
+message text, tool-result text, and prior assistant tool-call argument payloads.
+It does not redact LLM responses, tool names, tool IDs, roles, model names, or
+tool schemas. Builds made with `--no-default-features` reject
+`--redact-secrets` and `FORGE_REDACT_SECRETS=true`.
+
+Tool-output compression is enabled by default. It mutates only prior tool-result
 content before forwarding a request upstream; tool calls, tool IDs, arguments,
 and final responses are left unchanged. Start conservatively with `safe` or
-`standard`; dictionary compression requires explicit `aggressive` mode.
+`standard` (the default); dictionary compression requires explicit `aggressive` mode.
 
 ```bash
 cargo run --bin forge-guardrails-proxy -- \
@@ -314,7 +327,7 @@ On every `POST /v1/chat/completions`, forge applies (in order):
 Proxy mode is single-shot per request; some forge features need multi-turn workflow state that the OpenAI chat-completions schema doesn't carry:
 
 - **Prerequisite enforcement and step-ordering** — these need a workflow definition spanning turns. Available in `WorkflowRunner`.
-- **Context window management** — proxy mode does not choose or maintain the client's rolling message window. Opt-in tool-output compression can rewrite prior tool-result content, and dedup can use an explicit `session_id`, but the client still owns conversation memory.
+- **Context window management** — proxy mode does not choose or maintain the client's rolling message window. Default tool-output compression can rewrite prior tool-result content, and dedup can use an explicit `session_id`, but the client still owns conversation memory.
 - **VRAM-aware budget detection** — opt in with `--budget-mode forge-full` or `--budget-mode forge-fast`; otherwise proxy uses the backend's reported budget. Env-routed mode can also use `FORGE_CONTEXT_TOKENS`.
 
 ### Useful flags
@@ -331,7 +344,8 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `--max-retries N` | `3` | Retry budget per validation failure |
 | `--classify` | off | Enable the quantized tool-call ONNX classifier in advisory mode |
 | `--classify-download` | off | Download the quantized tool-call ONNX classifier and exit |
-| `--tool-output-compression {disabled,safe,standard,aggressive}` | `disabled` | Compress prior tool-result content before upstream forwarding |
+| `--redact-secrets` | off | Redact selected proxy-bound input before upstream forwarding |
+| `--tool-output-compression {disabled,safe,standard,aggressive}` | `standard` | Compress prior tool-result content before upstream forwarding |
 | `--tool-output-compression-method {lzw,repair,auto}` | `lzw` | Aggressive dictionary method |
 | `--no-rescue` | rescue on | Disable rescue parsing |
 | `--budget-mode {backend,manual,forge-full,forge-fast}` | `backend` | Context budget source |
@@ -355,7 +369,8 @@ Proxy mode is single-shot per request; some forge features need multi-turn workf
 | `FORGE_CLASSIFIER_DIR` | — | Local ONNX tool-call classifier artifact directory |
 | `FORGE_CLASSIFIER_MODE` | `shadow` | `disabled`, `shadow`, `advisory`, or `enforce` |
 | `FORGE_CLASSIFIER_MODEL` | `quantized` | `quantized` or `full` classifier ONNX file |
-| `FORGE_TOOL_OUTPUT_COMPRESSION` | `disabled` | `disabled`, `safe`, `standard`, or `aggressive` |
+| `FORGE_REDACT_SECRETS` | `false` | Redact selected proxy-bound input before upstream forwarding |
+| `FORGE_TOOL_OUTPUT_COMPRESSION` | `standard` | `disabled`, `safe`, `standard`, or `aggressive` |
 | `FORGE_TOOL_OUTPUT_COMPRESSION_METHOD` | `lzw` | `lzw`, `repair`, or `auto`; used only by aggressive mode |
 | `FORGE_START_SIDECAR` | Docker: auto | Start the internal anyllm sidecar in Docker |
 | `ANYLLM_LISTEN_PORT` | Docker: `3000` | Internal anyllm sidecar port; do not publish it |

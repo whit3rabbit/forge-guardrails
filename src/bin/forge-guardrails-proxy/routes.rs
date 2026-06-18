@@ -86,12 +86,13 @@ async fn serve_inner(
     );
     if config.verbose {
         eprintln!(
-            "proxy config: model={}, context_tokens={}, max_retries={}, rescue_enabled={}, serialize_requests={}, tool_output_compression={}, tool_call_policy={}",
+            "proxy config: model={}, context_tokens={}, max_retries={}, rescue_enabled={}, serialize_requests={}, redact_secrets={}, tool_output_compression={}, tool_call_policy={}",
             config.default_model,
             config.context_tokens,
             config.max_retries,
             config.rescue_enabled,
             config.serialize_requests,
+            config.redact_secrets,
             config.tool_output_compression.mode,
             config.tool_call_policy.mode
         );

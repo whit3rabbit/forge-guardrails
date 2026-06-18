@@ -36,15 +36,15 @@ pub fn dictionary_has_meaningful_savings(original_len: usize, savings: usize) ->
         && savings.saturating_mul(100) / original_len.max(1) >= DICTIONARY_MIN_NET_SAVINGS_PERCENT
 }
 
-/// Opt-in compression level for tool outputs.
+/// Default compression level for tool outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum ToolOutputCompressionMode {
     /// No compression or mutation.
-    #[default]
     Disabled,
     /// Safety-only transforms: redaction, ANSI stripping, binary suppression, capping.
     Safe,
     /// Safe transforms plus conservative structural and tool-family compaction.
+    #[default]
     Standard,
     /// Standard transforms plus explicitly lossy/high-aggression transforms.
     Aggressive,
@@ -159,7 +159,7 @@ pub struct ToolOutputCompressionConfig {
 impl Default for ToolOutputCompressionConfig {
     fn default() -> Self {
         Self {
-            mode: ToolOutputCompressionMode::Disabled,
+            mode: ToolOutputCompressionMode::Standard,
             method: ToolOutputCompressionMethod::Lzw,
             redact_secrets: true,
             enable_dedup: true,
@@ -175,7 +175,10 @@ impl Default for ToolOutputCompressionConfig {
 impl ToolOutputCompressionConfig {
     /// Return a disabled compression configuration.
     pub fn disabled() -> Self {
-        Self::default()
+        Self {
+            mode: ToolOutputCompressionMode::Disabled,
+            ..Self::default()
+        }
     }
 
     /// Build a configuration from a mode with safe defaults.

@@ -1,8 +1,8 @@
 # Tool Output Compression
 
 Forge can compress prior tool-result messages before forwarding a proxy request
-upstream. This is opt-in and disabled by default because it changes
-model-visible tool output.
+upstream. This is enabled by default (standard mode) to optimize context windows,
+but can be disabled if needed.
 
 Compression only applies to prior tool results:
 
@@ -48,9 +48,9 @@ default for that request.
 
 | Mode | Default | Behavior |
 |---|---:|---|
-| `disabled` | yes | No mutation. |
+| `disabled` | no | No mutation. |
 | `safe` | no | Redact secrets, strip ANSI, suppress binary output, cap oversized output. |
-| `standard` | no | `safe` plus JSON/table cleanup, tool-family filters, repeated-line folding, whitespace cleanup. |
+| `standard` | yes | `safe` plus JSON/table cleanup, tool-family filters, repeated-line folding, whitespace cleanup. |
 | `aggressive` | no | `standard` plus lossy log normalization, schema-table JSON-array conversion, and dictionary compression. |
 
 Use `safe` when the main goal is to remove dangerous or noisy output while
@@ -273,6 +273,13 @@ round-trippable expansion in the dictionary.
 Redaction runs before size reduction and dictionary compression. That matters:
 secret-looking values should not be moved into dictionary entries before they
 are redacted.
+
+With the default `secrets-scanner` feature, tool-output redaction uses the
+bundled `secrets_scanner` proxy rules. Builds made with `--no-default-features`
+fall back to the legacy best-effort patterns for this compression safety filter.
+This is separate from process-level `--redact-secrets` or
+`FORGE_REDACT_SECRETS=true`, which redacts selected request input before
+upstream forwarding and fails closed on scanner errors.
 
 Compression is not an access-control boundary. Treat compressed tool output as
 still model-visible. Do not rely on it to hide data from an upstream model.
