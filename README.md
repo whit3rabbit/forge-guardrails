@@ -33,6 +33,8 @@ Supports Ollama, llama-server (llama.cpp), Llamafile, Anthropic, and anyllm-rout
 
 - Original project: [`antoinezambelli/forge`](https://github.com/antoinezambelli/forge)
 
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
+
 ## Requirements
 
 - Rust 1.95+
