@@ -8,8 +8,9 @@ use super::{helpers, response};
 use crate::clients::base::{
     ChunkType, LLMResponse, StreamChunk, TextResponse, TokenUsage, ToolCall,
 };
+use crate::clients::openai_compat;
 use crate::error::StreamError;
-use crate::prompts::extract_tool_call;
+use crate::prompts::{extract_tool_call, rescue_tool_call};
 
 pub(super) fn parse_openai_sse(
     resp: reqwest::Response,
@@ -90,12 +91,16 @@ pub(super) fn parse_openai_sse(
                             while acc_tools.len() <= idx {
                                 acc_tools.push((String::new(), String::new(), None));
                             }
-                            if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                            if let Some(name) = openai_compat::tool_call_name(tc) {
                                 acc_tools[idx].0 = name.to_string();
                             }
-                            if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()) {
-                                acc_tools[idx].1.push_str(args);
-                                yield Ok(StreamChunk::new(ChunkType::ToolCallDelta).with_content(args));
+                            if let Some(args) = openai_compat::tool_call_arguments(tc) {
+                                let delta = match args {
+                                    Value::String(text) => text.clone(),
+                                    other => other.to_string(),
+                                };
+                                acc_tools[idx].1.push_str(&delta);
+                                yield Ok(StreamChunk::new(ChunkType::ToolCallDelta).with_content(delta));
                             }
                             if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                                 acc_tools[idx].2 = Some(id.to_string());
@@ -222,7 +227,10 @@ fn prompt_response(
 ) -> LLMResponse {
     let (think_text, cleaned) = helpers::extract_think_tags(acc_content);
     let names: Vec<&str> = tool_names.iter().map(|n| n.as_str()).collect();
-    let extracted = extract_tool_call(&cleaned, &names);
+    let mut extracted = extract_tool_call(&cleaned, &names);
+    if extracted.is_empty() {
+        extracted = rescue_tool_call(&cleaned, &names);
+    }
     if extracted.is_empty() {
         LLMResponse::Text(TextResponse::new(cleaned))
     } else {
@@ -238,5 +246,116 @@ fn prompt_response(
             }
         }
         LLMResponse::ToolCalls(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn parses_llama_cpp_top_level_stream_tool_call() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",",
+            "\"name\":\"run\",\"arguments\":\"{\\\"x\\\"\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+            "\"arguments\":\":1}\"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let response = sse_response(body).await;
+
+        let mut stream = Box::pin(parse_openai_sse(
+            response,
+            true,
+            vec!["run".to_string()],
+            false,
+            Arc::new(Mutex::new(HashMap::new())),
+            0,
+        ));
+
+        let mut final_response = None;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("stream chunk");
+            if chunk.chunk_type == ChunkType::Final {
+                final_response = chunk.response;
+            }
+        }
+
+        match final_response.expect("final response") {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].id.as_deref(), Some("call_1"));
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].args["x"], 1);
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_stream_final_rescues_qwen_xml_tool_call() {
+        let response = prompt_response(
+            true,
+            &["run".to_string()],
+            "<think>reason</think><function=run><parameter=path>/tmp/a</parameter></function>",
+            "",
+        );
+
+        match response {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].args["path"], "/tmp/a");
+                assert_eq!(calls[0].reasoning, Some("reason".to_string()));
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_stream_final_rescues_mistral_bracket_tool_call() {
+        let response = prompt_response(
+            true,
+            &["run".to_string()],
+            "[TOOL_CALLS]run{\"path\":\"/tmp/a\"}",
+            "",
+        );
+
+        match response {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].args["path"], "/tmp/a");
+            }
+            other => panic!("expected tool calls, got {other:?}"),
+        }
+    }
+
+    async fn sse_response(body: String) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let body_len = body.len();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request_buf = [0_u8; 1024];
+            let _ = socket.read(&mut request_buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {body_len}\r\n\r\n{body}"
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        reqwest::Client::new()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .expect("response")
     }
 }

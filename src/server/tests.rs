@@ -274,6 +274,34 @@ fn backend_args_accept_allowlisted_inline_extra_flags() {
 }
 
 #[test]
+fn backend_args_preserve_chat_template_file_flag() {
+    let extra = vec![
+        "--chat-template-file".to_string(),
+        "/tmp/tool_template.jinja".to_string(),
+    ];
+    let args = args_for("llamaserver", "native", &extra, None, false);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--chat-template-file" && pair[1] == "/tmp/tool_template.jinja"));
+}
+
+#[test]
+fn backend_args_preserve_inline_chat_template_flag() {
+    let extra = vec!["--chat-template=chatml".to_string()];
+    let args = args_for("llamaserver", "native", &extra, None, false);
+    assert!(args
+        .windows(2)
+        .any(|pair| pair[0] == "--chat-template" && pair[1] == "chatml"));
+}
+
+#[test]
+fn backend_args_reject_chat_template_file_missing_value() {
+    let extra = vec!["--chat-template-file".to_string()];
+    let err = args_result(&extra).expect_err("missing value rejected");
+    assert!(err.contains("--chat-template-file requires a value"));
+}
+
+#[test]
 fn backend_args_reject_core_override_extra_flags() {
     for flag in ["-m", "--model", "--host", "--port", "-c", "--ctx-size"] {
         let err = args_result(&[flag.to_string(), "unsafe".to_string()]).unwrap_err();

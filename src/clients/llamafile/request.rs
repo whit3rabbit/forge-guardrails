@@ -5,6 +5,7 @@ use super::{helpers, streaming, LlamafileClient, LlamafileMode};
 use crate::clients::base::{
     format_tool, ChunkStream, ChunkType, LLMResponse, SamplingParams, StreamChunk, TextResponse,
 };
+use crate::clients::openai_compat;
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, StreamError};
 use crate::prompts::build_tool_prompt;
@@ -165,7 +166,8 @@ impl LlamafileClient {
         sampling: Option<&SamplingParams>,
         passthrough: Option<&Map<String, Value>>,
     ) -> Value {
-        let merged = helpers::merge_messages(messages);
+        let mut merged = helpers::merge_messages(messages);
+        openai_compat::normalize_openai_message_tool_call_ids(&mut merged);
         let mut body = Value::Object(passthrough.cloned().unwrap_or_default());
         if let Some(obj) = body.as_object_mut() {
             obj.entry("model").or_insert_with(|| json!(self.model));
@@ -213,10 +215,14 @@ impl LlamafileClient {
         passthrough: Option<&Map<String, Value>>,
         mode: LlamafileMode,
     ) -> Value {
+        let mut prepared = helpers::merge_messages(messages);
+        if mode == LlamafileMode::Native {
+            openai_compat::normalize_openai_message_tool_call_ids(&mut prepared);
+        }
         let mut body = Value::Object(passthrough.cloned().unwrap_or_default());
         if let Some(obj) = body.as_object_mut() {
             obj.entry("model").or_insert_with(|| json!(self.model));
-            obj.insert("messages".into(), json!(helpers::merge_messages(messages)));
+            obj.insert("messages".into(), json!(prepared));
             obj.insert("stream".into(), Value::Bool(true));
             obj.insert("stream_options".into(), json!({"include_usage": true}));
             obj.insert("cache_prompt".into(), json!(self.cache_prompt));
@@ -332,6 +338,42 @@ mod tests {
     }
 
     #[test]
+    fn native_body_rewrites_forge_internal_tool_call_ids() {
+        let c = LlamafileClient::new(Path::new("t.gguf"));
+        let body = c.build_native_body(
+            &[
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_000000000",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"}
+                    }]
+                }),
+                json!({
+                    "role": "tool",
+                    "tool_call_id": "call_000000000",
+                    "name": "run",
+                    "content": "ok"
+                }),
+            ],
+            None,
+            None,
+            None,
+        );
+        let messages = body["messages"].as_array().expect("messages");
+        let id = messages[0]["tool_calls"][0]["id"].as_str().expect("id");
+
+        assert!(is_mistral_safe_id(id), "{id}");
+        assert_eq!(messages[1]["tool_call_id"].as_str(), Some(id));
+    }
+
+    fn is_mistral_safe_id(id: &str) -> bool {
+        id.len() == 9 && id.chars().all(|c| c.is_ascii_alphanumeric())
+    }
+
+    #[test]
     fn prompt_body_downgrades_and_injects_tool_prompt() {
         let c = LlamafileClient::new(Path::new("t.gguf"));
         let tool = run_tool();
@@ -368,6 +410,39 @@ mod tests {
         );
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn stream_native_body_rewrites_forge_internal_tool_call_ids() {
+        let c = LlamafileClient::new(Path::new("t.gguf"));
+        let body = c.build_stream_body(
+            &[
+                json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_000000000",
+                        "type": "function",
+                        "function": {"name": "run", "arguments": "{}"}
+                    }]
+                }),
+                json!({
+                    "role": "tool",
+                    "tool_call_id": "call_000000000",
+                    "name": "run",
+                    "content": "ok"
+                }),
+            ],
+            None,
+            None,
+            None,
+            LlamafileMode::Native,
+        );
+        let messages = body["messages"].as_array().expect("messages");
+        let id = messages[0]["tool_calls"][0]["id"].as_str().expect("id");
+
+        assert!(is_mistral_safe_id(id), "{id}");
+        assert_eq!(messages[1]["tool_call_id"].as_str(), Some(id));
     }
 
     #[test]

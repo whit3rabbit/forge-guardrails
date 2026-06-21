@@ -1,6 +1,11 @@
 use std::path::Path;
 
-const ALLOWED_EXTRA_FLAGS_WITH_VALUES: &[&str] = &["--reasoning-budget", "--reasoning-format"];
+const ALLOWED_EXTRA_FLAGS_WITH_VALUES: &[&str] = &[
+    "--reasoning-budget",
+    "--reasoning-format",
+    "--chat-template",
+    "--chat-template-file",
+];
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_backend_args(

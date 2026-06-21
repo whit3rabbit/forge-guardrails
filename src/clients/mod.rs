@@ -10,6 +10,7 @@ pub mod base;
 pub mod llamafile;
 /// Ollama client implementation.
 pub mod ollama;
+pub(crate) mod openai_compat;
 /// Shared retry policy for transient upstream HTTP failures.
 pub mod retry;
 /// Model sampling defaults management.

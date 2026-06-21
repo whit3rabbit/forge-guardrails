@@ -344,6 +344,60 @@ async fn anyllm_proxy_client_parses_tool_calls() {
 }
 
 #[tokio::test]
+async fn anyllm_proxy_client_parses_llama_cpp_top_level_tool_calls() {
+    let mut server = mockito::Server::new_async().await;
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "chatcmpl-llama",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "local-llama",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_123",
+                            "name": "search",
+                            "arguments": "{\"query\":\"rust\"}"
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("local-llama").with_base_url(server.url());
+    let response = client
+        .send(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("request succeeds");
+
+    match response {
+        LLMResponse::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id.as_deref(), Some("call_123"));
+            assert_eq!(calls[0].tool, "search");
+            assert_eq!(calls[0].args.get("query"), Some(&json!("rust")));
+        }
+        other => panic!("expected tool call response, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn anyllm_proxy_client_records_stream_headers_and_cost() {
     let mut server = mockito::Server::new_async().await;
     let sse = concat!(
@@ -405,6 +459,52 @@ async fn anyllm_proxy_client_records_stream_headers_and_cost() {
     assert_eq!(info.cache_status.as_deref(), Some("hit"));
     assert_eq!(info.rate_limits.requests_remaining.as_deref(), Some("12"));
     assert_eq!(info.estimated_cost_usd, Some(0.0042));
+}
+
+#[tokio::test]
+async fn anyllm_proxy_client_stream_parses_llama_cpp_top_level_tool_calls() {
+    let mut server = mockito::Server::new_async().await;
+    let sse = concat!(
+        "data:{\"id\":\"chatcmpl-llama-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"local-llama\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"name\":\"search\",\"arguments\":\"{\\\"query\\\"\"}]},\"finish_reason\":null}]}\n\n",
+        "data:{\"id\":\"chatcmpl-llama-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"local-llama\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"arguments\":\":\\\"rust\\\"}\"}]},\"finish_reason\":null}]}\n\n",
+        "data:{\"id\":\"chatcmpl-llama-stream\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"local-llama\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+        "data:[DONE]\n\n"
+    );
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(sse)
+        .create_async()
+        .await;
+
+    let client = AnyLlmProxyClient::new("local-llama").with_base_url(server.url());
+    let mut stream = client
+        .send_stream(
+            vec![json!({"role": "user", "content": "hello"})],
+            None,
+            None,
+        )
+        .await
+        .expect("sidecar stream starts");
+
+    let mut final_response = None;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("stream chunk");
+        if chunk.chunk_type == ChunkType::Final {
+            final_response = chunk.response;
+        }
+    }
+
+    match final_response.expect("final response") {
+        LLMResponse::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id.as_deref(), Some("call_123"));
+            assert_eq!(calls[0].tool, "search");
+            assert_eq!(calls[0].args.get("query"), Some(&json!("rust")));
+        }
+        other => panic!("expected tool call response, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -3,8 +3,9 @@ use serde_json::Value;
 
 use super::{helpers, LlamafileClient};
 use crate::clients::base::{LLMResponse, TextResponse, ToolCall};
+use crate::clients::openai_compat;
 use crate::core::tool_spec::ToolSpec;
-use crate::prompts::extract_tool_call;
+use crate::prompts::{extract_tool_call, rescue_tool_call};
 
 impl LlamafileClient {
     pub(super) fn parse_native_response(&self, response: &Value) -> LLMResponse {
@@ -22,13 +23,9 @@ impl LlamafileClient {
             if !tcs.is_empty() {
                 let mut calls = Vec::new();
                 for (i, tc) in tcs.iter().enumerate() {
-                    let name = tc
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("");
+                    let name = openai_compat::tool_call_name(tc).unwrap_or("");
                     let id = tc.get("id").and_then(|i| i.as_str()).map(str::to_string);
-                    let args_raw = tc.get("function").and_then(|f| f.get("arguments"));
+                    let args_raw = openai_compat::tool_call_arguments(tc);
                     let args = match parse_args(args_raw) {
                         Ok(args) => args,
                         Err(raw_args) => {
@@ -78,6 +75,9 @@ impl LlamafileClient {
             (String::new(), content.to_string())
         };
         let mut calls = extract_tool_call(&cleaned, &names);
+        if calls.is_empty() {
+            calls = rescue_tool_call(&cleaned, &names);
+        }
         if calls.is_empty() {
             LLMResponse::Text(TextResponse::new(cleaned))
         } else {
@@ -152,6 +152,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_native_llama_cpp_top_level_tool_call() {
+        let c = LlamafileClient::new(Path::new("t.gguf"));
+        let resp = json!({"choices": [{"message": {"tool_calls": [
+            {"name": "run", "arguments": "{\"x\": 1}"},
+        ]}}]});
+
+        match c.parse_native_response(&resp) {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].args["x"], 1);
+            }
+            _ => panic!("expected tool calls"),
+        }
+    }
+
+    #[test]
     fn parse_native_null_content() {
         let c = LlamafileClient::new(Path::new("t.gguf"));
         let resp = json!({"choices": [{"message": {"content": null}}]});
@@ -204,6 +220,48 @@ mod tests {
             LLMResponse::ToolCalls(calls) => {
                 assert_eq!(calls[0].tool, "run");
                 assert_eq!(calls[0].reasoning, Some("reason".to_string()));
+            }
+            _ => panic!("expected tool calls"),
+        }
+    }
+
+    #[test]
+    fn parse_prompt_rescues_qwen_xml_tool_call() {
+        let c = LlamafileClient::new(Path::new("t.gguf")).with_mode("prompt");
+        let tool = ToolSpec::from_json_schema(
+            "run",
+            "Run",
+            &json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )
+        .expect("ok");
+        let resp = json!({"choices": [{"message": {"content": "<think>reason</think><function=run><parameter=path>/tmp/a</parameter></function>"}}]});
+
+        match c.parse_prompt_response(&resp, &[tool]) {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].args["path"], "/tmp/a");
+                assert_eq!(calls[0].reasoning, Some("reason".to_string()));
+            }
+            _ => panic!("expected tool calls"),
+        }
+    }
+
+    #[test]
+    fn parse_prompt_rescues_mistral_bracket_tool_call() {
+        let c = LlamafileClient::new(Path::new("t.gguf")).with_mode("prompt");
+        let tool = ToolSpec::from_json_schema(
+            "run",
+            "Run",
+            &json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )
+        .expect("ok");
+        let resp =
+            json!({"choices": [{"message": {"content": "[TOOL_CALLS]run{\"path\":\"/tmp/a\"}"}}]});
+
+        match c.parse_prompt_response(&resp, &[tool]) {
+            LLMResponse::ToolCalls(calls) => {
+                assert_eq!(calls[0].tool, "run");
+                assert_eq!(calls[0].args["path"], "/tmp/a");
             }
             _ => panic!("expected tool calls"),
         }

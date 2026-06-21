@@ -309,7 +309,7 @@ Then configure OpenAI-compatible clients to use `http://localhost:8081/v1` as th
 **Backend compatibility:**
 
 - **Managed mode** spins up the backend for you. Supported backends: `llamaserver`, `llamafile`, `ollama` (use `--gguf` for GGUF-based backends, or `--model` for Ollama).
-- **External mode** is backend-agnostic — forge talks `POST /v1/chat/completions` to whatever you point `--backend-url` at, as long as it speaks the OpenAI schema. Tool calls must come back in OpenAI `tool_calls` format or in one of forge's rescue-parsed formats (Mistral `[TOOL_CALLS]`, Qwen `<tool_call>` XML, fenced JSON).
+- **External mode** is backend-agnostic, forge talks `POST /v1/chat/completions` to whatever you point `--backend-url` at, as long as it speaks the OpenAI schema. Tool calls may use standard OpenAI nested `function` fields, llama.cpp top-level `name`/`arguments`, or one of forge's rescue-parsed formats (Mistral `[TOOL_CALLS]`, Qwen XML, fenced JSON). Outbound tool-call IDs are normalized for strict Mistral-compatible servers.
 - **Anthropic-compatible inbound** uses `anyllm_translate` for Anthropic/OpenAI conversion by default. With `--backend-protocol anthropic`, external mode sends Anthropic Messages requests to an Anthropic-shape downstream. Path 1 preserves block-level `cache_control` only on clean calls; retries, compaction, and context warnings rebuild the request and drop block metadata. Path 2 drops Anthropic-only block metadata at the OpenAI boundary.
 - **Env-routed mode** remains a Rust extension for Docker/provider routing. If neither `--backend-url` nor `--backend` is passed, the binary uses existing anyllm/provider env vars such as `PROXY_CONFIG`, `OPENAI_BASE_URL`, and `BACKEND`.
 

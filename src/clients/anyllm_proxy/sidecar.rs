@@ -15,6 +15,7 @@ use crate::clients::base::{
     ApiFormat, ChunkStream, LLMCallInfo, LLMClient, LLMRequestOptions, LLMResponse,
     LLMResponseEnvelope, LLMUsageDetails, SamplingParams, TokenUsage,
 };
+use crate::clients::openai_compat;
 use crate::clients::retry;
 use crate::core::tool_spec::ToolSpec;
 use crate::error::{BackendError, ContextDiscoveryError, StreamError};
@@ -202,10 +203,11 @@ impl LLMClient for AnyLlmProxyClient {
         let resp = self.send_request(&body).await?;
         let status = resp.status().as_u16() as i64;
         let headers = resp.headers().clone();
-        let response_value = resp
+        let mut response_value = resp
             .json::<Value>()
             .await
             .map_err(|e| BackendError::new(status, e.to_string()))?;
+        openai_compat::normalize_openai_response_tool_calls(&mut response_value);
         let usage_details = usage_details_from_openai_usage_value(response_value.get("usage"));
         record_usage_details_cell(&self.last_usage_details, usage_details.clone());
         let response_json = serde_json::from_value::<

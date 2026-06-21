@@ -19,7 +19,7 @@ Rust managed startup preserves:
 - `--cache-type-v`
 - `--parallel`
 - `--kv-unified`
-- allowlisted reasoning `extra_flags`
+- allowlisted reasoning and chat-template `extra_flags`
 
 Managed startup owns model path, host, port, GPU layers, context size, cache
 flags, slots, and KV-unified settings. Do not pass those through
@@ -58,10 +58,26 @@ Reasoning-tagged models on recent llama.cpp builds may need:
 --reasoning-budget 0
 ```
 
-Managed startup accepts only `--reasoning-budget` and `--reasoning-format`
-through `--extra-flags`; both require values and may also be provided as
-first-class proxy flags. Model/path/host/port/context/server/security flags are
-not accepted in `--extra-flags`.
+Managed startup accepts only these `--extra-flags`, each with a required value:
+`--reasoning-budget`, `--reasoning-format`, `--chat-template`, and
+`--chat-template-file`. Use `--chat-template` for llama.cpp built-in templates,
+and use `--chat-template-file` for a reviewed local Jinja template:
+
+```bash
+forge-guardrails-proxy \
+  --backend llamaserver \
+  --gguf path/to/model.gguf \
+  --extra-flags -- --chat-template chatml
+
+forge-guardrails-proxy \
+  --backend llamaserver \
+  --gguf path/to/model.gguf \
+  --extra-flags -- --chat-template-file path/to/tool_template.jinja
+```
+
+Model/path/host/port/context/server/security flags are not accepted in
+`--extra-flags`. `parallel_tool_calls` is an OpenAI request payload field. Put
+it in client request JSON when needed, not in llama-server CLI flags.
 
 The Rust smoke runner accepts `--reasoning-budget` so eval JSONL records the
 intended setting, but it does not start or reconfigure a local server process.

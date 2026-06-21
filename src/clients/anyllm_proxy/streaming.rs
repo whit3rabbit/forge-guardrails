@@ -9,6 +9,7 @@ use super::usage::{
     usage_details_from_openai_usage,
 };
 use crate::clients::base::{ChunkType, LLMCallInfo, LLMUsageDetails, StreamChunk, TokenUsage};
+use crate::clients::openai_compat;
 use crate::error::StreamError;
 
 pub(super) const MAX_STREAM_TOOL_CALLS: usize = 128;
@@ -94,7 +95,12 @@ pub(super) fn parse_openai_sse(
                 return;
             }
 
-            let evt: anyllm_translate::openai::ChatCompletionChunk = match serde_json::from_str(data) {
+            let mut evt_value: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            openai_compat::normalize_openai_response_tool_calls(&mut evt_value);
+            let evt: anyllm_translate::openai::ChatCompletionChunk = match serde_json::from_value(evt_value) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
