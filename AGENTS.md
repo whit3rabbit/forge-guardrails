@@ -99,6 +99,29 @@ make test
 `make clippy` use `FEATURES=classifier` by default. Override with
 `FEATURES=""` when a no-feature build is intentional.
 
+Cargo feature split (since 0.1.3):
+
+```bash
+# transport-free reliability stack only, Rust 1.87+
+cargo check --no-default-features --features guardrails
+
+# default set: proxy + secrets-scanner, Rust 1.95+
+cargo check
+```
+
+- `guardrails` is the pure stack: `core::response`, tool specs, prompts and
+  nudges, rescue parsing, argument validation, step enforcement, tool policy,
+  tool-output and schema compression. It resolves on `serde`, `serde_json`,
+  `thiserror`, `indexmap`, `regex-lite`, `anyhow`, `log` and `tracing` alone.
+- `proxy` is everything that talks to a backend or serves a request:
+  `clients`, `proxy`, `server`, the workflow runner, the async classifier
+  scoring drivers, and all three binaries. The binaries declare
+  `required-features = ["proxy"]` in `Cargo.toml`; do not let them fall back
+  to auto-discovery, which carries no `required-features` and breaks
+  `--no-default-features`.
+- Verify both sides when touching module gating or dependencies. A default
+  build passing says nothing about the guardrails-only build.
+
 Focused eval/parity checks:
 
 ```bash
@@ -320,7 +343,7 @@ docker login -u followthewhit3rabbit
 scripts/publish_docker.sh
 ```
 
-`scripts/publish_docker.sh` defaults to `VERSION=0.1.0`,
+`scripts/publish_docker.sh` defaults to `VERSION=0.1.3`,
 `IMAGE=followthewhit3rabbit/forge-guardrails`,
 `PLATFORMS=linux/amd64,linux/arm64`, and
 `BUILDER=forge-guardrails-builder`. Override those environment variables for a
@@ -337,8 +360,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo package --locked
 git push origin main
-git tag v0.1.0
-git push origin v0.1.0
+# the tag must match `version` in Cargo.toml; 0.1.3 is the released version
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 - The release workflow runs on `v*.*.*` tags and verifies the tag matches
@@ -603,6 +627,10 @@ Preserve these invariants:
 - Step enforcement must not leave invalid tool-call history behind.
 - Compaction must not produce protocol-invalid transcripts.
 - Backend adapters must keep their wire formats separate.
+- Nothing reachable from `--no-default-features --features guardrails` may
+  depend on a transport crate. `ToolCall`, `TextResponse` and `LLMResponse`
+  live in `core::response` for that reason; `clients::base` re-exports them
+  and keeps `LLMResponseEnvelope`, which only a live backend can produce.
 - Per-call sampling overrides must not mutate client defaults.
 - Retry and rescue logic should nudge the model without hiding hard failures.
 - Server/proxy code must clearly separate passthrough behavior from guarded workflow behavior.
@@ -657,6 +685,6 @@ When changing eval/backend parity:
 
 ## Current status notes
 
-The initial clean-room run produced 8/8 units, 487 passing tests, and 0 contamination incidents. After that exercise, a full parity review was conducted against the Python reference to establish complete behavioral alignment. As the codebase evolved, the test suite expanded to 750 passing tests covering edge cases, client adapters, proxy handling, and compaction. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full narrative.
+The initial clean-room run produced 8/8 units, 487 passing tests, and 0 contamination incidents. After that exercise, a full parity review was conducted against the Python reference to establish complete behavioral alignment. As the codebase evolved, the test suite expanded to 1137 passing tests (as of 0.1.3, `cargo test --features classifier`) covering edge cases, client adapters, proxy handling, and compaction. See [`docs/CLEANROOM.md`](docs/CLEANROOM.md) for the full narrative.
 
 Treat test counts as historical. Re-run the local test suite after any meaningful change.

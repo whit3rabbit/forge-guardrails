@@ -112,8 +112,9 @@ Release is tag-driven. After the version in `Cargo.toml` is ready and `main`
 is pushed, create and push a matching tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+# the tag must match `version` in Cargo.toml; 0.1.3 is the released version
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 The release workflow verifies the tag matches the crate version, runs format,

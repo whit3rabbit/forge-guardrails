@@ -2,7 +2,9 @@
 set -euo pipefail
 
 image="${IMAGE:-followthewhit3rabbit/forge-guardrails}"
-version="${VERSION:-0.1.0}"
+# Keep in step with `version` in Cargo.toml, otherwise a current build is
+# published under a stale tag alongside `latest`.
+version="${VERSION:-0.1.3}"
 platforms="${PLATFORMS:-linux/amd64,linux/arm64}"
 builder="${BUILDER:-forge-guardrails-builder}"
 
