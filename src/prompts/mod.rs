@@ -205,13 +205,12 @@ fn find_balanced_brace(text: &str) -> Option<usize> {
 fn parse_tool_json(json_str: &str, available_tools: &[&str]) -> Option<ToolCall> {
     let v: Value = serde_json::from_str(json_str).ok()?;
     let obj = v.as_object()?;
-    let tool_name = if let Some(name) = obj.get("tool").and_then(|v| v.as_str()) {
-        name.to_string()
-    } else if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
-        name.to_string()
-    } else {
-        return None;
-    };
+    // Accept both `tool` and `name` keys; a non-string `tool` falls through to `name`.
+    let tool_name = obj
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .or_else(|| obj.get("name").and_then(|v| v.as_str()))?
+        .to_string();
     if !available_tools.contains(&tool_name.as_str()) {
         return None;
     }
