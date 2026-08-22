@@ -38,6 +38,20 @@ All notable changes to `forge-guardrails` are documented here.
   `required-features`, so it would be built -- and fail -- under
   `--no-default-features`.
 
+### Fixed
+- Rewrote the `tool`/`name` key fallback in `parse_tool_json` as an `or_else`
+  chain so it satisfies `clippy::question_mark` on current toolchains.
+  Behavior is unchanged: a non-string `tool` key still falls through to
+  `name`.
+
+### Security
+- Refreshed `Cargo.lock`, which closes two advisories reachable through the
+  transport dependencies: `quinn-proto` remote memory exhaustion
+  (GHSA-4w2j-m93h-cj5j, high, 0.11.14 -> 0.11.17) and `cmov` wrong results on
+  aarch64 when register high-bits are set (GHSA-3rjw-m598-pq24, moderate,
+  0.5.3 -> 0.5.4). Neither is reachable from a `--no-default-features
+  --features guardrails` build, which pulls in no transport crates.
+
 ### Compatibility
 - **Additive.** `default = ["proxy", "secrets-scanner"]`, so every existing
   dependant, every public path and the `forge-guardrails-proxy` binary are
