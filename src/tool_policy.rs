@@ -1,6 +1,6 @@
 //! Opt-in tool-call policy nudges for proxy-intercepted tool calls.
 
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::core::tool_spec::ToolSpec;
 use indexmap::IndexSet;
 use serde_json::Value;

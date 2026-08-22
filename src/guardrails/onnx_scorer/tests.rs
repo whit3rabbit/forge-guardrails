@@ -5,7 +5,7 @@ use super::cache::ScoreCache;
 use super::final_response::OnnxFinalResponseScorer;
 use super::softmax;
 use super::tool_call::OnnxToolCallScorer;
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::guardrails::scoring::{
     FinalResponseContext, FinalResponseScorer, FinalResponseToolResult, ScorerMode, ToolCallScorer,
 };

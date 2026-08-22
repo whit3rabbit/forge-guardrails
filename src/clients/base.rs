@@ -1,5 +1,4 @@
 use futures_core::Stream;
-use indexmap::IndexMap;
 use serde_json::Value;
 use std::fmt;
 use std::pin::Pin;
@@ -42,68 +41,13 @@ impl fmt::Display for ChunkType {
     }
 }
 
-/// A validated tool call response from the LLM client.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolCall {
-    /// Unique identifier for the tool call.
-    pub id: Option<String>,
-    /// Name of the tool being called.
-    pub tool: String,
-    /// Arguments passed to the tool.
-    pub args: IndexMap<String, Value>,
-    /// Optional chain-of-thought or reasoning text.
-    pub reasoning: Option<String>,
-}
-
-impl ToolCall {
-    /// Creates a new `ToolCall`.
-    pub fn new(tool: impl Into<String>, args: IndexMap<String, Value>) -> Self {
-        Self {
-            id: None,
-            tool: tool.into(),
-            args,
-            reasoning: None,
-        }
-    }
-
-    /// Sets the tool call ID.
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
-        self
-    }
-
-    /// Sets the reasoning content.
-    pub fn with_reasoning(mut self, reasoning: impl Into<String>) -> Self {
-        self.reasoning = Some(reasoning.into());
-        self
-    }
-}
-
-/// A non-tool-call text response from the LLM.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextResponse {
-    /// The generated text content.
-    pub content: String,
-}
-
-impl TextResponse {
-    /// Creates a new `TextResponse`.
-    pub fn new(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-        }
-    }
-}
-
-/// Union type representing an LLM response: either a list of tool calls
-/// or a text response.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LLMResponse {
-    /// List of tool calls.
-    ToolCalls(Vec<ToolCall>),
-    /// Plain text response.
-    Text(TextResponse),
-}
+// These three are DEFINED in `core::response` and re-exported here, so every
+// existing path keeps resolving. The move is what makes the `guardrails`
+// feature expressible at all: the pure stack speaks them and must compile
+// without this module's `futures_core` client machinery. `LLMResponseEnvelope`
+// below stays here on purpose -- it carries usage, rate-limit and raw-provider
+// metadata, which only a live backend can produce. See that file's header.
+pub use crate::core::response::{LLMResponse, TextResponse, ToolCall};
 
 /// An immutable streaming chunk from the LLM.
 #[derive(Debug, Clone, PartialEq)]

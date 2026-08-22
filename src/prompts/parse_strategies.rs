@@ -3,7 +3,7 @@
 //! Each strategy handles a different model output format.
 //! Strategies are tried in priority order by rescue_tool_call.
 
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use indexmap::IndexMap;
 use serde_json::Value;
 

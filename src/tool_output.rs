@@ -27,6 +27,9 @@ use postcall::{
 };
 use repair::compress_repair_dictionary;
 use safety::apply_safe_filters;
+// Reached only from `proxy::handler::compression`, so it follows that
+// module's feature.
+#[cfg(feature = "proxy")]
 pub(crate) use safety::redact_secrets;
 pub use state::ToolOutputCompressionState;
 use state::{config_fingerprint, MemoLookup, MemoRecord};

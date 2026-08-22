@@ -9,7 +9,7 @@
 pub mod nudges;
 mod parse_strategies;
 
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::core::tool_spec::ToolSpec;
 use indexmap::IndexMap;
 pub use nudges::{

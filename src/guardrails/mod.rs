@@ -45,11 +45,16 @@ pub use policy::{
 };
 pub use response_validator::{ResponseValidator, RetryNudgeFn, ValidationResult};
 pub use scoring::{
-    final_response_top_k_from_logits, score_final_response_async, score_tool_call_async,
-    serialize_final_response_state_v1, tool_call_top_k_from_logits, ClassifierAction,
-    ClassifierTopKEntry, FinalResponseClass, FinalResponseContext, FinalResponseScore,
-    FinalResponseScorer, FinalResponseToolResult, NoopFinalResponseScorer, NoopToolCallScorer,
-    ScorerMode, ScoringExecutor, ScoringPipeline, ToolCallClass, ToolCallScore, ToolCallScorer,
+    final_response_top_k_from_logits, serialize_final_response_state_v1,
+    tool_call_top_k_from_logits, ClassifierAction, ClassifierTopKEntry, FinalResponseClass,
+    FinalResponseContext, FinalResponseScore, FinalResponseScorer, FinalResponseToolResult,
+    NoopFinalResponseScorer, NoopToolCallScorer, ScorerMode, ToolCallClass, ToolCallScore,
+    ToolCallScorer,
+};
+// The async drivers need a Tokio runtime; see `scoring.rs`.
+#[cfg(feature = "proxy")]
+pub use scoring::{
+    score_final_response_async, score_tool_call_async, ScoringExecutor, ScoringPipeline,
 };
 pub use scoring_context::{
     recent_errors_from_messages, serialize_state_v1, serialize_state_v2, serialize_state_v3,

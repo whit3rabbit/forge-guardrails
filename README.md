@@ -23,7 +23,14 @@ A reliability layer for self-hosted LLM tool-calling. You give forge a set of to
 
 - **WorkflowRunner** — Define tools, pick a backend, run structured agent loops. Forge manages the full lifecycle: system prompts, tool execution, context compaction, and guardrails. **SlotWorker** adds priority-queued access to a shared inference slot with auto-preemption — for multi-agent architectures where specialist workflows share a GPU slot. Best when you're building on forge directly.
 
-- **Guardrails middleware** — Use forge's reliability stack inside your own orchestration loop. You control the loop; forge validates responses, rescues malformed tool calls, and enforces required steps.
+- **Guardrails middleware** — Use forge's reliability stack inside your own orchestration loop. You control the loop; forge validates responses, rescues malformed tool calls, and enforces required steps. If you already have a model and a loop, take it **without the transport half**:
+
+  ```toml
+  [dependencies]
+  forge-guardrails = { version = "0.1", default-features = false, features = ["guardrails"] }
+  ```
+
+  That resolves **29 packages instead of 383** — `serde`, `serde_json`, `thiserror`, `indexmap`, `regex-lite`, `anyhow`, `log`, `tracing` and nothing else. No `axum`, `reqwest`, `tokio`, `sentry`, `clap`, `nix` or `anyllm_*`, because nothing in the pure stack can reach them. It also drops the toolchain floor from 1.95 to **1.87**: the higher requirement belongs to the transport dependencies, not to this code. You get `rescue_tool_call`, `extract_tool_call`, `validate_tool_arguments`, the nudge builders, `Guardrails`, `StepEnforcer` and `evaluate_tool_call_policy`; you lose the clients, the proxy routes, the managed-server process control, `WorkflowRunner` and the async classifier drivers.
 
 Supports Ollama, llama-server (llama.cpp), Llamafile, Anthropic, and anyllm-routed OpenAI-compatible upstreams as backends.
 
@@ -37,7 +44,9 @@ Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Requirements
 
-- Rust 1.95+
+- Rust 1.95+ for the default feature set (the floor comes from the
+  transport dependencies). **Rust 1.87+** for
+  `--no-default-features --features guardrails`.
 - A running LLM backend (see below)
 
 ## Install

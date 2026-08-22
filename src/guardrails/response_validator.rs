@@ -1,6 +1,6 @@
 use super::nudge::Nudge;
 use super::policy::{self, ArgValidationError};
-use crate::clients::base::{LLMResponse, TextResponse, ToolCall};
+use crate::core::response::{LLMResponse, TextResponse, ToolCall};
 use crate::core::tool_spec::ToolSpec;
 use crate::prompts;
 use crate::prompts::nudges;

@@ -1,6 +1,6 @@
 use super::nudge::Nudge;
 use super::policy::GuardrailState;
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::core::steps::{Prerequisite, StepTracker};
 use crate::prompts::nudges;
 use indexmap::{IndexMap, IndexSet};

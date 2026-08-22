@@ -1,7 +1,7 @@
 //! Classifier input context and canonical serializer.
 
-use crate::clients::base::ToolCall;
 use crate::core::message::{Message, MessageType};
+use crate::core::response::ToolCall;
 use crate::core::tool_spec::ToolSpec;
 use crate::guardrails::step_enforcer::StepEnforcer;
 use indexmap::IndexSet;

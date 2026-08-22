@@ -9,7 +9,7 @@ use ort::session::Session;
 use ort::value::Tensor;
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::guardrails::classifier_artifact::{
     ClassifierArtifact, ClassifierModelKind, Thresholds, DEFAULT_CLASSIFIER_REPO, NEXT_SERIALIZER,
     V3_SERIALIZER,

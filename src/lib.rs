@@ -6,6 +6,7 @@
 #[cfg(feature = "classifier")]
 pub mod classifier_download;
 /// LLM backend client adapters and traits.
+#[cfg(feature = "proxy")]
 pub mod clients;
 /// Context budget tracking and token compaction strategies.
 pub mod context;
@@ -18,29 +19,37 @@ pub mod guardrails;
 /// System and rescue prompt templates.
 pub mod prompts;
 /// HTTP and OpenAI-compatible proxy interface.
+#[cfg(feature = "proxy")]
 pub mod proxy;
 /// Opt-in tool schema description compression for proxy-intercepted requests.
 pub mod schema_compression;
 /// Default-on secret redaction for proxy-bound request inputs.
 pub mod secret_redaction;
 /// In-process server backend manager.
+#[cfg(feature = "proxy")]
 pub mod server;
 /// Tool-output compression for proxy-forwarded tool result messages.
 pub mod tool_output;
 /// Opt-in tool-call policy nudges for proxy-intercepted tool calls.
 pub mod tool_policy;
 /// Built-in tools like `respond`.
+#[cfg(feature = "proxy")]
 pub mod tools;
 
 // Legacy module-level re-exports for backwards compatibility and integration tests
+#[cfg(feature = "proxy")]
 pub use clients::base as client;
+#[cfg(feature = "proxy")]
 pub use clients::base as streaming;
+#[cfg(feature = "proxy")]
 pub use clients::sampling;
 pub use context::hardware;
 pub use context::strategies as compact;
 pub use core::steps;
+#[cfg(feature = "proxy")]
 pub use core::workflow;
 pub use prompts::nudges;
+#[cfg(feature = "proxy")]
 pub use tools::respond;
 
 #[cfg(feature = "classifier")]
@@ -51,23 +60,32 @@ pub use classifier_download::{
     runtime_required_files, validate_classifier_artifact_dir, ClassifierArtifactKind,
     ClassifierDownloadPlan, ClassifierDownloadReport,
 };
+#[cfg(feature = "proxy")]
 pub use clients::{
     apply_sampling_defaults, format_tool, get_sampling_defaults, AnthropicClient,
     AnyLlmProxyClient, AnyLlmRuntimeClient, ApiFormat, ChunkStream, ChunkType, LLMCallInfo,
-    LLMClient, LLMRateLimitInfo, LLMRequestOptions, LLMResponse, LLMResponseEnvelope,
-    LLMUsageDetails, LlamafileClient, OllamaClient, SamplingParams, StreamChunk, TextResponse,
-    TokenUsage, ToolCall, MODEL_SAMPLING_DEFAULTS,
+    LLMClient, LLMRateLimitInfo, LLMRequestOptions, LLMResponseEnvelope, LLMUsageDetails,
+    LlamafileClient, OllamaClient, SamplingParams, StreamChunk, TokenUsage,
+    MODEL_SAMPLING_DEFAULTS,
 };
 pub use context::{
     default_context_warning, detect_hardware, CompactEvent, CompactStrategy, ContextManager,
     HardwareProfile, MemoryKind, NoCompact, SlidingWindowCompact, TieredCompact,
 };
+// `LLMResponse` / `TextResponse` / `ToolCall` used to come out of `clients`
+// and now come out of `core::response`, so they survive `--no-default-features`
+// (the guardrails speak them). The crate-root spelling is unchanged.
+#[cfg(feature = "proxy")]
 pub use core::{
     fold_and_serialize, format_tool_call_id, run_inference, FinalResponseScoreFn, InferenceResult,
-    Message, MessageMeta, MessageRole, MessageType, OnChunkFn, OnMessageFn, ParamModel,
-    PrerequisiteCheck, SlotWorker, StepTracker, ToolCallInfo, ToolCallScoreFn, ToolDef, ToolSpec,
-    Workflow, WorkflowRunner,
+    OnChunkFn, OnMessageFn, SlotWorker, ToolCallScoreFn, WorkflowRunner,
 };
+pub use core::{
+    LLMResponse, Message, MessageMeta, MessageRole, MessageType, ParamModel, PrerequisiteCheck,
+    StepTracker, TextResponse, ToolCall, ToolCallInfo, ToolSpec,
+};
+#[cfg(feature = "proxy")]
+pub use core::{ToolDef, Workflow};
 pub use error::{
     BackendError, BudgetResolutionError, ContextBudgetExceeded, ContextDiscoveryError, ForgeError,
     HardwareDetectionError, MaxIterationsError, PrerequisiteError, StepEnforcementError,
@@ -75,24 +93,28 @@ pub use error::{
     UnsupportedModelError, WorkflowCancelledError,
 };
 pub use guardrails::{
-    final_response_top_k_from_logits, recent_errors_from_messages, score_final_response_async,
-    score_tool_call_async, serialize_final_response_state_v1, serialize_state_v1,
-    serialize_state_v2, serialize_state_v3, tool_call_top_k_from_logits, validate_tool_arguments,
-    validate_tool_call_batch, ArgValidationError, ArgValidationKind, ArtifactManifest,
-    CandidateCallForScoring, CheckResult, ClassifierAction, ClassifierArtifact,
-    ClassifierModelKind, ClassifierTopKEntry, ErrorTracker, FinalResponseClass,
-    FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScore, FinalResponseScorer,
-    FinalResponseToolResult, GuardAction, GuardrailDecision, GuardrailHistory, GuardrailState,
-    GuardrailViolation, Guardrails, LabelThreshold, LabelsFile, NoopFinalResponseScorer,
-    NoopToolCallScorer, Nudge, RetryNudgeFn, ScorerMode, ScoringContext, ScoringExecutor,
-    ScoringMetadata, ScoringPipeline, StepCheck, StepEnforcer, StepPrerequisite, TerminalTool,
-    Thresholds, ToolCallClass, ToolCallScore, ToolCallScorer, ToolSpecForScoring, ValidationResult,
+    final_response_top_k_from_logits, recent_errors_from_messages,
+    serialize_final_response_state_v1, serialize_state_v1, serialize_state_v2, serialize_state_v3,
+    tool_call_top_k_from_logits, validate_tool_arguments, validate_tool_call_batch,
+    ArgValidationError, ArgValidationKind, ArtifactManifest, CandidateCallForScoring, CheckResult,
+    ClassifierAction, ClassifierArtifact, ClassifierModelKind, ClassifierTopKEntry, ErrorTracker,
+    FinalResponseClass, FinalResponseClassifierArtifact, FinalResponseContext, FinalResponseScore,
+    FinalResponseScorer, FinalResponseToolResult, GuardAction, GuardrailDecision, GuardrailHistory,
+    GuardrailState, GuardrailViolation, Guardrails, LabelThreshold, LabelsFile,
+    NoopFinalResponseScorer, NoopToolCallScorer, Nudge, RetryNudgeFn, ScorerMode, ScoringContext,
+    ScoringMetadata, StepCheck, StepEnforcer, StepPrerequisite, TerminalTool, Thresholds,
+    ToolCallClass, ToolCallScore, ToolCallScorer, ToolSpecForScoring, ValidationResult,
     WorkflowStateForScoring, DEFAULT_CLASSIFIER_REPO, DEFAULT_CLASSIFIER_REVISION,
     DEFAULT_FINAL_RESPONSE_CLASSIFIER_REPO, DEFAULT_FINAL_RESPONSE_CLASSIFIER_REVISION,
     EXPECTED_LABELS, FINAL_RESPONSE_ARTIFACT_SCHEMA_VERSION, FINAL_RESPONSE_EXPECTED_LABELS,
     FINAL_RESPONSE_INPUT_SCHEMA_VERSION, FINAL_RESPONSE_SERIALIZER,
     FINAL_RESPONSE_THRESHOLDS_SCHEMA_VERSION, LEGACY_EXPECTED_LABELS, NEXT_INPUT_SCHEMA_VERSION,
     NEXT_SERIALIZER, V3_SERIALIZER,
+};
+// The async scoring drivers need a Tokio runtime; see `guardrails/scoring.rs`.
+#[cfg(feature = "proxy")]
+pub use guardrails::{
+    score_final_response_async, score_tool_call_async, ScoringExecutor, ScoringPipeline,
 };
 #[cfg(feature = "classifier")]
 pub use guardrails::{
@@ -102,6 +124,7 @@ pub use prompts::{
     build_tool_prompt, classifier_nudge, extract_tool_call, prerequisite_nudge, rescue_tool_call,
     retry_nudge, step_nudge, unknown_tool_nudge, unsafe_batch_nudge,
 };
+#[cfg(feature = "proxy")]
 pub use proxy::{
     extract_passthrough, extract_sampling, handle_anthropic_messages,
     handle_anthropic_messages_with_scorer, handle_anthropic_messages_with_scorers,
@@ -127,6 +150,7 @@ pub use secret_redaction::{
     redact_proxy_request_inputs, SecretRedactionError, SecretRedactionSummary,
     SECRET_REDACTION_MARKER,
 };
+#[cfg(feature = "proxy")]
 pub use server::{setup_backend, BudgetMode, ServerManager};
 pub use tool_output::{
     canonical_tool_name, compress_tool_output, detect_family, estimate_tokens,
@@ -138,4 +162,5 @@ pub use tool_policy::{
     evaluate_tool_call_policy, ToolCallPolicyConfig, ToolCallPolicyMode, ToolCallPolicyNudge,
     ToolCallPolicyRequestState, DEFAULT_MAX_WRITE_PAYLOAD_BYTES,
 };
+#[cfg(feature = "proxy")]
 pub use tools::{respond_spec, respond_tool, RESPOND_TOOL_NAME};

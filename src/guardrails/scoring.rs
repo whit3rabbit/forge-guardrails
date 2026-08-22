@@ -3,11 +3,12 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
+#[cfg(feature = "proxy")]
 use std::sync::{Arc, LazyLock};
 
 use serde::Serialize;
 
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::guardrails::classifier_artifact::{
     EXPECTED_LABELS, FINAL_RESPONSE_EXPECTED_LABELS, LEGACY_EXPECTED_LABELS,
 };
@@ -15,6 +16,12 @@ use crate::guardrails::scoring_context::{
     ScoringContext, ScoringMetadata, WorkflowStateForScoring,
 };
 
+// The async scoring DRIVERS below need a Tokio runtime (a semaphore plus
+// `spawn_blocking`), so they belong to the `proxy` feature. The scorer
+// TRAITS, the score/class types and the serializers above and below them
+// stay unconditional: they are the vocabulary a caller with its own loop
+// implements, and they need nothing but serde.
+#[cfg(feature = "proxy")]
 static DEFAULT_SCORING_EXECUTOR: LazyLock<ScoringExecutor> =
     LazyLock::new(ScoringExecutor::default);
 
@@ -224,11 +231,13 @@ pub trait ToolCallScorer: Send + Sync {
 }
 
 /// Bounded async executor for synchronous classifier scorers.
+#[cfg(feature = "proxy")]
 #[derive(Clone)]
 pub struct ScoringExecutor {
     semaphore: Arc<tokio::sync::Semaphore>,
 }
 
+#[cfg(feature = "proxy")]
 impl ScoringExecutor {
     /// Create a classifier scoring executor with bounded concurrency.
     pub fn new(max_concurrency: usize) -> Self {
@@ -278,6 +287,7 @@ impl ScoringExecutor {
     }
 }
 
+#[cfg(feature = "proxy")]
 impl Default for ScoringExecutor {
     fn default() -> Self {
         Self::new(Self::default_concurrency())
@@ -285,6 +295,7 @@ impl Default for ScoringExecutor {
 }
 
 /// Shared async scoring pipeline for tool-call and final-response classifiers.
+#[cfg(feature = "proxy")]
 #[derive(Clone)]
 pub struct ScoringPipeline {
     tool_call_scorer: Option<Arc<dyn ToolCallScorer>>,
@@ -292,6 +303,7 @@ pub struct ScoringPipeline {
     executor: ScoringExecutor,
 }
 
+#[cfg(feature = "proxy")]
 impl ScoringPipeline {
     /// Create a pipeline with the default bounded scoring executor.
     pub fn new(
@@ -391,6 +403,7 @@ impl ScoringPipeline {
     }
 }
 
+#[cfg(feature = "proxy")]
 impl Default for ScoringPipeline {
     fn default() -> Self {
         Self::new(None, None)
@@ -481,6 +494,7 @@ pub trait FinalResponseScorer: Send + Sync {
     fn score(&self, ctx: &FinalResponseContext) -> anyhow::Result<FinalResponseScore>;
 }
 
+#[cfg(feature = "proxy")]
 impl ScoringExecutor {
     /// Score one final response on Tokio's blocking pool.
     pub async fn score_final_response_async(
@@ -496,6 +510,7 @@ impl ScoringExecutor {
 }
 
 /// Score one tool call on the shared bounded scoring executor.
+#[cfg(feature = "proxy")]
 pub async fn score_tool_call_async(
     scorer: Arc<dyn ToolCallScorer>,
     ctx: Arc<ScoringContext>,
@@ -507,6 +522,7 @@ pub async fn score_tool_call_async(
 }
 
 /// Score one final response on the shared bounded scoring executor.
+#[cfg(feature = "proxy")]
 pub async fn score_final_response_async(
     scorer: Arc<dyn FinalResponseScorer>,
     ctx: Arc<FinalResponseContext>,

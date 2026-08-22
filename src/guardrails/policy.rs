@@ -1,6 +1,6 @@
 //! Structured guardrail policy types and deterministic argument validation.
 
-use crate::clients::base::ToolCall;
+use crate::core::response::ToolCall;
 use crate::core::tool_spec::{ParamModel, ToolSpec};
 use crate::guardrails::nudge::Nudge;
 use indexmap::{IndexMap, IndexSet};

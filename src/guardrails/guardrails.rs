@@ -4,7 +4,7 @@ use super::response_validator::{ResponseValidator, RetryNudgeFn};
 use super::scoring::{ClassifierAction, ToolCallScore, ToolCallScorer};
 use super::scoring_context::ScoringContext;
 use super::step_enforcer::{StepEnforcer, StepPrerequisite};
-use crate::clients::base::{LLMResponse, ToolCall};
+use crate::core::response::{LLMResponse, ToolCall};
 use crate::prompts::nudges;
 use indexmap::IndexSet;
 use std::sync::Arc;
