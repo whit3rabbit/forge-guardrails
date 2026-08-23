@@ -7,3 +7,10 @@ forge/
 .agents/
 .claude/
 .codex/
+# Model weights are never copied into either image, but an 8G local GGUF in
+# the repo root still ships to the builder as build context without this.
+*.gguf
+*.onnx
+model/
+notebook/
+workspace/

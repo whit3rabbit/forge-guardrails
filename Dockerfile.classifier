@@ -5,15 +5,18 @@ FROM rust:trixie AS builder
 ARG ANYLLM_PROXY_VERSION=0.9.9
 ARG CLASSIFIER_MODEL=quantized
 ARG CLASSIFIER_OUTPUT_DIR=/opt/forge/classifiers/tool-call
+# See the note in Dockerfile: unnamed cache mounts collide across arches in a
+# multi-platform build, so every cache id is scoped per platform.
+ARG TARGETPLATFORM
 ENV LD_LIBRARY_PATH=/usr/local/lib/forge-onnxruntime:/usr/local/lib
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-classifier-${TARGETPLATFORM},sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-classifier-${TARGETPLATFORM},sharing=locked \
+    --mount=type=cache,target=/app/target,id=forge-target-classifier-${TARGETPLATFORM},sharing=locked \
     cargo build --release --locked --features classifier --bin forge-guardrails-proxy --bin download-classifier && \
     cp target/release/forge-guardrails-proxy /usr/local/bin/forge-guardrails-proxy && \
     cp target/release/download-classifier /usr/local/bin/download-classifier && \
@@ -26,9 +29,9 @@ RUN /usr/local/bin/download-classifier \
     --output-dir "${CLASSIFIER_OUTPUT_DIR}" \
     --classifier-model "${CLASSIFIER_MODEL}"
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target-anyllm \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-classifier-${TARGETPLATFORM},sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-classifier-${TARGETPLATFORM},sharing=locked \
+    --mount=type=cache,target=/app/target-anyllm,id=anyllm-target-classifier-${TARGETPLATFORM},sharing=locked \
     CARGO_TARGET_DIR=/app/target-anyllm cargo install anyllm_proxy --version "${ANYLLM_PROXY_VERSION}" --locked --root /usr/local && \
     strip /usr/local/bin/anyllm_proxy
 
