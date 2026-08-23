@@ -335,8 +335,23 @@ enable it by default, but it must still support `FORGE_CLASSIFIER_MODE=disabled`
 at runtime. Do not bundle GGUF/provider LLM weights into either Docker image
 unless explicitly asked.
 
-Publish Docker Hub image `followthewhit3rabbit/forge-guardrails` only when
-explicitly asked to publish:
+Docker Hub image `followthewhit3rabbit/forge-guardrails` is published by the
+release workflow on every `v*.*.*` tag, in the `docker-build` and
+`docker-manifest` jobs. Each architecture builds natively (`ubuntu-latest` for
+amd64, `ubuntu-24.04-arm` for arm64) and pushes by digest; the manifest job
+merges the digests into `${version}` and `latest`. Emulating an amd64 Rust
+release build under QEMU takes hours, which is why the arches are split rather
+than built with a single `--platform` invocation.
+
+The jobs need `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` Actions secrets on
+this repo, and the token must have write access to the
+`followthewhit3rabbit` namespace. When either secret is absent, the
+`docker-preflight` job sets `available=false` and the image jobs skip instead
+of failing the release. The `secrets` context is not readable from a job-level
+`if`, which is why the gate is an output rather than a direct condition.
+
+Publish manually only when explicitly asked, for an out-of-band image outside
+the tag flow:
 
 ```bash
 docker login -u followthewhit3rabbit
@@ -375,7 +390,9 @@ git push origin v0.1.3
   `ANYLLM_PROXY_VERSION` when the bundled anyllm proxy version changes.
 - The workflow publishes the crate with `cargo publish --locked`, builds
   platform archives for `forge-guardrails-proxy`, publishes the GitHub release,
-  and updates `whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is set.
+  pushes the multi-arch Docker Hub image when `DOCKERHUB_USERNAME` and
+  `DOCKERHUB_TOKEN` are set, and updates `whit3rabbit/homebrew-tap` when
+  `HOMEBREW_TAP_TOKEN` is set.
 - `HOMEBREW_TAP_TOKEN` must be an Actions secret on
   `whit3rabbit/forge-guardrails`, because this repo owns the release workflow.
   The token itself must have read/write `Contents` access to
@@ -390,8 +407,9 @@ gh secret list --repo whit3rabbit/forge-guardrails
 - Do not run `cargo publish` or manually edit the Homebrew cask unless the
   workflow fails and the user explicitly asks for manual recovery.
 - If the tag release already published to crates.io, do not rerun the whole
-  release workflow. Rerun only the `Update Homebrew Cask` job, otherwise
-  `cargo publish` will fail because crates.io versions are immutable:
+  release workflow. Rerun only the job that failed, such as `Update Homebrew
+  Cask` or `Publish Docker manifest`, otherwise `cargo publish` will fail
+  because crates.io versions are immutable:
 
 ```bash
 gh run view <release-run-id> --json jobs --jq '.jobs[] | {name,databaseId,status,conclusion}'

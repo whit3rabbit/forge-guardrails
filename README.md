@@ -119,9 +119,10 @@ git push origin v0.1.3
 
 The release workflow verifies the tag matches the crate version, runs format,
 clippy, tests, `cargo package`, and `cargo publish`, builds platform archives
-for `forge-guardrails-proxy`, publishes the GitHub release, then updates
-`whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN` is configured. Users can
-install the cask with:
+for `forge-guardrails-proxy`, publishes the GitHub release, pushes the
+multi-arch Docker image when `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are
+configured, then updates `whit3rabbit/homebrew-tap` when `HOMEBREW_TAP_TOKEN`
+is configured. Users can install the cask with:
 
 ```bash
 brew install --cask whit3rabbit/tap/forge-guardrails-proxy
